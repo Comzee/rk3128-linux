@@ -1,0 +1,39 @@
+Linux-port HEVC speed (development record #379): drm/rockchip: lvds: keep the panel after bind.
+
+Since 7.x rockchip_lvds_bind() drops its panel right after drm_panel_bridge_add_typed()
+(drm_panel_put(), lvds->panel = NULL), yet it then replaces the new bridge's funcs with
+rockchip_lvds_bridge_funcs, whose get_modes is drm_panel_get_modes(lvds->panel), and the
+encoder's enable/disable prepare and enable lvds->panel. With the panel gone the bridge
+connector has no modes, DRM falls back to 1024x768 (the board's panel showed the fbcon at
+1024x768 on 7.3.1), and the panel is never prepared or enabled by DRM. Keep the panel and
+its reference until unbind, as before the panel refcounting; the bind error path already
+puts it.
+
+--- a/drivers/gpu/drm/rockchip/rockchip_lvds.c	2026-11-06 15:17:28.440993987 -0600
++++ b/drivers/gpu/drm/rockchip/rockchip_lvds.c	2026-11-06 15:17:28.450690495 -0600
+@@ -727,8 +727,12 @@
+ 
+ 	if (lvds->panel) {
+ 		lvds->bridge = drm_panel_bridge_add_typed(lvds->panel, DRM_MODE_CONNECTOR_LVDS);
+-		drm_panel_put(lvds->panel);
+-		lvds->panel = NULL;
++		/*
++		 * Keep the panel (and its reference) until unbind: the bridge funcs below
++		 * replace the panel bridge's, so the connector's modes come from
++		 * rockchip_lvds_bridge_get_modes() and the panel is powered by the
++		 * encoder's enable/disable, all through lvds->panel.
++		 */
+ 		if (IS_ERR(lvds->bridge)) {
+ 			ret = PTR_ERR(lvds->bridge);
+ 			goto err_free_encoder;
+@@ -783,6 +787,10 @@
+ 	encoder_funcs = lvds->soc_data->helper_funcs;
+ 	encoder_funcs->disable(&lvds->encoder.encoder);
+ 	pm_runtime_disable(dev);
++	if (lvds->panel) {
++		drm_panel_put(lvds->panel);
++		lvds->panel = NULL;
++	}
+ }
+ 
+ static const struct component_ops rockchip_lvds_component_ops = {

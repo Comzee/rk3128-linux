@@ -1,0 +1,30 @@
+From 19d9f6ee71717b0b11a1edcf4b8c2aaec5a53964 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 02:04:34 -0600
+Subject: [PATCH] media: verisilicon: log G1 frames that end without DEC_RDY
+
+A G1 frame that ends without DEC_RDY (a timeout, a stream or bus error)
+is returned with VB2_BUF_STATE_ERROR, which GStreamer and FFmpeg's
+stateless decoders do not look at, so nothing shows it. Log the status
+word, rate-limited.
+---
+ drivers/media/platform/verisilicon/hantro_g1.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/drivers/media/platform/verisilicon/hantro_g1.c b/drivers/media/platform/verisilicon/hantro_g1.c
+index 0ab1cee..3207441 100644
+--- a/drivers/media/platform/verisilicon/hantro_g1.c
++++ b/drivers/media/platform/verisilicon/hantro_g1.c
+@@ -20,6 +20,9 @@ irqreturn_t hantro_g1_irq(int irq, void *dev_id)
+ 	status = vdpu_read(vpu, G1_REG_INTERRUPT);
+ 	state = (status & G1_REG_INTERRUPT_DEC_RDY_INT) ?
+ 		 VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR;
++	if (state == VB2_BUF_STATE_ERROR)
++		dev_warn_ratelimited(vpu->dev, "G1 decode error, status 0x%08x\n",
++				     status);
+ 
+ 	vdpu_write(vpu, 0, G1_REG_INTERRUPT);
+ 	vdpu_write(vpu, G1_REG_CONFIG_DEC_CLK_GATE_E, G1_REG_CONFIG);
+-- 
+2.53.0
+

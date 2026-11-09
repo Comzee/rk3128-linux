@@ -1,0 +1,68 @@
+Linux-port render parity (development record #407): drm/rockchip: vop: RK3126/RK3128 LVDS dclk enable and polarity.
+
+The RK312x VOP has a dclk output of its own for the LVDS transmitter in AXI_BUS_CTRL (0x2c):
+bit 26 LVDS_DCLK_EN and bit 27 LVDS_DCLK_INVERT (rk312x_lcdc.h of the Rockchip 3.10 kernel,
+lvds_en/lvds_dclk_pol in the 4.4 DRM driver's rk3036_ctrl_data). The vendor kernel's
+rk312x_load_screen() sets both for SCREEN_LVDS ("if LVDS transmitter source from VOP, vop_dclk
+need get invert"), and the board's u-boot leaves AXI_BUS_CTRL = 0x0c000000. rk3126_output only
+describes the RGB, HDMI and MIPI outputs, so an LVDS connector set rgb_en/rgb_dclk_pol (bits
+24/25) instead: the LVDS transmitter then ran on the non-inverted dclk (bit 26 is on by reset,
+bit 27 off; AXI_BUS_CTRL read 0x17500000 on the board, #407 attempt 1) and sampled the VOP's pixel bus at the
+wrong edge. The picture was right in flat areas and wrong at pixel transitions: a reddish
+1-px outline around every element and sparkly text on the panel, with the buffers themselves
+correct.
+
+Describe lvds_en and lvds_dclk_pol for rk3126 and, for an LVDS connector on a VOP that has
+them, set those (inverted) and turn the RGB output, which is on after reset, off, as u-boot leaves it
+(AXI_BUS_CTRL bits 27:24 = 0xc). The TVE, HDMI and MIPI dclk enables (bits 20, 22, 28: reset
+defaults, off in u-boot's state) feed blocks the board does not use and are left alone.
+
+--- a/drivers/gpu/drm/rockchip/rockchip_drm_vop.c
++++ b/drivers/gpu/drm/rockchip/rockchip_drm_vop.c
+@@ -1407,6 +1407,18 @@
+ 
+ 	switch (s->output_type) {
+ 	case DRM_MODE_CONNECTOR_LVDS:
++		/*
++		 * A VOP with an LVDS dclk of its own (RK3126/RK3128) feeds the
++		 * LVDS transmitter through it, inverted, as the vendor kernel and
++		 * u-boot program it; the RGB output (on after reset) goes off.
++		 */
++		if (vop->data->output->lvds_en.mask) {
++			VOP_REG_SET(vop, output, lvds_dclk_pol, 1);
++			VOP_REG_SET(vop, output, lvds_en, 1);
++			VOP_REG_SET(vop, output, rgb_dclk_pol, 0);
++			VOP_REG_SET(vop, output, rgb_en, 0);
++			break;
++		}
+ 		VOP_REG_SET(vop, output, rgb_dclk_pol, 1);
+ 		VOP_REG_SET(vop, output, rgb_pin_pol, pin_pol);
+ 		VOP_REG_SET(vop, output, rgb_en, 1);
+--- a/drivers/gpu/drm/rockchip/rockchip_drm_vop.h
++++ b/drivers/gpu/drm/rockchip/rockchip_drm_vop.h
+@@ -100,12 +100,14 @@
+ 	struct vop_reg mipi_dclk_pol;
+ 	struct vop_reg rgb_pin_pol;
+ 	struct vop_reg rgb_dclk_pol;
++	struct vop_reg lvds_dclk_pol;
+ 	struct vop_reg dp_en;
+ 	struct vop_reg edp_en;
+ 	struct vop_reg hdmi_en;
+ 	struct vop_reg mipi_en;
+ 	struct vop_reg mipi_dual_channel_en;
+ 	struct vop_reg rgb_en;
++	struct vop_reg lvds_en;
+ };
+ 
+ struct vop_common {
+--- a/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
++++ b/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+@@ -233,6 +233,8 @@
+ 	.hdmi_dclk_pol = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 23),
+ 	.rgb_en = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 24),
+ 	.rgb_dclk_pol = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 25),
++	.lvds_en = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 26),
++	.lvds_dclk_pol = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 27),
+ 	.mipi_en = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 28),
+ 	.mipi_dclk_pol = VOP_REG(RK3036_AXI_BUS_CTRL, 0x1, 29),
+ };

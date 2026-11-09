@@ -1,0 +1,16 @@
+Linux-port board basics (development record #302): let cpufreq-dt bind on RK3128.
+
+rk3128.dtsi carries an OPP table and ARMCLK, but "rockchip,rk3128" is not in the
+cpufreq-dt-platdev allowlist, so no cpufreq-dt device is ever created. The board DT then
+supplies cpu-supply (the PWM vdd_arm rail).
+
+--- a/drivers/cpufreq/cpufreq-dt-platdev.c	2026-11-06 09:14:06.701009962 -0600
++++ b/drivers/cpufreq/cpufreq-dt-platdev.c	2026-11-06 09:14:14.086688362 -0600
+@@ -70,6 +70,7 @@
+ 	{ .compatible = "rockchip,rk3036", },
+ 	{ .compatible = "rockchip,rk3066a", },
+ 	{ .compatible = "rockchip,rk3066b", },
++	{ .compatible = "rockchip,rk3128", },
+ 	{ .compatible = "rockchip,rk3188", },
+ 	{ .compatible = "rockchip,rk3228", },
+ 	{ .compatible = "rockchip,rk3288", },

@@ -1,0 +1,328 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:47:10 -0600
+Subject: [PATCH] drm/lima: invalidate the L2 lines of page tables the CPU
+ writes
+
+The page tables live in DDR and the GPU's MMU reads them through the same L2
+cache the cores use, so a PDE or PTE the CPU has just written can be hidden
+by a stale L2 line. The walk then sees the old entry: zero for a fresh
+mapping, which is a page fault of type read, or a translation to a page the
+kernel has already given to somebody else for an unmap.
+
+Today lima hides this behind a full CLEAR_ALL before every task. Taking that
+away (the next patch) needs the maintenance done where the write happens,
+which is what the vendor Utgard r6p0 driver does:
+
+  mali_mmu_pagedir_unmap   0xc038aeb4  ... _mali_osk_write_mem_barrier
+                                       0xc038b064 mali_l2_cache_invalidate_all
+                                         (more pages touched than its array
+                                          holds, or a page table was freed)
+                                       0xc038b074 mali_l2_cache_invalidate_all_pages
+  mali_l2_cache_invalidate_all_pages  0xc0394e94  per L2: skip when
+                                       l2->power_is_on != 1 (0xc0394ebc),
+                                       else CLEAR_PAGE (register 0x14) once
+                                       per page-table page
+  mali_mmu_pagedir_map     0xc038ad48  write memory barrier only
+
+Add lima_l2_cache_flush_pagetables() with the same shape, including the
+"skip a powered-down L2" rule: a suspended GPU has nothing cached, and
+lima_l2_cache_resume() -> lima_l2_cache_hw_init() clears it anyway.
+pm_runtime_get_if_in_use() is the test, so this never resumes the GPU from a
+path that holds no PM reference.
+
+lima calls it from the places that write page tables, batched per BO rather
+than per page: lima_vm_bo_add(), lima_vm_map_bo() (the GP heap grow),
+lima_vm_bo_del() and lima_vm_create(). The page-table pages of a VA range
+are computed from the range itself, plus the page directory page when the
+batch allocated a new block of page tables; more than
+LIMA_L2_MAX_CLEAR_PAGES of them falls back to one CLEAR_ALL, as the vendor's
+does. lima_vm_create() also clears the fresh page directory page, which
+comes from the DMA pool and can still have lines of an earlier VM cached.
+
+Cost: a few register writes per BO map/unmap, i.e. per glBufferData, not per
+job. Against it, this removes the only reason lima needs a CLEAR_ALL before
+every task.
+
+Risk to pictures: none. It only invalidates; no arithmetic, no change to
+what the GPU reads.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_l2_cache.c | 70 ++++++++++++++++++++++++++
+ drivers/gpu/drm/lima/lima_l2_cache.h |  6 +++
+ drivers/gpu/drm/lima/lima_vm.c       | 74 ++++++++++++++++++++++++++--
+ 3 files changed, 146 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_l2_cache.c b/drivers/gpu/drm/lima/lima_l2_cache.c
+index 7418837..f251dfd 100644
+--- a/drivers/gpu/drm/lima/lima_l2_cache.c
++++ b/drivers/gpu/drm/lima/lima_l2_cache.c
+@@ -3,6 +3,7 @@
+ 
+ #include <linux/iopoll.h>
+ #include <linux/device.h>
++#include <linux/pm_runtime.h>
+ 
+ #include "lima_device.h"
+ #include "lima_drv.h"
+@@ -40,6 +41,75 @@ int lima_l2_cache_flush(struct lima_ip *ip)
+ 	return ret;
+ }
+ 
++/*
++ * The GPU reads the page tables through its L2 cache, so an entry the CPU
++ * has just written can be shadowed by a stale L2 line: the table walk then
++ * sees the old entry. For a fresh mapping that is a zero PDE/PTE, i.e. a
++ * page fault of type read; for an unmap it is a translation to a page the
++ * kernel has given to somebody else.
++ *
++ * The vendor Utgard driver does not leave this to its per-job invalidate.
++ * mali_mmu_pagedir_unmap (0xc038aeb4) ends with a write memory barrier and
++ * then either mali_l2_cache_invalidate_all (0xc038b064) when it touched more
++ * page-table pages than its small array holds, or
++ * mali_l2_cache_invalidate_all_pages (0xc038b074 -> 0xc0394e94), which sends
++ * the CLEAR_PAGE command (register 0x14) once per page-table page, skipping
++ * an L2 whose power is off (0xc0394ebc: l2->power_is_on != 1). That is what
++ * lets its per-job invalidate be conditional.
++ *
++ * Do the same. An L2 that is powered down needs nothing: the next
++ * lima_l2_cache_resume() -> lima_l2_cache_hw_init() clears it completely.
++ */
++static void lima_l2_cache_clear_pages(struct lima_ip *ip,
++				      const dma_addr_t *pa, int num)
++{
++	int i;
++
++	spin_lock(&ip->data.lock);
++
++	if (num > LIMA_L2_MAX_CLEAR_PAGES) {
++		l2_cache_write(LIMA_L2_CACHE_COMMAND,
++			       LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
++		lima_l2_cache_wait_idle(ip);
++		goto out;
++	}
++
++	for (i = 0; i < num; i++) {
++		if (lima_l2_cache_wait_idle(ip))
++			break;
++		l2_cache_write(LIMA_L2_CACHE_CLEAR_PAGE, (u32)pa[i]);
++	}
++	lima_l2_cache_wait_idle(ip);
++
++out:
++	spin_unlock(&ip->data.lock);
++}
++
++void lima_l2_cache_flush_pagetables(struct lima_device *ldev,
++				    const dma_addr_t *pa, int num)
++{
++	int i;
++
++	if (num <= 0)
++		return;
++
++	/*
++	 * Only touch the hardware if somebody already holds it active. A
++	 * suspended GPU has nothing cached, and resuming it here would both
++	 * be wrong (we may be inside a submit path with no PM reference) and
++	 * pointless.
++	 */
++	if (pm_runtime_get_if_in_use(ldev->dev) <= 0)
++		return;
++
++	for (i = lima_ip_l2_cache0; i <= lima_ip_l2_cache2; i++) {
++		if (ldev->ip[i].present)
++			lima_l2_cache_clear_pages(ldev->ip + i, pa, num);
++	}
++
++	pm_runtime_put_autosuspend(ldev->dev);
++}
++
+ static int lima_l2_cache_hw_init(struct lima_ip *ip)
+ {
+ 	int err;
+diff --git a/drivers/gpu/drm/lima/lima_l2_cache.h b/drivers/gpu/drm/lima/lima_l2_cache.h
+index 1aeeefd..94e7fff 100644
+--- a/drivers/gpu/drm/lima/lima_l2_cache.h
++++ b/drivers/gpu/drm/lima/lima_l2_cache.h
+@@ -5,6 +5,7 @@
+ #define __LIMA_L2_CACHE_H__
+ 
+ struct lima_ip;
++struct lima_device;
+ 
+ int lima_l2_cache_resume(struct lima_ip *ip);
+ void lima_l2_cache_suspend(struct lima_ip *ip);
+@@ -13,4 +14,9 @@ void lima_l2_cache_fini(struct lima_ip *ip);
+ 
+ int lima_l2_cache_flush(struct lima_ip *ip);
+ 
++/* number of page-granular invalidates we do instead of one CLEAR_ALL */
++#define LIMA_L2_MAX_CLEAR_PAGES 8
++void lima_l2_cache_flush_pagetables(struct lima_device *ldev,
++				    const dma_addr_t *pa, int num);
++
+ #endif
+diff --git a/drivers/gpu/drm/lima/lima_vm.c b/drivers/gpu/drm/lima/lima_vm.c
+index c1b75b1..241033c 100644
+--- a/drivers/gpu/drm/lima/lima_vm.c
++++ b/drivers/gpu/drm/lima/lima_vm.c
+@@ -7,6 +7,7 @@
+ #include "lima_device.h"
+ #include "lima_vm.h"
+ #include "lima_gem.h"
++#include "lima_l2_cache.h"
+ #include "lima_regs.h"
+ 
+ struct lima_bo_va {
+@@ -32,6 +33,46 @@ struct lima_bo_va {
+ #define LIMA_BTE(va) ((va & LIMA_VM_BT_MASK) >> LIMA_VM_BT_SHIFT)
+ 
+ 
++/*
++ * Invalidate the L2 lines of the page-table pages that back [start, end], so
++ * the GPU's table walk cannot read an entry the CPU has just written through
++ * a stale line. See lima_l2_cache_flush_pagetables() for the vendor driver's
++ * equivalent (the tail of mali_mmu_pagedir_map/unmap).
++ *
++ * pd tells it the page directory page itself was written too (a new block of
++ * page tables was allocated for this range).
++ */
++static void lima_vm_flush_pagetables(struct lima_vm *vm, u32 start, u32 end,
++				     bool pd)
++{
++	dma_addr_t pa[LIMA_L2_MAX_CLEAR_PAGES + 1];
++	int num = 0;
++	u64 addr;
++
++	if (pd)
++		pa[num++] = vm->pd.dma;
++
++	for (addr = start & ~(u64)LIMA_VM_PT_MASK; addr <= end;
++	     addr += LIMA_VM_PT_MASK + 1ULL) {
++		u32 pbe = LIMA_PBE((u32)addr);
++
++		if (!vm->bts[pbe].cpu)
++			continue;
++
++		if (num == ARRAY_SIZE(pa)) {
++			/* too many: one CLEAR_ALL, as the vendor driver does */
++			num = ARRAY_SIZE(pa);
++			break;
++		}
++
++		pa[num++] = vm->bts[pbe].dma +
++			(((u32)addr >> LIMA_VM_PD_SHIFT) &
++			 (LIMA_VM_NUM_PT_PER_BT - 1)) * LIMA_PAGE_SIZE;
++	}
++
++	lima_l2_cache_flush_pagetables(vm->dev, pa, num);
++}
++
+ static void lima_vm_unmap_range(struct lima_vm *vm, u32 start, u32 end)
+ {
+ 	u32 addr;
+@@ -44,7 +85,8 @@ static void lima_vm_unmap_range(struct lima_vm *vm, u32 start, u32 end)
+ 	}
+ }
+ 
+-static int lima_vm_map_page(struct lima_vm *vm, dma_addr_t pa, u32 va)
++static int lima_vm_map_page(struct lima_vm *vm, dma_addr_t pa, u32 va,
++			    bool *new_pt)
+ {
+ 	u32 pbe = LIMA_PBE(va);
+ 	u32 bte = LIMA_BTE(va);
+@@ -66,6 +108,9 @@ static int lima_vm_map_page(struct lima_vm *vm, dma_addr_t pa, u32 va)
+ 			pd[j] = pts | LIMA_VM_FLAG_PRESENT;
+ 			pts += LIMA_PAGE_SIZE;
+ 		}
++
++		if (new_pt)
++			*new_pt = true;
+ 	}
+ 
+ 	vm->bts[pbe].cpu[bte] = pa | LIMA_VM_FLAGS_CACHE;
+@@ -93,6 +138,7 @@ int lima_vm_bo_add(struct lima_vm *vm, struct lima_bo *bo, bool create)
+ 	struct lima_bo_va *bo_va;
+ 	struct sg_dma_page_iter sg_iter;
+ 	int offset = 0, err;
++	bool new_pt = false;
+ 
+ 	mutex_lock(&bo->lock);
+ 
+@@ -126,13 +172,18 @@ int lima_vm_bo_add(struct lima_vm *vm, struct lima_bo *bo, bool create)
+ 
+ 	for_each_sgtable_dma_page(bo->base.sgt, &sg_iter, 0) {
+ 		err = lima_vm_map_page(vm, sg_page_iter_dma_address(&sg_iter),
+-				       bo_va->node.start + offset);
++				       bo_va->node.start + offset, &new_pt);
+ 		if (err)
+ 			goto err_out2;
+ 
+ 		offset += PAGE_SIZE;
+ 	}
+ 
++	if (offset)
++		lima_vm_flush_pagetables(vm, bo_va->node.start,
++					 bo_va->node.start + offset - 1,
++					 new_pt);
++
+ 	mutex_unlock(&vm->lock);
+ 
+ 	list_add_tail(&bo_va->list, &bo->va);
+@@ -170,6 +221,8 @@ void lima_vm_bo_del(struct lima_vm *vm, struct lima_bo *bo)
+ 	size = bo->heap_size ? bo->heap_size : bo_va->node.size;
+ 	lima_vm_unmap_range(vm, bo_va->node.start,
+ 			    bo_va->node.start + size - 1);
++	lima_vm_flush_pagetables(vm, bo_va->node.start,
++				 bo_va->node.start + size - 1, false);
+ 
+ 	drm_mm_remove_node(&bo_va->node);
+ 
+@@ -216,9 +269,18 @@ struct lima_vm *lima_vm_create(struct lima_device *dev)
+ 
+ 	if (dev->dlbu_cpu) {
+ 		int err = lima_vm_map_page(
+-			vm, dev->dlbu_dma, LIMA_VA_RESERVE_DLBU);
++			vm, dev->dlbu_dma, LIMA_VA_RESERVE_DLBU, NULL);
+ 		if (err)
+ 			goto err_out1;
++
++		lima_vm_flush_pagetables(vm, LIMA_VA_RESERVE_DLBU,
++					 LIMA_VA_RESERVE_DLBU, true);
++	} else {
++		/*
++		 * The page directory page comes from the DMA pool and the GPU
++		 * may still have lines of it cached from an earlier VM.
++		 */
++		lima_l2_cache_flush_pagetables(dev, &vm->pd.dma, 1);
+ 	}
+ 
+ 	drm_mm_init(&vm->mm, dev->va_start, dev->va_end - dev->va_start);
+@@ -285,6 +347,7 @@ int lima_vm_map_bo(struct lima_vm *vm, struct lima_bo *bo, int pageoff)
+ 	struct lima_bo_va *bo_va;
+ 	struct sg_dma_page_iter sg_iter;
+ 	int offset = 0, err;
++	bool new_pt = false;
+ 	u32 base;
+ 
+ 	mutex_lock(&bo->lock);
+@@ -300,13 +363,16 @@ int lima_vm_map_bo(struct lima_vm *vm, struct lima_bo *bo, int pageoff)
+ 	base = bo_va->node.start + (pageoff << PAGE_SHIFT);
+ 	for_each_sgtable_dma_page(bo->base.sgt, &sg_iter, pageoff) {
+ 		err = lima_vm_map_page(vm, sg_page_iter_dma_address(&sg_iter),
+-				       base + offset);
++				       base + offset, &new_pt);
+ 		if (err)
+ 			goto err_out1;
+ 
+ 		offset += PAGE_SIZE;
+ 	}
+ 
++	if (offset)
++		lima_vm_flush_pagetables(vm, base, base + offset - 1, new_pt);
++
+ 	mutex_unlock(&vm->lock);
+ 
+ 	mutex_unlock(&bo->lock);

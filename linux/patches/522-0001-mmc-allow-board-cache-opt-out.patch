@@ -1,0 +1,70 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] mmc: allow a board to opt out of the volatile eMMC cache
+
+The RK3128 reference board vendor keeps CACHE_CTRL=0 on its NCard eMMC. With no power-fail
+warning or established hold-up supply, use the same conservative policy.
+Explicitly set the volatile bit on every init/reinit (including an inherited
+cache-enabled card), before the block queue is created. Failure to disable
+is fatal to initialization; do not advertise a policy that did not take.
+Other boards retain the upstream default. Reliable writes and shutdown
+notification remain enabled. Disabling the cache may drain its contents,
+so allow the flush timeout rather than just the enable timeout.
+
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -13,6 +13,7 @@
+ #include <linux/stat.h>
+ #include <linux/string.h>
+ #include <linux/pm_runtime.h>
++#include <linux/property.h>
+ #include <linux/random.h>
+ #include <linux/sysfs.h>
+ 
+@@ -1891,12 +1892,16 @@
+ 	 * DEFAULT_CACHE_EN_TIMEOUT_MS and do it for all cards.
+ 	 */
+ 	if (card->ext_csd.cache_size > 0) {
+-		unsigned int timeout_ms = MIN_CACHE_EN_TIMEOUT_MS;
++		bool enable_cache = !device_property_read_bool(host->parent,
++							     "no-mmc-cache");
++		unsigned int timeout_ms = enable_cache ? MIN_CACHE_EN_TIMEOUT_MS :
++							CACHE_FLUSH_TIMEOUT_MS;
+ 
+ 		timeout_ms = max(card->ext_csd.generic_cmd6_time, timeout_ms);
+ 		err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
+-				EXT_CSD_CACHE_CTRL, 1, timeout_ms);
+-		if (err && err != -EBADMSG)
++				EXT_CSD_CACHE_CTRL, enable_cache, timeout_ms);
++		/* A requested write-through policy must never silently use cache. */
++		if (err && (!enable_cache || err != -EBADMSG))
+ 			goto free_card;
+ 
+ 		/*
+@@ -1907,7 +1912,10 @@
+ 				mmc_hostname(card->host), err);
+ 			card->ext_csd.cache_ctrl = 0;
+ 		} else {
+-			card->ext_csd.cache_ctrl = 1;
++			card->ext_csd.cache_ctrl = enable_cache;
++			if (!enable_cache)
++				pr_info("%s: eMMC cache disabled by board policy\n",
++					mmc_hostname(host));
+ 		}
+ 	}
+ 
+--- a/Documentation/devicetree/bindings/mmc/mmc-controller-common.yaml
++++ b/Documentation/devicetree/bindings/mmc/mmc-controller-common.yaml
+@@ -251,6 +251,13 @@
+     description:
+       Controller is limited to send SD commands during initialization.
+ 
++  no-mmc-cache:
++    $ref: /schemas/types.yaml#/definitions/flag
++    description:
++      Keep the eMMC volatile write cache disabled. Use for boards whose storage
++      policy prefers write-through operation on an unannounced loss of power.
++      This does not disable the operating system page cache or reliable writes.
++
+   no-mmc:
+     $ref: /schemas/types.yaml#/definitions/flag
+     description:

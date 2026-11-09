@@ -1,0 +1,18 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] lima: return after the unreachable varying formats
+
+The varying format of MR !37449 ends in assert(0) with no return: a build with
+-Db_ndebug=true (the board's) has no assert, and Mesa's own -Werror=return-type
+stops it ("control reaches end of non-void function"). Return 0 after the assert.
+---
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -970,6 +970,7 @@
+    case LIMA_VARYING_TYPE_VEC4_UNORM8:
+    default:
+       assert(0);
++      return 0;
+    }
+ }
+ 

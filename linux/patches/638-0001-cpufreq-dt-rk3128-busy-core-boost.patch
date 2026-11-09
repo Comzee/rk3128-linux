@@ -1,0 +1,258 @@
+From: RK3128 reference automation <reference@example.invalid>
+Subject: [PATCH] cpufreq: dt: enforce the RK3128 reference board vendor busy-core boost limits
+
+Start capped at 1008MHz, and retain the stock load ceiling when the owner
+allows boost. Kernel work owns sampling independently of userspace.
+See docs/research/cpu-1200-toggle.md for the archived stock code (#638).
+
+Signed-off-by: RK3128 reference automation <reference@example.invalid>
+---
+
+diff --git a/drivers/cpufreq/cpufreq-dt.c b/drivers/cpufreq/cpufreq-dt.c
+--- a/drivers/cpufreq/cpufreq-dt.c
++++ b/drivers/cpufreq/cpufreq-dt.c
+@@ -21,6 +21,9 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
+ #include <linux/thermal.h>
++#include <linux/tick.h>
++#include <linux/workqueue.h>
++#include "rk3128-cpu-policy.h"
+ 
+ #include "cpufreq-dt.h"
+ 
+@@ -32,6 +35,7 @@
+ 	struct cpufreq_frequency_table *freq_table;
+ 	bool have_static_opps;
+ 	int opp_token;
++	struct rk3128_cpu_boost boost;
+ };
+ 
+ static LIST_HEAD(priv_list);
+@@ -46,6 +50,154 @@
+ 	}
+ 
+ 	return NULL;
++}
++
++/* #638: a board-specific QoS ceiling, independent of the userspace governor.
++ * The DT opt-in is validated before the first cpufreq transition. No sensor exists.
++ * OFF is enforced in-kernel even before userspace applies its persisted setting.
++ */
++static void rk3128_boost_work(struct work_struct *work)
++{
++	struct rk3128_cpu_boost *b = container_of(to_delayed_work(work),
++					       struct rk3128_cpu_boost, work);
++	u64 idle = 0, now = 0, stamp, value;
++	unsigned int cpu, online = 0, busy = 4, cap;
++	cpumask_t snapshot;
++
++	/* .exit can cancel this work under the hotplug write lock: never take its
++	 * read lock here. Per-CPU accounting storage survives offlining.
++	 */
++	cpumask_and(&snapshot, b->cpus, cpu_online_mask);
++	for_each_cpu(cpu, &snapshot) {
++		value = get_cpu_idle_time_us(cpu, &stamp);
++		if (value == -1ULL) {
++			online = 0;
++			break;
++		}
++		idle += value;
++		now = stamp;
++		online++;
++	}
++	/* Hotplug/counter resets are not a low-load sample: use the four-core cap. */
++	if (online && cpumask_equal(&snapshot, &b->last_online) &&
++	    now > b->last_time && idle >= b->last_idle)
++		busy = rk3128_busy_cpus(idle - b->last_idle, now - b->last_time, online);
++	b->last_idle = idle;
++	b->last_time = now;
++	cpumask_copy(&b->last_online, &snapshot);
++	mutex_lock(&b->lock);
++	cap = b->enabled ? b->caps[busy - 1] : 1008000;
++	WRITE_ONCE(b->cap, cap);
++	freq_qos_update_request(&b->limit, cap);
++	mutex_unlock(&b->lock);
++	schedule_delayed_work(&b->work, msecs_to_jiffies(100));
++}
++
++static ssize_t show_rk3128_boost(struct cpufreq_policy *policy, char *buf)
++{
++	struct private_data *priv = policy->driver_data;
++
++	if (!priv->boost.present)
++		return -EOPNOTSUPP;
++	return sysfs_emit(buf, "%u\n", READ_ONCE(priv->boost.enabled));
++}
++
++static ssize_t store_rk3128_boost(struct cpufreq_policy *policy, const char *buf, size_t count)
++{
++	struct private_data *priv = policy->driver_data;
++	struct rk3128_cpu_boost *b = &priv->boost;
++	bool on;
++	int ret;
++
++	if (!b->present)
++		return -EOPNOTSUPP;
++	if (kstrtobool(buf, &on))
++		return -EINVAL;
++	mutex_lock(&b->lock);
++	/* Start at the four-core cap until a complete sample permits a higher rate. */
++	ret = freq_qos_update_request(&b->limit, on ? 912000 : 1008000);
++	if (ret >= 0) {
++		WRITE_ONCE(b->cap, on ? 912000 : 1008000);
++		WRITE_ONCE(b->enabled, on);
++	}
++	mutex_unlock(&b->lock);
++	return ret < 0 ? ret : count;
++}
++
++static ssize_t show_rk3128_boost_limit(struct cpufreq_policy *policy, char *buf)
++{
++	struct private_data *priv = policy->driver_data;
++
++	if (!priv->boost.present)
++		return -EOPNOTSUPP;
++	return sysfs_emit(buf, "%u\n", READ_ONCE(priv->boost.cap));
++}
++
++cpufreq_freq_attr_rw(rk3128_boost);
++cpufreq_freq_attr_ro(rk3128_boost_limit);
++static struct freq_attr *rk3128_attrs[] = { &rk3128_boost, &rk3128_boost_limit, NULL };
++
++static int rk3128_boost_init(struct private_data *priv, struct cpufreq_policy *policy)
++{
++	struct rk3128_cpu_boost *b = &priv->boost;
++	struct device_node *np = priv->cpu_dev->of_node;
++	u32 caps[4];
++	struct cpufreq_frequency_table *entry;
++	struct dev_pm_opp *opp;
++	int ret;
++
++	if (!of_property_present(np, "rockchip,busy-core-caps-khz")) {
++		if (of_machine_is_compatible("rockchip,rk3128-reference")) {
++			cpufreq_for_each_valid_entry(entry, priv->freq_table) {
++				if (entry->frequency > 1008000)
++					return -EINVAL;
++			}
++		}
++		return 0;
++	}
++	if (!of_machine_is_compatible("rockchip,rk3128-reference") ||
++	    of_property_count_u32_elems(np, "rockchip,busy-core-caps-khz") != 4 ||
++	    of_property_read_u32_array(np, "rockchip,busy-core-caps-khz", caps, 4) ||
++	    caps[0] != 1200000 || caps[1] != 1008000 || caps[2] != 912000 || caps[3] != 912000)
++		return -EINVAL;
++
++	/* Do not trust a DT opt-in alone: reject any non-vendor high OPP. */
++	cpufreq_for_each_valid_entry(entry, priv->freq_table)
++		if (entry->frequency > 1008000 && entry->frequency != 1200000)
++			return -EINVAL;
++	opp = dev_pm_opp_find_freq_exact(priv->cpu_dev, 1200000000, true);
++	if (IS_ERR(opp))
++		return PTR_ERR(opp);
++	ret = dev_pm_opp_get_voltage(opp) == 1425000 ? 0 : -EINVAL;
++	dev_pm_opp_put(opp);
++	if (ret)
++		return ret;
++	opp = dev_pm_opp_find_freq_exact(priv->cpu_dev, 912000000, true);
++	if (IS_ERR(opp))
++		return PTR_ERR(opp);
++	ret = dev_pm_opp_get_voltage(opp) == 1350000 ? 0 : -EINVAL;
++	dev_pm_opp_put(opp);
++	if (ret)
++		return ret;
++	memcpy(b->caps, caps, sizeof(caps));
++	b->cpus = priv->cpus;
++	mutex_init(&b->lock);
++	INIT_DELAYED_WORK(&b->work, rk3128_boost_work);
++	ret = freq_qos_add_request(&policy->constraints, &b->limit, FREQ_QOS_MAX, 1008000);
++	if (ret < 0)
++		return ret;
++	b->cap = 1008000;
++	b->present = true;
++	/* .ready starts sampling only once policy QoS/governor initialization is complete. */
++	return 0;
++}
++
++static void rk3128_boost_ready(struct cpufreq_policy *policy)
++{
++	struct private_data *priv = policy->driver_data;
++
++	if (priv->boost.present)
++		schedule_delayed_work(&priv->boost.work, msecs_to_jiffies(100));
+ }
+ 
+ static int set_target(struct cpufreq_policy *policy, unsigned int index)
+@@ -114,7 +266,10 @@
+ 	policy->cpuinfo.transition_latency = transition_latency;
+ 	policy->dvfs_possible_from_any_cpu = true;
+ 
+-	return 0;
++	ret = rk3128_boost_init(priv, policy);
++	if (ret)
++		clk_put(cpu_clk);
++	return ret;
+ }
+ 
+ static int cpufreq_online(struct cpufreq_policy *policy)
+@@ -134,6 +289,13 @@
+ 
+ static void cpufreq_exit(struct cpufreq_policy *policy)
+ {
++	struct private_data *priv = policy->driver_data;
++
++	if (priv->boost.present) {
++		cancel_delayed_work_sync(&priv->boost.work);
++		freq_qos_remove_request(&priv->boost.limit);
++		memset(&priv->boost, 0, sizeof(priv->boost));
++	}
+ 	clk_put(policy->clk);
+ }
+ 
+@@ -144,6 +306,8 @@
+ 	.target_index = set_target,
+ 	.get = cpufreq_generic_get,
+ 	.init = cpufreq_init,
++	.ready = rk3128_boost_ready,
++	.attr = rk3128_attrs,
+ 	.exit = cpufreq_exit,
+ 	.online = cpufreq_online,
+ 	.offline = cpufreq_offline,
+diff --git a/drivers/cpufreq/rk3128-cpu-policy.h b/drivers/cpufreq/rk3128-cpu-policy.h
+new file mode 100644
+--- /dev/null
++++ b/drivers/cpufreq/rk3128-cpu-policy.h
+@@ -0,0 +1,32 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Stock RK3128 reference board dvfs_virt_temp_limit_work_func, target-temp85, 100ms sampling (#638).
++ * No virtual temperature is invented: this is the shipped load classification.
++ */
++#ifndef RK3128_CPU_POLICY_H
++#define RK3128_CPU_POLICY_H
++static inline unsigned int rk3128_busy_cpus(u64 idle, u64 elapsed, unsigned int online)
++{
++	/* The stock +6.25% avoids classifying a one-core load plus kernel work as two. */
++	idle += elapsed >> 4;
++	if (!elapsed || !online || online > 4 || idle > elapsed * (online + 1))
++		return 4; /* Invalid accounting cannot authorize boost. */
++	if (idle > (online - 1) * elapsed)
++		return 1;
++	if (online >= 2 && idle > (online - 2) * elapsed)
++		return 2;
++	if (online >= 3 && idle > (online - 3) * elapsed)
++		return 3;
++	return online;
++}
++
++struct rk3128_cpu_boost {
++	struct delayed_work work;
++	struct freq_qos_request limit;
++	struct mutex lock; /* Serializes owner changes against the sampled cap. */
++	const struct cpumask *cpus;
++	u64 last_time, last_idle;
++	cpumask_t last_online;
++	unsigned int caps[4], cap;
++	bool present, enabled;
++};
++#endif

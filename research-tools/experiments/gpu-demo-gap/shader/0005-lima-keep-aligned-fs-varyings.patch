@@ -1,0 +1,73 @@
+lima: keep the linker's aligned layout for fragment-shader inputs (no nir_opt_varyings compaction).
+Ours (mali-re spike for hardware change 375; applies after 0001-0004 to 26.2.6).
+
+nir_opt_varyings part 4 (compact_varyings) repacks the VS->FS varyings into as few vec4 slots as it can, so a vec3 or a
+vec2 can straddle two slots. ppir reads a varying with load.v, one vec4 slot per load, so a straddling varying costs
+the fragment shader two loads plus the moves that reassemble it, on every fragment. The Mali blob keeps each varying
+inside one slot. This adds nir_io_dont_compact_fs_inputs to nir_shader_compiler_options.io_options; with it,
+nir_opt_varyings skips compaction when the consumer is a fragment shader, and lima's fs options set it. The VS then
+writes the slots the FS reads (checked on the Demo's program 16: POS base 0, v_uv VAR0.xy base 1, v_col VAR1.xyz base 2;
+the FS reads VAR0 base 0, VAR1 base 1). Measured on the Demo's 17 programs (limacompile, drm-shim Mali-400 MP2):
+PP instructions 61 -> 48 on top of 0001-0004 (blob 45); GP 545 -> 574 (the VS writes more slots; GP is not the
+bottleneck). reference UI's games/photos/home-swipe/clock programs are unchanged (22/16/35/22). Fill-weighted, the Demo's PP time
+per frame drops by 12-26% in tunnel, chrome and horizon (a separate shader instruction report).
+
+---
+ src/compiler/nir/nir_opt_varyings.c            | 8 ++++++--
+ src/compiler/nir/nir_shader_compiler_options.h | 9 +++++++++
+ src/gallium/drivers/lima/lima_program.c        | 3 +++
+ 3 files changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/compiler/nir/nir_opt_varyings.c b/src/compiler/nir/nir_opt_varyings.c
+index 823be84..542add2 100644
+--- a/src/compiler/nir/nir_opt_varyings.c
++++ b/src/compiler/nir/nir_opt_varyings.c
+@@ -6097,8 +6097,12 @@ nir_opt_varyings(nir_shader *producer, nir_shader *consumer, bool spirv,
+ #endif
+    }
+ 
+-   /* Part 4: Do compaction. */
+-   compact_varyings(linkage, &progress);
++   /* Part 4: Do compaction (unless the fragment shader keeps the linker's
++    * aligned layout).
++    */
++   if (!(consumer->info.stage == MESA_SHADER_FRAGMENT &&
++         (consumer->options->io_options & nir_io_dont_compact_fs_inputs)))
++      compact_varyings(linkage, &progress);
+ 
+    nir_progress(progress & nir_progress_producer, linkage->producer_builder.impl,
+                 nir_metadata_control_flow);
+diff --git a/src/compiler/nir/nir_shader_compiler_options.h b/src/compiler/nir/nir_shader_compiler_options.h
+index 8f0e9a7..9de8a4f 100644
+--- a/src/compiler/nir/nir_shader_compiler_options.h
++++ b/src/compiler/nir/nir_shader_compiler_options.h
+@@ -232,6 +232,15 @@ typedef enum {
+     */
+    nir_io_compact_to_higher_16 = BITFIELD_BIT(13),
+ 
++   /**
++    * Set in a fragment shader's options: nir_opt_varyings keeps the linker's
++    * slot assignment of the varyings that feed it (no compaction), so a vector
++    * varying is never split across two vec4 slots. For hardware that loads a
++    * varying one vec4 slot at a time (Mali-400 PP), where a vec3 that straddles
++    * two slots costs an extra load and a move.
++    */
++   nir_io_dont_compact_fs_inputs = BITFIELD_BIT(14),
++
+    /* Options affecting the GLSL compiler or Gallium are below. */
+ 
+    /**
+diff --git a/src/gallium/drivers/lima/lima_program.c b/src/gallium/drivers/lima/lima_program.c
+index 02523b6..42907c0 100644
+--- a/src/gallium/drivers/lima/lima_program.c
++++ b/src/gallium/drivers/lima/lima_program.c
+@@ -85,6 +85,9 @@ static const nir_shader_compiler_options fs_nir_options = {
+    .no_integers = true,
+    .support_indirect_inputs = BITFIELD_BIT(MESA_SHADER_FRAGMENT),
+    .max_varying_expression_cost = 2,
++   /* the PP loads a varying one vec4 slot at a time: keep the linker's
++    * aligned layout (prefer_pot_aligned_varyings), as the blob does */
++   .io_options = nir_io_dont_compact_fs_inputs,
+ };
+ 
+ const void *

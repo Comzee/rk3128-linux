@@ -1,0 +1,186 @@
+From: RK3128 reference <frame@localhost>
+Subject: [PATCH] Prefer eligible 2.4 GHz BSSes unless Settings enables 5 GHz
+
+Keep normal security, ignore-list, priority and BSSID checks. Run their
+2.4 GHz candidates first; fall back to the original all-band search when
+none is usable. No permanent scan restriction or fallback timer is needed. The separate
+/data/state/wifi/band policy defaults OFF and is written by the root launcher
+helper. Old images ignore it: never put a new keyword into the saved network
+configuration, or rollback to the previous supplicant would lose Wi-Fi.
+The runtime rk3128_wifi5 SET/STATUS field changes without a daemon restart.
+ON retains upstream choice (#499). Reconnect hints must not hide the other band: only
+use a previous 2.4 GHz channel while OFF, or a previous 5 GHz channel while ON.
+
+--- a/wpa_supplicant/config.h
++++ b/wpa_supplicant/config.h
+@@ -943,6 +943,10 @@
+ 	 */
+ 	int *freq_list;
+ 
++	/* RK3128 reference: 0 prefers eligible 2.4 GHz BSSes, 1 keeps both bands.
++	 * The separate /data policy defaults OFF; network configs stay compatible. */
++	int rk3128_wifi5;
++
+ 	/**
+ 	 * initial_freq_list - like freq_list but for initial scan
+ 	 *
+--- a/wpa_supplicant/config.c
++++ b/wpa_supplicant/config.c
+@@ -7,6 +7,8 @@
+  */
+ 
+ #include "includes.h"
++#include <fcntl.h>
++#include <sys/stat.h>
+ 
+ #include "common.h"
+ #include "utils/uuid.h"
+@@ -4342,6 +4344,33 @@
+ #endif /* CONFIG_NO_CONFIG_BLOBS */
+ 
+ 
++/* RK3128 reference #665: keep the owner policy outside the network configuration.
++ * An older image ignores this file instead of rejecting an unknown config keyword.
++ * Only a complete, regular, bounded "1\n" means ON; all missing/invalid state is OFF. */
++static int rk3128_wifi5_default(void)
++{
++	const char *path = getenv("SFL_WIFI_BAND_STATE");
++	struct stat st;
++	char value[3];
++	int fd, enabled = 0;
++	ssize_t n;
++
++	if (!path || !*path)
++		path = "/data/state/wifi/band";
++	fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
++	if (fd < 0)
++		return 0;
++	if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 2) {
++		do {
++			n = read(fd, value, sizeof(value));
++		} while (n < 0 && errno == EINTR);
++		enabled = n == 2 && value[0] == '1' && value[1] == '\n';
++	}
++	close(fd);
++	return enabled;
++}
++
++
+ /**
+  * wpa_config_alloc_empty - Allocate an empty configuration
+  * @ctrl_interface: Control interface parameters, e.g., path to UNIX domain
+@@ -4379,6 +4408,7 @@
+ 	config = os_zalloc(sizeof(*config));
+ 	if (config == NULL)
+ 		return NULL;
++	config->rk3128_wifi5 = rk3128_wifi5_default();
+ 	config->eapol_version = DEFAULT_EAPOL_VERSION;
+ 	config->ap_scan = DEFAULT_AP_SCAN;
+ 	config->user_mpm = DEFAULT_USER_MPM;
+@@ -5210,6 +5240,7 @@
+ 	{ FUNC(ap_assocresp_elements), 0 },
+ 	{ FUNC(ap_vendor_elements), 0 },
+ 	{ INT_RANGE(ignore_old_scan_res, 0, 1), 0 },
++	{ INT_RANGE(rk3128_wifi5, 0, 1), 0 },
+ 	{ FUNC(freq_list), 0 },
+ 	{ FUNC(initial_freq_list), 0},
+ 	{ INT(scan_cur_freq), 0 },
+--- a/wpa_supplicant/ctrl_iface.c
++++ b/wpa_supplicant/ctrl_iface.c
+@@ -2342,6 +2342,12 @@
+ 	}
+ #endif /* CONFIG_SAE */
+ #endif /* CONFIG_SME */
++	ret = os_snprintf(pos, end - pos, "rk3128_wifi5=%d\n",
++			  wpa_s->conf->rk3128_wifi5);
++	if (os_snprintf_error(end - pos, ret))
++		return pos - buf;
++	pos += ret;
++
+ 	ret = os_snprintf(pos, end - pos, "wpa_state=%s\n",
+ 			  wpa_supplicant_state_txt(wpa_s->wpa_state));
+ 	if (os_snprintf_error(end - pos, ret))
+--- a/wpa_supplicant/events.c
++++ b/wpa_supplicant/events.c
+@@ -1576,6 +1576,7 @@
+ 			  int only_first_ssid)
+ {
+ 	unsigned int i;
++	int pass;
+ 
+ 	if (wpa_s->current_ssid) {
+ 		struct wpa_ssid *ssid;
+@@ -1603,21 +1604,30 @@
+ 		wpa_dbg(wpa_s, MSG_DEBUG, "Selecting BSS from priority group %d",
+ 			group->priority);
+ 
+-	for (i = 0; i < wpa_s->last_scan_res_used; i++) {
+-		struct wpa_bss *bss = wpa_s->last_scan_res[i];
+-
+-		wpa_s->owe_transition_select = 1;
+-		*selected_ssid = wpa_scan_res_match(wpa_s, i, bss, group,
+-						    only_first_ssid, 1);
+-		wpa_s->owe_transition_select = 0;
+-		if (!*selected_ssid)
+-			continue;
+-		wpa_dbg(wpa_s, MSG_DEBUG, "   selected %sBSS " MACSTR
+-			" ssid='%s'",
+-			bss == wpa_s->current_bss ? "current ": "",
+-			MAC2STR(bss->bssid),
+-			wpa_ssid_txt(bss->ssid, bss->ssid_len));
+-		return bss;
++	/* Preserve upstream eligibility and ordering within each priority group.
++	 * OFF tries 2.4 GHz first; only if none is usable does the original
++	 * all-band pass run. Never restrict scans: 5 GHz remains the way back
++	 * online for 5-GHz-only, out-of-range or temporarily failing BSSes. */
++	for (pass = wpa_s->conf->rk3128_wifi5 ? 1 : 0; pass < 2; pass++) {
++		for (i = 0; i < wpa_s->last_scan_res_used; i++) {
++			struct wpa_bss *bss = wpa_s->last_scan_res[i];
++
++			if (!pass && (bss->freq < 2400 || bss->freq >= 2500))
++				continue;
++
++			wpa_s->owe_transition_select = 1;
++			*selected_ssid = wpa_scan_res_match(wpa_s, i, bss, group,
++							    only_first_ssid, 1);
++			wpa_s->owe_transition_select = 0;
++			if (!*selected_ssid)
++				continue;
++			wpa_dbg(wpa_s, MSG_DEBUG, "   selected %sBSS " MACSTR
++				" ssid='%s'",
++				bss == wpa_s->current_bss ? "current ": "",
++				MAC2STR(bss->bssid),
++				wpa_ssid_txt(bss->ssid, bss->ssid_len));
++			return bss;
++		}
+ 	}
+ 
+ 	return NULL;
+@@ -1892,6 +1902,13 @@
+ 			"has preferred BSSID");
+ 		return 1;
+ 	}
++
++	/* An eligible 2.4 GHz candidate selected above takes precedence over
++	 * throughput/RSSI while OFF, including return from a 5 GHz fallback. */
++	if (!wpa_s->conf->rk3128_wifi5 &&
++	    selected->freq >= 2400 && selected->freq < 2500 &&
++	    (current_bss->freq < 2400 || current_bss->freq >= 2500))
++		return 1;
+ 
+ 	cur_level = current_bss->level;
+ 	cur_est = current_bss->est_throughput;
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -8168,7 +8168,10 @@
+ 		 * per-network scan frequencies ahead of this hint; a miss falls
+ 		 * back to the ordinary all-channel scan and selection rules.
+ 		 * Explicit global scan/band modes retain their standard path. */
+-		if (freq && !wpa_s->next_scan_freqs &&
++		/* Discover the preferred band before falling back. ON at 2.4 GHz
++		 * needs a full scan: associated scans may not refresh 5 GHz. */
++		if (freq && (wpa_s->conf->rk3128_wifi5 ? freq >= 4900 : freq < 2500) &&
++		    !wpa_s->next_scan_freqs &&
+ 		    wpa_s->conf->ap_scan == 1 && !wpa_s->conf->freq_list &&
+ 		    !wpa_s->conf->scan_cur_freq && !wpa_s->autoscan_params &&
+ 		    wpa_s->setband_mask == WPA_SETBAND_AUTO) {

@@ -1,0 +1,601 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Sat, 7 Nov 2026 22:00:00 -0600
+Subject: [PATCH] Input: silead: apply the RK3128 reference board vendor point stages before reporting
+
+Reconstruct the enabled stages and parameters from the shipped RK3128 reference board driver,
+including ID prediction, shake suppression, mode-3 filtering, report delay
+and record_point. Scope state to each device and reset it on startup.
+Generic Silead boards retain the existing slot assignment and reporting.
+See docs/research/touch-587.md for addresses and differential verification.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/input/touchscreen/silead.c b/drivers/input/touchscreen/silead.c
+index 52a37c2..e93ac67 100644
+--- a/drivers/input/touchscreen/silead.c
++++ b/drivers/input/touchscreen/silead.c
+@@ -26,7 +26,7 @@
+ 
+ #include <linux/unaligned.h>
+ 
+-#include "silead_d708.h"
++#include "silead_rk3128_reference.h"
+ 
+ #define SILEAD_TS_NAME		"silead_ts"
+ 
+@@ -80,6 +80,7 @@ struct silead_ts_data {
+ 	u32 efi_fw_min_max[4];
+ 	bool efi_fw_min_max_set;
+ 	bool d708_calibration;
++	struct silead_rk3128_reference *reference;
+ 	bool pen_supported;
+ 	bool pen_down;
+ 	u32 pen_x_res;
+@@ -242,6 +243,45 @@ sync:
+ 	return true;
+ }
+ 
++/* RK3128 reference board firmware requires host ID/prediction and temporal processing before evdev. */
++static void silead_ts_read_rk3128_reference(struct silead_ts_data *data, const u8 *buf, int len)
++{
++	struct silead_rk3128_reference_contact points[RK3128_REFERENCE_IDS];
++	unsigned int now[RK3128_REFERENCE_IDS] = { 0 };
++	struct input_dev *input = data->input;
++	int i, n;
++
++	/* SMBus block adapters may return fewer bytes than requested. */
++	if (len < 4 || buf[0] > RK3128_REFERENCE_IDS || len < 4 + 4 * buf[0]) {
++		dev_warn_ratelimited(&data->client->dev, "Incomplete RK3128 reference board touch report\n");
++		silead_rk3128_reference_reset(data->reference);
++		goto sync;
++	}
++	for (i = 0; i < buf[0]; i++) {
++		const u8 *p = buf + 4 + 4 * i;
++
++		/* Preserve the low word's key/status flags, as the vendor worker does. */
++		now[i] = ((get_unaligned_le16(p + 2) & 0xfffU) << 16) |
++			 get_unaligned_le16(p);
++	}
++	n = silead_rk3128_reference_process(data->reference, get_unaligned_le32(buf), now, points);
++	for (i = 0; i < n; i++) {
++		struct input_mt_pos pos;
++
++		/* Vendor report_data drops out-of-screen key reports on this panel. */
++		if (points[i].x > 800 || points[i].y > 1280)
++			continue;
++		touchscreen_set_mt_pos(&pos, &data->prop, points[i].x, points[i].y);
++		input_mt_slot(input, points[i].id);
++		input_mt_report_slot_state(input, MT_TOOL_FINGER, true);
++		input_report_abs(input, ABS_MT_POSITION_X, pos.x);
++		input_report_abs(input, ABS_MT_POSITION_Y, pos.y);
++	}
++ sync:
++	input_mt_sync_frame(input);
++	input_sync(input);
++}
++
+ static void silead_ts_read_data(struct i2c_client *client)
+ {
+ 	struct silead_ts_data *data = i2c_get_clientdata(client);
+@@ -258,6 +298,11 @@ static void silead_ts_read_data(struct i2c_client *client)
+ 		return;
+ 	}
+ 
++	if (data->reference) {
++		silead_ts_read_rk3128_reference(data, buf, error);
++		return;
++	}
++
+ 	if (buf[0] > SILEAD_MAX_FINGERS) {
+ 		dev_warn(dev, "More touches reported then supported %d > %d\n",
+ 			 buf[0], SILEAD_MAX_FINGERS);
+@@ -295,8 +340,6 @@ static void silead_ts_read_data(struct i2c_client *client)
+ 			int x = get_unaligned_le16(&bufp[SILEAD_POINT_X_OFF]) & 0xfff;
+ 			int y = get_unaligned_le16(&bufp[SILEAD_POINT_Y_OFF]) & 0xfff;
+ 
+-			if (data->d708_calibration)
+-				silead_d708_calibrate(&x, &y);
+ 			touchscreen_set_mt_pos(&data->pos[touch_nr], &data->prop, x, y);
+ 		}
+ 		touch_nr++;
+@@ -386,8 +429,12 @@ i2c_write_err:
+ 
+ static int silead_ts_startup(struct i2c_client *client)
+ {
++	struct silead_ts_data *data = i2c_get_clientdata(client);
+ 	int error;
+ 
++	if (data->reference)
++		silead_rk3128_reference_reset(data->reference);
++
+ 	error = i2c_smbus_write_byte_data(client, SILEAD_REG_RESET, 0x00);
+ 	if (error) {
+ 		dev_err(&client->dev, "Startup error %d\n", error);
+@@ -673,6 +720,11 @@ static int silead_ts_probe(struct i2c_client *client)
+ 	i2c_set_clientdata(client, data);
+ 	data->client = client;
+ 	data->d708_calibration = device_get_match_data(dev) != NULL;
++	if (data->d708_calibration) {
++		data->reference = devm_kzalloc(dev, sizeof(*data->reference), GFP_KERNEL);
++		if (!data->reference)
++			return -ENOMEM;
++	}
+ 
+ 	error = silead_ts_set_default_fw_name(data, id);
+ 	if (error)
+diff --git a/drivers/input/touchscreen/silead_rk3128_reference.h b/drivers/input/touchscreen/silead_rk3128_reference.h
+new file mode 100644
+index 0000000..a4a058e
+--- /dev/null
++++ b/drivers/input/touchscreen/silead_rk3128_reference.h
+@@ -0,0 +1,469 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* RK3128 reference board's enabled GSL point stages, reconstructed from the shipped ARM driver.
++ * Parameters and instruction provenance: docs/research/touch-587.md.
++ * Packed points: X in high 16 bits, Y in low 12; bits 12..15 are flags.
++ * This is deliberately board-specific, not a configurable Silead library.
++ */
++#ifndef _SILEAD_RK3128_REFERENCE_H
++#define _SILEAD_RK3128_REFERENCE_H
++
++#include <linux/string.h>
++
++#include "silead_d708.h"
++
++#define RK3128_REFERENCE_IDS 10
++#define RK3128_REFERENCE_DEPTH 10
++#define RK3128_REFERENCE_KEY 0x1000U
++#define RK3128_REFERENCE_FILL 0x2000U
++#define RK3128_REFERENCE_SENT 0x4000U
++#define RK3128_REFERENCE_PRED 0x8000U
++#define RK3128_REFERENCE_INVALID 0x0fff0fffU
++
++struct silead_rk3128_reference_contact {
++	int x, y, id;
++};
++
++struct silead_rk3128_reference_delay {
++	unsigned char delay, ready, active;
++};
++
++struct silead_rk3128_reference {
++	unsigned int p[RK3128_REFERENCE_DEPTH][RK3128_REFERENCE_IDS];
++	unsigned int s[RK3128_REFERENCE_DEPTH][RK3128_REFERENCE_IDS];
++	unsigned int r[RK3128_REFERENCE_DEPTH][RK3128_REFERENCE_IDS];
++	struct silead_rk3128_reference_delay delay[RK3128_REFERENCE_IDS];
++	unsigned int shake, global;
++	int near, prev, slow;
++	int weight[RK3128_REFERENCE_IDS], distance[RK3128_REFERENCE_IDS];
++	struct silead_rk3128_reference_contact old[RK3128_REFERENCE_IDS];
++	unsigned int valid;
++};
++
++static inline void silead_rk3128_reference_reset(struct silead_rk3128_reference *f)
++{
++	memset(f, 0, sizeof(*f));
++}
++
++static inline int rk3128_reference_x(unsigned int p) { return p >> 16; }
++static inline int rk3128_reference_y(unsigned int p) { return p & 0xfff; }
++
++static inline unsigned int rk3128_reference_xy(int x, int y, unsigned int flags)
++{
++	return ((unsigned int)x << 16) | (y & 0xfff) | (flags & 0xf000);
++}
++
++static inline unsigned int rk3128_reference_distance(unsigned int a, unsigned int b)
++{
++	/* Unsigned products retain the ARM result even for a corrupt coordinate. */
++	unsigned int dx = rk3128_reference_x(a) - rk3128_reference_x(b);
++	unsigned int dy = (a & 0x1fff) - (b & 0x1fff);
++
++	return dx * dx + dy * dy;
++}
++
++static inline int rk3128_reference_sqrt(unsigned int square)
++{
++	int bit, root = 0;
++
++	/* The vendor compares signed squares, trying bits 14 down to 0. */
++	for (bit = 14; bit >= 0; bit--) {
++		int next = root + (1 << bit);
++
++		if (next * next <= (int)square)
++			root = next;
++	}
++	return root;
++}
++
++static inline int rk3128_reference_clip(int v, int hi)
++{
++	return v < 0 ? 0 : (v > hi ? hi : v);
++}
++
++static inline int rk3128_reference_abs(int v) { return v < 0 ? -v : v; }
++
++/* PointRepeat: merge coincident firmware points before assigning IDs. */
++static inline void rk3128_reference_repeat(struct silead_rk3128_reference *f, unsigned int now[], int n)
++{
++	int i, j, threshold;
++
++	if (f->near)
++		f->near--;
++	if (n < f->prev)
++		f->near = 8;
++	threshold = f->near ? 96 : 32;
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		if (!now[i] || (now[i] & RK3128_REFERENCE_KEY))
++			continue;
++		for (j = i + 1; j < RK3128_REFERENCE_IDS; j++) {
++			if (!now[j] || (now[j] & RK3128_REFERENCE_KEY))
++				continue;
++			if (rk3128_reference_abs(rk3128_reference_x(now[i]) - rk3128_reference_x(now[j])) < threshold &&
++			    rk3128_reference_abs(rk3128_reference_y(now[i]) - rk3128_reference_y(now[j])) < threshold) {
++				now[i] = rk3128_reference_xy((rk3128_reference_x(now[i]) + rk3128_reference_x(now[j]) + 1) / 2,
++						(rk3128_reference_y(now[i]) + rk3128_reference_y(now[j]) + 1) / 2, now[i]);
++				now[j] = 0;
++				f->near = 8;
++				i--; /* Retry this point against the remaining points. */
++				break;
++			}
++		}
++	}
++}
++
++static inline void rk3128_reference_history(struct silead_rk3128_reference *f)
++{
++	memmove(f->p[1], f->p[0], sizeof(f->p) - sizeof(f->p[0]));
++	memmove(f->s[1], f->s[0], sizeof(f->s) - sizeof(f->s[0]));
++	memmove(f->r[1], f->r[0], sizeof(f->r) - sizeof(f->r[0]));
++	memset(f->p[0], 0, sizeof(f->p[0]));
++	memset(f->s[0], 0, sizeof(f->s[0]));
++	memset(f->r[0], 0, sizeof(f->r[0]));
++}
++
++static inline void rk3128_reference_predict(struct silead_rk3128_reference *f)
++{
++	int i, x, y;
++
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		unsigned int a = f->p[1][i], b = f->p[2][i], c = f->p[3][i];
++
++		if (!a) {
++			f->p[0][i] = RK3128_REFERENCE_INVALID;
++			continue;
++		}
++		if (!f->slow && b && !(b & RK3128_REFERENCE_FILL) && !(c & RK3128_REFERENCE_FILL) &&
++		    !(a & RK3128_REFERENCE_KEY) && !(f->global & 0x20000000U)) {
++			if (!c) {
++				x = 2 * rk3128_reference_x(a) - rk3128_reference_x(b);
++				y = 2 * rk3128_reference_y(a) - rk3128_reference_y(b);
++			} else {
++				x = (5 * rk3128_reference_x(a) + rk3128_reference_x(c) - 4 * rk3128_reference_x(b));
++				y = (5 * rk3128_reference_y(a) + rk3128_reference_y(c) - 4 * rk3128_reference_y(b));
++				x = x > 0 ? x / 2 : 0;
++				y = y > 0 ? y / 2 : 0;
++			}
++			f->p[0][i] = rk3128_reference_xy(rk3128_reference_clip(x, 65535), rk3128_reference_clip(y, 4095), RK3128_REFERENCE_PRED);
++		} else {
++			f->p[0][i] = a & 0x0fff0fff;
++		}
++		f->p[0][i] |= RK3128_REFERENCE_FILL | (a & RK3128_REFERENCE_KEY);
++	}
++}
++
++static inline void rk3128_reference_id(struct silead_rk3128_reference *f, unsigned int now[], int n)
++{
++	unsigned int distance[RK3128_REFERENCE_IDS][RK3128_REFERENCE_IDS], speed[RK3128_REFERENCE_IDS];
++	int i, j, k, row = 0, col = 0;
++
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		speed[i] = 4;
++		if ((f->p[0][i] & RK3128_REFERENCE_PRED) && !(f->p[1][i] & RK3128_REFERENCE_FILL)) {
++			unsigned int d = rk3128_reference_distance(f->p[0][i], f->p[1][i]);
++
++			for (speed[i] = 8; speed[i] > 0; speed[i]--)
++				if ((0x100U << speed[i]) < d)
++					break;
++		}
++		for (j = 0; j < RK3128_REFERENCE_IDS; j++)
++			distance[j][i] = j < n && f->p[0][i] != RK3128_REFERENCE_INVALID ?
++				rk3128_reference_distance(now[j], f->p[0][i]) : 0x7fffffffU;
++	}
++	if (f->global & 0x20000000U) {
++		unsigned int best = 0x7fffffffU;
++
++		if (!n)
++			goto new_id;
++		for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++			for (j = 0; j < RK3128_REFERENCE_IDS; j++)
++				if (distance[i][j] < best) {
++					best = distance[i][j];
++					row = i;
++				}
++		if (best != 0x7fffffffU && f->p[1][0] &&
++		    !!(f->p[1][0] & RK3128_REFERENCE_KEY) != !!(now[row] & RK3128_REFERENCE_KEY))
++			goto new_id;
++		f->p[0][0] = now[row];
++		memset(now, 0, RK3128_REFERENCE_IDS * sizeof(*now));
++		goto new_id;
++	}
++	for (k = 0; k < n; k++) {
++		unsigned int best = 0x7fffffffU;
++
++		for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++			for (j = 0; j < RK3128_REFERENCE_IDS; j++)
++				if (distance[i][j] < best) {
++					best = distance[i][j];
++					row = i;
++					col = j;
++				}
++		if (best == 0x7fffffffU)
++			break;
++		if (best >= 0x4000U + speed[col] * 0x4000U)
++			continue;
++		f->p[0][col] = now[row];
++		now[row] = 0;
++		for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++			distance[row][i] = 0x7fffffffU;
++			distance[i][col] = 0x7fffffffU;
++		}
++	}
++new_id:
++	/* PointNewId: a slot is free only after three empty raw history entries. */
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++		if ((f->p[0][i] & 0x0fff0fff) == RK3128_REFERENCE_INVALID)
++			f->p[0][i] = 0;
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		if (!now[i] || (now[i] & RK3128_REFERENCE_SENT))
++			continue;
++		for (j = 0; j < RK3128_REFERENCE_IDS; j++) {
++			if (f->p[0][j] || f->p[1][j] || f->p[2][j])
++				continue;
++			f->p[0][j] = now[i];
++			now[i] = 0;
++			break;
++		}
++	}
++}
++
++static inline void rk3128_reference_order_cross(struct silead_rk3128_reference *f)
++{
++	int i, j;
++
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++		if ((f->p[0][i] & RK3128_REFERENCE_FILL) &&
++		    (!f->p[1][i] || (f->p[1][i] & RK3128_REFERENCE_FILL)))
++			f->p[0][i] = 0;
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		for (j = i + 1; j < RK3128_REFERENCE_IDS; j++) {
++			unsigned int a = f->p[0][i], b = f->p[0][j];
++			unsigned int c = f->p[1][i], d = f->p[1][j];
++
++			if (!a || !b || !c || !d)
++				continue;
++			if (((rk3128_reference_x(a) < rk3128_reference_x(b) && rk3128_reference_x(d) < rk3128_reference_x(c)) ||
++			     (rk3128_reference_x(b) < rk3128_reference_x(a) && rk3128_reference_x(c) < rk3128_reference_x(d))) &&
++			    ((rk3128_reference_y(a) < rk3128_reference_y(b) && rk3128_reference_y(d) < rk3128_reference_y(c)) ||
++			     (rk3128_reference_y(b) < rk3128_reference_y(a) && rk3128_reference_y(c) < rk3128_reference_y(d)))) {
++				f->p[0][i] = rk3128_reference_xy(rk3128_reference_x(b), rk3128_reference_y(b), a);
++				f->p[0][j] = rk3128_reference_xy(rk3128_reference_x(a), rk3128_reference_y(a), b);
++			}
++		}
++	}
++}
++
++/* PointStretch's enabled shake table: {128,128}, {8,9}, {1,9}. */
++static inline void rk3128_reference_stretch(struct silead_rk3128_reference *f)
++{
++	int i, j;
++
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		unsigned int point = f->p[0][i], prev = f->s[1][i];
++		int distance, weight, dx, dy;
++
++		f->s[0][i] = point;
++		if (!point || (point & RK3128_REFERENCE_KEY)) {
++			f->shake &= ~(1U << i);
++		} else if (prev && !(f->shake & (1U << i))) {
++			if (rk3128_reference_distance(point, prev) < 576)
++				f->s[0][i] = prev;
++			else
++				f->shake |= 1U << i;
++		}
++		if (!prev) {
++			for (j = 1; j < RK3128_REFERENCE_DEPTH; j++)
++				f->s[j][i] = f->s[0][i];
++			f->weight[i] = 128;
++			f->distance[i] = 0;
++			continue;
++		}
++		if (!(f->shake & (1U << i)))
++			continue;
++		distance = rk3128_reference_sqrt(rk3128_reference_distance(point, prev));
++		if (distance >= 128)
++			continue;
++		if (distance < f->distance[i]) {
++			f->distance[i] = distance;
++			weight = f->weight[i];
++			dx = weight * (rk3128_reference_x(point) - rk3128_reference_x(prev)) / 128;
++			dy = weight * (rk3128_reference_y(point) - rk3128_reference_y(prev)) / 128;
++		} else if (distance >= 1) {
++			weight = distance >= 8 ? 9 + 119 * (distance - 8) / 120 : 9;
++			f->distance[i] = distance;
++			f->weight[i] = weight;
++			dx = (weight * (rk3128_reference_x(point) - rk3128_reference_x(prev)) + 64) / 128;
++			dy = (weight * (rk3128_reference_y(point) - rk3128_reference_y(prev)) + 64) / 128;
++		} else {
++			dx = 0;
++			dy = 0;
++		}
++		f->s[0][i] = rk3128_reference_xy(rk3128_reference_x(prev) + dx, rk3128_reference_y(prev) + dy, f->s[0][i]);
++	}
++}
++
++/* FilterOne mode 3: stretch[0] + stretch[1] + report[1], rounded / 3. */
++static inline void rk3128_reference_filter(struct silead_rk3128_reference *f)
++{
++	int i, j, x, y;
++
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		unsigned int point = f->s[0][i];
++
++		f->r[0][i] = point;
++		if (!point)
++			continue;
++		if (!f->r[1][i])
++			for (j = 1; j < RK3128_REFERENCE_DEPTH; j++) {
++				f->r[j][i] = point;
++				f->s[j][i] = point;
++			}
++		x = (rk3128_reference_x(point) + rk3128_reference_x(f->s[1][i]) + rk3128_reference_x(f->r[1][i]) + 1) / 3;
++		y = (rk3128_reference_y(point) + rk3128_reference_y(f->s[1][i]) + rk3128_reference_y(f->r[1][i]) + 1) / 3;
++		f->r[0][i] = rk3128_reference_xy(x, y, point);
++	}
++}
++
++static inline void rk3128_reference_delay(struct silead_rk3128_reference *f, int count)
++{
++	int i, j;
++
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		struct silead_rk3128_reference_delay *d = &f->delay[i];
++
++		if (f->p[0][i] && !d->active && !d->ready && count) {
++			d->delay = (0x1b6db688U >> (3 * (count - 1))) & 7;
++			d->active = 1;
++		}
++		if (!f->p[0][i])
++			d->active = 0;
++		if (!d->ready && d->active) {
++			for (j = 0; j <= d->delay; j++)
++				if (!f->p[j][i] || (f->p[j][i] & (RK3128_REFERENCE_FILL | RK3128_REFERENCE_SENT)))
++					break;
++			if (j <= d->delay)
++				continue;
++			d->ready = 1;
++		}
++		/* report_ahead=0, hence no additional sample offset. */
++		if (!f->p[0][i])
++			d->ready = 0;
++	}
++}
++
++/* Driver record_point averages in calibrated coordinates, with coupled deadbands. */
++static inline void rk3128_reference_record(struct silead_rk3128_reference *f, struct silead_rk3128_reference_contact *p)
++{
++	struct silead_rk3128_reference_contact *old = &f->old[p->id];
++	int x, y, dx, dy;
++
++	if (!(f->valid & (1U << p->id)))
++		*old = *p;
++	x = (old->x + p->x) / 2;
++	y = (old->y + p->y) / 2;
++	dx = rk3128_reference_abs(x - old->x);
++	dy = rk3128_reference_abs(y - old->y);
++	if ((dx > 3 && dy > 1) || (dx > 1 && dy > 3)) {
++		old->x = x;
++		old->y = y;
++	} else {
++		if (dx > 3)
++			old->x = x;
++		if (dy > 3)
++			old->y = y;
++	}
++	*p = *old;
++}
++
++/* now[] contains up to ten packed firmware points; output IDs are zero-based. */
++static inline int silead_rk3128_reference_process(struct silead_rk3128_reference *f, unsigned int header,
++				     unsigned int now[RK3128_REFERENCE_IDS],
++				     struct silead_rk3128_reference_contact out[RK3128_REFERENCE_IDS])
++{
++	unsigned int present = 0;
++	int i, j, n = header & 0xff, count = 0, pass, used = 0;
++
++	/* GetFlag resets tracking on a controller reset indication. */
++	if ((header & 0x100) || ((header & 0x200) && (f->global & 0x80000000U))) {
++		unsigned int valid = f->valid;
++		struct silead_rk3128_reference_contact old[RK3128_REFERENCE_IDS];
++
++		memcpy(old, f->old, sizeof(old));
++		silead_rk3128_reference_reset(f);
++		/* The driver's record history is separate from the library's reset. */
++		f->valid = valid;
++		memcpy(f->old, old, sizeof(old));
++	}
++	if (!(header & 0x300))
++		f->global |= 0x80000000U;
++	f->global &= ~0x20000000U;
++	if (header & 0x400)
++		f->global |= 0x20000000U;
++	if (header & 0x2000)
++		f->slow = 15;
++	else if (f->slow)
++		f->slow--;
++	if (n > RK3128_REFERENCE_IDS)
++		n = RK3128_REFERENCE_IDS;
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++		now[i] = i < n ? now[i] & ~0xf000a000U : 0;
++	/* CoordinateCorrect and PointEdge have no enabled table on this board. */
++	rk3128_reference_repeat(f, now, n);
++	for (i = 0, j = 0; i < RK3128_REFERENCE_IDS; i++)
++		if (now[i])
++			now[j++] = now[i];
++	n = j;
++	while (j < RK3128_REFERENCE_IDS)
++		now[j++] = 0;
++	rk3128_reference_history(f);
++	rk3128_reference_predict(f);
++	rk3128_reference_id(f, now, n);
++	rk3128_reference_order_cross(f);
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++		if (f->p[0][i])
++			count++;
++	f->prev = count;
++	rk3128_reference_stretch(f);
++	rk3128_reference_filter(f);
++	count = 0;
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++)
++		if (f->r[0][i])
++			count++;
++	rk3128_reference_delay(f, count);
++	/* PointReport selects already reported IDs first; output remains ID ordered. */
++	for (pass = 0; pass < 2; pass++) {
++		for (i = 0; i < RK3128_REFERENCE_IDS && used < 5; i++) {
++			unsigned int p = f->r[0][i];
++
++			if (!f->delay[i].ready || !p || (p & RK3128_REFERENCE_SENT) ||
++			    (!pass && !(f->r[1][i] & RK3128_REFERENCE_SENT)))
++				continue;
++			f->r[0][i] |= RK3128_REFERENCE_SENT;
++			present |= 1U << i;
++			used++;
++		}
++	}
++	used = 0;
++	for (i = 0; i < RK3128_REFERENCE_IDS; i++) {
++		unsigned int p = f->r[0][i];
++		int x, y;
++
++		if (!(present & (1U << i)))
++			continue;
++		x = rk3128_reference_x(p);
++		y = rk3128_reference_y(p);
++		if (p & RK3128_REFERENCE_KEY) {
++			x = x * 800 / 1024;
++			y = (y * 1280 / 640) & 0xfff;
++		} else {
++			silead_d708_calibrate(&x, &y);
++		}
++		out[used].x = x;
++		out[used].y = y;
++		out[used].id = i;
++		rk3128_reference_record(f, &out[used]);
++		used++;
++	}
++	f->valid = present;
++	return used;
++}
++#endif

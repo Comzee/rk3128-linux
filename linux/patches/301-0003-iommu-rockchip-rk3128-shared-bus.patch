@@ -1,0 +1,128 @@
+From f53f6b0cb7fdeffccb34cf14d81ca91ebf4dd793 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 10:36:20 -0600
+Subject: [PATCH 3/5] iommu/rockchip: Take the RK3128 shared decoder bus in
+ runtime PM
+
+On RK3128 the IOMMUs of the HEVC decoder and of the VPU sit behind the
+bus the two decoders share, switched by GRF_SOC_CON1 bit 15, and must
+only be touched while the bus points at their decoder. They are reached
+from more places than their decoder drivers: driver core resumes an
+IOMMU for its consumer's probe and unbind (pm_runtime_get_suppliers(),
+the PM_RUNTIME device link), and the DMA layer attaches its domain while
+it is resumed.
+
+Every register access of this driver is already in the runtime PM
+callbacks or under pm_runtime_get_if_in_use() (attach, detach, TLB zap,
+the IRQ handler), and probe touches no register. So join the bus arbiter
+in probe, before runtime PM is enabled, and take the bus first in the
+resume callback and give it back last in the suspend callback. Then no
+path can touch such an IOMMU while the bus points at the other decoder.
+A resume that cannot get the bus fails with -EBUSY and the IOMMU stays
+suspended (attach and the TLB zap then skip the hardware, as for any
+suspended IOMMU). If the enable itself fails, the IOMMU is disabled
+again before the bus is given back.
+
+devm_rockchip_vcodec_combo_get() returns NULL for every IOMMU that is
+not behind a shared bus (every SoC but RK3128), and the callbacks then
+behave as before.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+ drivers/iommu/Kconfig          |  1 +
+ drivers/iommu/rockchip-iommu.c | 38 ++++++++++++++++++++++++++++++----
+ 2 files changed, 35 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/iommu/Kconfig b/drivers/iommu/Kconfig
+index 6e07bd694..b3c909ae7 100644
+--- a/drivers/iommu/Kconfig
++++ b/drivers/iommu/Kconfig
+@@ -230,6 +230,7 @@ config ROCKCHIP_IOMMU
+ 	depends on ARCH_ROCKCHIP || COMPILE_TEST
+ 	select IOMMU_API
+ 	select ARM_DMA_USE_IOMMU
++	select ROCKCHIP_VCODEC_COMBO if ARCH_ROCKCHIP && ARM && OF
+ 	help
+ 	  Support for IOMMUs found on Rockchip rk32xx SOCs.
+ 	  These IOMMUs allow virtualization of the address space used by most
+diff --git a/drivers/iommu/rockchip-iommu.c b/drivers/iommu/rockchip-iommu.c
+index 21af2f621..b7a0da4a9 100644
+--- a/drivers/iommu/rockchip-iommu.c
++++ b/drivers/iommu/rockchip-iommu.c
+@@ -26,6 +26,7 @@
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+ #include <linux/string_choices.h>
++#include <soc/rockchip/rockchip_vcodec_combo.h>
+ 
+ #include "iommu-pages.h"
+ 
+@@ -116,6 +117,8 @@ struct rk_iommu {
+ 	struct list_head node; /* entry in rk_iommu_domain.iommus */
+ 	struct iommu_domain *domain; /* domain to which iommu is attached */
+ 	const struct rk_iommu_ops *rk_ops;
++	/* RK3128: the bus of the decoder behind it is shared, see probe */
++	struct rockchip_vcodec_combo_client *combo;
+ };
+ 
+ struct rk_iommudata {
+@@ -1260,6 +1263,19 @@ static int rk_iommu_probe(struct platform_device *pdev)
+ 	iommu->reset_disabled = device_property_read_bool(dev,
+ 					"rockchip,disable-mmu-reset");
+ 
++	/*
++	 * On RK3128 the HEVC decoder and the VPU share one bus, and the IOMMU
++	 * of either may only be touched while the bus points at it. Every
++	 * register access of this driver happens in the runtime PM callbacks
++	 * or while the IOMMU is RPM_ACTIVE (pm_runtime_get_if_in_use()), so
++	 * the callbacks take and give back the bus, and the client must exist
++	 * before runtime PM is enabled. NULL for any other IOMMU.
++	 */
++	iommu->combo = devm_rockchip_vcodec_combo_get(dev);
++	if (IS_ERR(iommu->combo))
++		return dev_err_probe(dev, PTR_ERR(iommu->combo),
++				     "no arbiter for the shared decoder bus\n");
++
+ 	/*
+ 	 * Take every clock the devicetree provides.  Most IOMMU instances
+ 	 * need exactly "aclk" + "iface", but e.g. the RK3576 NPU IOMMUs sit
+@@ -1332,21 +1348,35 @@ static int __maybe_unused rk_iommu_suspend(struct device *dev)
+ {
+ 	struct rk_iommu *iommu = dev_get_drvdata(dev);
+ 
+-	if (iommu->domain == &rk_identity_domain)
+-		return 0;
++	if (iommu->domain != &rk_identity_domain)
++		rk_iommu_disable(iommu);
+ 
+-	rk_iommu_disable(iommu);
++	/* after the last register access: the bus may switch away now */
++	rockchip_vcodec_combo_power_off(iommu->combo);
+ 	return 0;
+ }
+ 
+ static int __maybe_unused rk_iommu_resume(struct device *dev)
+ {
+ 	struct rk_iommu *iommu = dev_get_drvdata(dev);
++	int ret;
++
++	/* before the first register access: get the bus, if it is shared */
++	ret = rockchip_vcodec_combo_power_on(iommu->combo);
++	if (ret)
++		return ret;
+ 
+ 	if (iommu->domain == &rk_identity_domain)
+ 		return 0;
+ 
+-	return rk_iommu_enable(iommu);
++	ret = rk_iommu_enable(iommu);
++	if (ret && iommu->combo) {
++		/* the resume fails: leave nothing enabled once the bus goes */
++		rk_iommu_disable(iommu);
++		rockchip_vcodec_combo_power_off(iommu->combo);
++	}
++
++	return ret;
+ }
+ 
+ static const struct dev_pm_ops rk_iommu_pm_ops = {

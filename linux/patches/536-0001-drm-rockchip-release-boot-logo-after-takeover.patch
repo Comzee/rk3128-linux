@@ -1,0 +1,198 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] drm/rockchip: reclaim RK3128 reference board loader logo after verified DRM takeover
+
+The vendor kernel releases its 32 MiB loader framebuffer after copying the
+logo and programming a new scan-out. Our simplefb still needs it, but the
+LVDS DRM path kept it permanently reserved. Opt in only on RK3128 reference board with a
+named, mapped reserved-memory region. Observe two DRM vblanks after a
+flush, verify hardware window addresses, then return reserved highmem
+pages by PFN. Any failure retains the reservation. No late-init timer,
+no freeing a live scan-out, no use of __va() on highmem.
+
+Cancel the worker before destroying its CRTC. A rebind validates every
+page before freeing any, so an already-released region is never freed a
+second time. Other boards and simplefb have no matching memory-region.
+
+SPDX-License-Identifier: GPL-2.0-only
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+--- a/drivers/gpu/drm/rockchip/rockchip_drm_vop.c
++++ b/drivers/gpu/drm/rockchip/rockchip_drm_vop.c
+@@ -11,6 +11,10 @@
+ #include <linux/kernel.h>
+ #include <linux/log2.h>
+ #include <linux/module.h>
++#include <linux/highmem.h>
++#include <linux/mm.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/workqueue.h>
+ #include <linux/of.h>
+ #include <linux/overflow.h>
+ #include <linux/platform_device.h>
+@@ -143,6 +147,10 @@
+ 	struct drm_device *drm_dev;
+ 	bool is_enabled;
+ 
++	struct work_struct boot_logo_work;
++	phys_addr_t boot_logo_base;
++	phys_addr_t boot_logo_size;
++
+ 	struct completion dsp_hold_completion;
+ 	unsigned int win_enabled;
+ 
+@@ -1573,6 +1581,119 @@
+ 	return 0;
+ }
+ 
++/*
++ * RK3128 reference board's loader scans out a reserved highmem buffer. Unlike simplefb, DRM
++ * replaces it. Keep the pages until a real modeset has latched, not merely
++ * until probe/late_initcall: a deferred or failed display must retain them.
++ */
++static void vop_boot_logo_init(struct vop *vop)
++{
++	struct device_node *np;
++	struct reserved_mem *rmem;
++	int index;
++
++	if (!of_machine_is_compatible("rockchip,rk3128-reference"))
++		return;
++
++	index = of_property_match_string(vop->dev->of_node,
++					 "memory-region-names", "boot-logo");
++	if (index < 0)
++		return;
++
++	np = of_parse_phandle(vop->dev->of_node, "memory-region", index);
++	if (!np)
++		return;
++
++	rmem = of_reserved_mem_lookup(np);
++	if (rmem &&
++	    !of_property_read_bool(np, "no-map") &&
++	    !of_property_read_bool(np, "reusable") &&
++	    rmem->size && IS_ALIGNED(rmem->base, PAGE_SIZE) &&
++	    IS_ALIGNED(rmem->size, PAGE_SIZE) &&
++	    rmem->base <= PHYS_ADDR_MAX - rmem->size) {
++		vop->boot_logo_base = rmem->base;
++		vop->boot_logo_size = rmem->size;
++	}
++	of_node_put(np);
++}
++
++static bool vop_boot_logo_contains(struct vop *vop, u32 addr)
++{
++	return addr >= vop->boot_logo_base &&
++	       addr - vop->boot_logo_base < vop->boot_logo_size;
++}
++
++static void vop_boot_logo_release(struct work_struct *work)
++{
++	struct vop *vop = container_of(work, struct vop, boot_logo_work);
++	struct drm_crtc *crtc = &vop->crtc;
++	unsigned long pfn, first, end, before;
++	unsigned int count;
++	bool active = false;
++	int i;
++
++	mutex_lock(&vop->vop_lock);
++	if (!vop->is_enabled || !vop->boot_logo_size)
++		goto out_unlock;
++
++	if (drm_crtc_vblank_get(crtc))
++		goto out_unlock;
++
++	/* One full new frame, including any old prefetch, must have finished. */
++	for (i = 0; i < 2; i++) {
++		count = drm_crtc_vblank_count(crtc);
++		drm_crtc_wait_one_vblank(crtc);
++		if (count == drm_crtc_vblank_count(crtc))
++			goto out_vblank;
++	}
++
++	/* Read hardware, not the register backup or the requested plane state. */
++	spin_lock_irq(&vop->reg_lock);
++	for (i = 0; i < vop->data->win_size; i++) {
++		const struct vop_win_data *win = vop->win[i].data;
++
++		if (!VOP_WIN_GET(vop, win, enable))
++			continue;
++		if (vop_boot_logo_contains(vop, VOP_WIN_GET_YRGBADDR(vop, win)) ||
++		    (VOP_WIN_HAS_REG(win, uv_mst) &&
++		     vop_boot_logo_contains(vop, VOP_WIN_GET(vop, win, uv_mst))))
++			break;
++		active = true;
++	}
++	spin_unlock_irq(&vop->reg_lock);
++	if (i != vop->data->win_size || !active)
++		goto out_vblank;
++
++	first = PHYS_PFN(vop->boot_logo_base);
++	end = first + PHYS_PFN(vop->boot_logo_size);
++	/* Validate the WHOLE region before freeing any page (also on rebind). */
++	for (pfn = first; pfn < end; pfn++) {
++		if (!pfn_valid(pfn) || !PageHighMem(pfn_to_page(pfn)) ||
++		    !PageReserved(pfn_to_page(pfn)) ||
++		    page_count(pfn_to_page(pfn)) != 1) {
++			dev_warn(vop->dev,
++				 "boot logo not released: invalid reserved PFN %#lx\n", pfn);
++			/* Includes an already-released region after driver rebind. */
++			WRITE_ONCE(vop->boot_logo_size, 0);
++			goto out_vblank;
++		}
++	}
++
++	before = totalram_pages();
++	for (pfn = first; pfn < end; pfn++)
++		free_reserved_page(pfn_to_page(pfn));
++	dev_info(vop->dev,
++		 "boot logo released: %pa+%pa after DRM vblanks, MemTotal %lu -> %lu KiB\n",
++		 &vop->boot_logo_base, &vop->boot_logo_size,
++		 before << (PAGE_SHIFT - 10), totalram_pages() << (PAGE_SHIFT - 10));
++	WRITE_ONCE(vop->boot_logo_size, 0);
++
++out_vblank:
++	drm_crtc_vblank_put(crtc);
++out_unlock:
++	mutex_unlock(&vop->vop_lock);
++}
++
+ static void vop_crtc_atomic_flush(struct drm_crtc *crtc,
+ 				  struct drm_atomic_commit *state)
+ {
+@@ -1631,6 +1752,9 @@
+ 		drm_flip_work_queue(&vop->fb_unref_work, old_plane_state->fb);
+ 		set_bit(VOP_PENDING_FB_UNREF, &vop->pending);
+ 	}
++
++	if (READ_ONCE(vop->boot_logo_size))
++		schedule_work(&vop->boot_logo_work);
+ }
+ 
+ static const struct drm_crtc_helper_funcs vop_crtc_helper_funcs = {
+@@ -2249,6 +2373,8 @@
+ 	spin_lock_init(&vop->reg_lock);
+ 	spin_lock_init(&vop->irq_lock);
+ 	mutex_init(&vop->vop_lock);
++	INIT_WORK(&vop->boot_logo_work, vop_boot_logo_release);
++	vop_boot_logo_init(vop);
+ 
+ 	ret = vop_create_crtc(vop);
+ 	if (ret)
+@@ -2281,6 +2407,7 @@
+ 	return 0;
+ 
+ err_disable_pm_runtime:
++	cancel_work_sync(&vop->boot_logo_work);
+ 	pm_runtime_disable(&pdev->dev);
+ 	vop_destroy_crtc(vop);
+ 	return ret;
+@@ -2290,6 +2417,8 @@
+ {
+ 	struct vop *vop = dev_get_drvdata(dev);
+ 
++	cancel_work_sync(&vop->boot_logo_work);
++
+ 	if (vop->rgb)
+ 		rockchip_rgb_fini(vop->rgb);
+ 

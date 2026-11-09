@@ -1,0 +1,30 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Board inputs and sensors, the knobs (development record #432, docs/RK3128-LINUX.md "Inputs and sensors").
+ * Included by scripts/linux-build.sh after the board file (#298). The keys, IR and accelerometer nodes stay in rk3128-board.dtsi.
+ * The board has ONE physical button, the power button (gpio-keys, #337); no volume buttons and no remote (owner, 2026-11-07, #466).
+ *
+ * RK3128_ADC_KEYS (default "disabled"): SARADC channel 2 rests at 6..11 counts on this board, inside the vol-up window, so
+ * adc-keys would hold KEY_VOLUMEUP down for good and the launcher would step the music volume on it. The board has no volume
+ * buttons (no pull-up on the line); "okay" is for a unit that has them.
+ *
+ * RK3128_IR (default "disabled"): the gpio-ir-receiver on GPIO3_D2. The board has no remote, and the rc-rk3128-reference keymap reports volume
+ * and other keys the launcher would act on, so a live receiver can only make spurious input (#466); "okay" is for a unit with an IR eye
+ * and a remote.
+ *
+ * The stock rk-kernel.dtb has `ts@55` under i2c@2005a000 (i2c2): compatible "goodix,gt8xx", touch-gpio gpio1 pin 8 (GPIO1_B0),
+ * reset-gpio gpio2 pin 17 (GPIO2_C1), max-x 1280, max-y 800 (the stock i2c2 pins are GPIO2_C4/C5, mainline's i2c2_xfer). Nobody
+ * knows whether the part is fitted. RK3128_PROBE_I2C2 (default disabled) turns on the bare adapter, with NO child node (no driver
+ * binds, nothing is written, no GPIO is driven), so the inputs test can make one plain receive-byte read of 0x55.
+ */
+&adc_keys {
+	status = RK3128_ADC_KEYS;
+};
+
+&ir_receiver {
+	status = RK3128_IR;
+};
+
+&i2c2 {
+	status = RK3128_PROBE_I2C2;
+};

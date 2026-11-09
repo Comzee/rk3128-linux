@@ -1,0 +1,59 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] pcm: softvol: NEON loop for interleaved stereo S16
+
+softvol scales sample by sample through CONVERT_AREA, one channel at a time with a stride of two.  For interleaved stereo
+S16 in the CPU's byte order with both gains attenuating (neither muted nor the 0xffff copy), four frames go through one
+NEON step: widen, multiply by the per-channel scale, shift by VOL_SCALE_SHIFT, narrow.  That is MULTI_DIV_short's
+`(sample * scale) >> 16` exactly (the product fits 32 bits, the result 16), so the output is bit for bit the same; the
+frames left over go through CONVERT_AREA as before (development record #460).
+---
+diff --git a/src/pcm/pcm_softvol.c b/src/pcm/pcm_softvol.c
+index 38c6367..aba616b 100644
+--- a/src/pcm/pcm_softvol.c
++++ b/src/pcm/pcm_softvol.c
+@@ -29,6 +29,9 @@
+ #include "pcm_local.h"
+ #include "pcm_plugin.h"
+ #include "bswap.h"
++#ifdef __ARM_NEON
++#include <arm_neon.h>
++#endif
+ #include <math.h>
+ #include <sound/tlv.h>
+ 
+@@ -345,6 +348,35 @@ static void softvol_convert_stereo_vol(snd_pcm_softvol_t *svol,
+ 		vol[1] = svol->dB_value[svol->cur_vol[1]];
+ 		vol_c = svol->dB_value[(svol->cur_vol[0] + svol->cur_vol[1]) / 2];
+ 	}
++#ifdef __ARM_NEON
++	/* interleaved stereo S16 in the CPU's order with both gains attenuating (not muted, not the 0xffff copy): 4 frames a
++	 * step, the same (sample * scale) >> 16 as MULTI_DIV_short, then the frames left over through CONVERT_AREA */
++	if (channels == 2 && snd_pcm_format_cpu_endian(svol->sformat) &&
++	    (svol->sformat == SND_PCM_FORMAT_S16_LE || svol->sformat == SND_PCM_FORMAT_S16_BE) &&
++	    vol[0] > 0 && vol[0] < 0xffff && vol[1] > 0 && vol[1] < 0xffff &&
++	    src_areas[0].addr == src_areas[1].addr && dst_areas[0].addr == dst_areas[1].addr &&
++	    src_areas[0].first == 0 && src_areas[1].first == 16 && dst_areas[0].first == 0 && dst_areas[1].first == 16 &&
++	    src_areas[0].step == 32 && src_areas[1].step == 32 && dst_areas[0].step == 32 && dst_areas[1].step == 32) {
++		const short *s = snd_pcm_channel_area_addr(&src_areas[0], src_offset);
++		short *d = snd_pcm_channel_area_addr(&dst_areas[0], dst_offset);
++		const int32_t m_init[4] = { (int32_t)vol[0], (int32_t)vol[1], (int32_t)vol[0], (int32_t)vol[1] };
++		int32x4_t m = vld1q_s32(m_init);
++		snd_pcm_uframes_t done = frames & ~(snd_pcm_uframes_t)3;
++		snd_pcm_uframes_t i;
++
++		for (i = 0; i < done * 2; i += 8) {
++			int16x8_t x = vld1q_s16(s + i);
++			int32x4_t lo = vshrq_n_s32(vmulq_s32(vmovl_s16(vget_low_s16(x)), m), VOL_SCALE_SHIFT);
++			int32x4_t hi = vshrq_n_s32(vmulq_s32(vmovl_s16(vget_high_s16(x)), m), VOL_SCALE_SHIFT);
++			vst1q_s16(d + i, vcombine_s16(vmovn_s32(lo), vmovn_s32(hi)));
++		}
++		if (done == frames)
++			return;
++		src_offset += done;
++		dst_offset += done;
++		frames -= done;
++	}
++#endif
+ 	switch (svol->sformat) {
+ 	case SND_PCM_FORMAT_S16_LE:
+ 	case SND_PCM_FORMAT_S16_BE:

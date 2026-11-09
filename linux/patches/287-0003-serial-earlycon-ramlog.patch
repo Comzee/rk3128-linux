@@ -1,0 +1,116 @@
+From: RK3128 reference (development record #287)
+Subject: [PATCH] serial: earlycon: an early console written into a RAM area
+
+earlycon=ramlog,<phys>[,<size>] stores the console text in RAM through the
+earlycon fixmap page (device memory, so it is in DRAM at once), moving the
+page along the area as it fills. With keep_bootcon it logs from the first
+message until the area is full, which covers the part of the boot before
+ramoops and its pstore console probe (arch_initcall_sync). For the RK3128
+reference board, whose Android kernel returns the RAM
+region at 0x7f100000 as /proc/last_kmsg after a warm reset.
+---
+--- a/drivers/tty/serial/Kconfig
++++ b/drivers/tty/serial/Kconfig
+@@ -85,6 +85,19 @@
+ 	  This is enabled with "earlycon=smh" on the kernel command line.
+ 	  The console is enabled when early_param is processed.
+ 
++config SERIAL_EARLYCON_RAMLOG
++	bool "Early console written into a RAM area"
++	depends on ARM && MMU
++	select SERIAL_CORE
++	select SERIAL_CORE_CONSOLE
++	select SERIAL_EARLYCON
++	help
++	  For bring-up of a board with no serial console whose boot loader
++	  keeps a RAM area across a warm reset: "earlycon=ramlog,<phys>[,<size>]
++	  keep_bootcon" stores the console text there, from the first message
++	  on, so the next boot can read it back. The area must be RAM that
++	  nothing else writes (a part of a reserved ramoops region, say).
++
+ config SERIAL_EARLYCON_RISCV_SBI
+ 	bool "Early console using RISC-V SBI"
+ 	depends on RISCV_SBI
+--- a/drivers/tty/serial/Makefile
++++ b/drivers/tty/serial/Makefile
+@@ -8,6 +8,7 @@
+ 
+ obj-$(CONFIG_SERIAL_EARLYCON) += earlycon.o
+ obj-$(CONFIG_SERIAL_EARLYCON_SEMIHOST) += earlycon-semihost.o
++obj-$(CONFIG_SERIAL_EARLYCON_RAMLOG) += earlycon-ramlog.o
+ obj-$(CONFIG_SERIAL_EARLYCON_RISCV_SBI) += earlycon-riscv-sbi.o
+ 
+ # These Sparc drivers have to appear before others such as 8250
+--- /dev/null
++++ b/drivers/tty/serial/earlycon-ramlog.c
+@@ -0,0 +1,70 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * earlycon=ramlog,<phys>[,<size>]: an early console written into RAM.
++ *
++ * For boards with no serial console whose boot loader keeps a RAM area
++ * across a warm reset (the RK3128 reference board:
++ * its Android kernel hands the 512 KiB at 0x7f100000 back as
++ * /proc/last_kmsg). The text of every console message is stored at <phys>,
++ * after a "RK3128-EARLYCON 1" line, and is always followed by a NUL, until
++ * <size> bytes (default 0x7f80) are full; then it stops. The stores go
++ * through the earlycon fixmap page, mapped as device memory, so they are in
++ * DRAM as soon as they are made, and the page is moved along the area as it
++ * fills. Use it with keep_bootcon so that it keeps logging after the first
++ * real console registers. Only the CPU that remaps the page flushes its TLB:
++ * meant for uniprocessor bring-up (maxcpus=1).
++ */
++#include <linux/console.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/kernel.h>
++#include <linux/serial_core.h>
++#include <asm/fixmap.h>
++
++#define RAMLOG_MAGIC	"RK3128-EARLYCON 1\n"
++#define RAMLOG_DEFSIZE	0x7f80
++
++static phys_addr_t ramlog_base;
++static unsigned long ramlog_size;
++static unsigned long ramlog_pos;
++static phys_addr_t ramlog_page;
++
++static void ramlog_store(unsigned long pos, char c)
++{
++	phys_addr_t pa = ramlog_base + pos;
++
++	if ((pa & PAGE_MASK) != ramlog_page) {
++		ramlog_page = pa & PAGE_MASK;
++		set_fixmap_io(FIX_EARLYCON_MEM_BASE, ramlog_page);
++	}
++	writeb_relaxed(c, (void __iomem *)(fix_to_virt(FIX_EARLYCON_MEM_BASE) +
++					   (pa & ~PAGE_MASK)));
++}
++
++static void ramlog_write(struct console *con, const char *s, unsigned int n)
++{
++	while (n-- && ramlog_pos + 1 < ramlog_size)
++		ramlog_store(ramlog_pos++, *s++);
++	if (ramlog_pos < ramlog_size)
++		ramlog_store(ramlog_pos, '\0');
++	wmb();
++}
++
++static int __init early_ramlog_setup(struct earlycon_device *dev,
++				     const char *opt)
++{
++	if (!dev->port.mapbase || dev->port.iotype != UPIO_MEM)
++		return -ENODEV;
++	ramlog_base = dev->port.mapbase;
++	/* the option after the address is parsed as the "baud" rate */
++	ramlog_size = dev->baud ? dev->baud : RAMLOG_DEFSIZE;
++	if (ramlog_size < sizeof(RAMLOG_MAGIC) + 1)
++		return -EINVAL;
++	/* earlycon_map() mapped the page that holds the start */
++	ramlog_page = ramlog_base & PAGE_MASK;
++	ramlog_pos = 0;
++	ramlog_write(NULL, RAMLOG_MAGIC, sizeof(RAMLOG_MAGIC) - 1);
++	dev->con->write = ramlog_write;
++	return 0;
++}
++EARLYCON_DECLARE(ramlog, early_ramlog_setup);

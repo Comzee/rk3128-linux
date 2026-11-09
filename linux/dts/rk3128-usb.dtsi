@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * USB device mode: the micro-USB port is the SoC's OTG controller (dwc2 at 0x10180000) on the internal USB 2.0 PHY, used as a
+ * peripheral so the board enumerates on a PC as a USB network adapter (CDC-NCM, configfs;
+ * examples/usb/rk3128-usb-gadget). Networking and SSH configuration are supplied separately.
+ * Included by scripts/linux-build.sh after the board file (#298 fragment convention); RK3128_USB (okay|disabled, default disabled until the board proves it) is the knob.
+ *
+ * Android's port: `usb@10180000` `rockchip,rk3126_usb20_otg` with `rockchip,usb-mode = <0>` (otg), clocks hclk_usb0 + the PHY,
+ * resets otg_ahb/otg_phy/otg_controller (stock rk-kernel.dtb, `tools/dtb_patch.py show`). Mainline has all of it in rk3128.dtsi:
+ * `usb_otg` (dwc2, FIFO sizes of the SoC), `usb2phy` (the GRF block at 0x17c, `rockchip,rk3128-usb2phy`, also the 480 MHz clock
+ * the controller runs on) and its `otg-port` (B-session valid, ID and line-state interrupts).
+ *
+ * dr_mode is "peripheral", not "otg": the port has no ID pin worth trusting (a micro-B cable, the vendor kernel read mode 0 and
+ * never switched), and a controller that stays a device never drives VBUS. The vendor's `usb_control` node names
+ * `otg_drv_gpio = <GPIO3 C4>` as the VBUS drive: nothing here requests that pin, so it stays an input and VBUS is never driven
+ * (the PC provides it). The second port (`usb_host_ehci`/`ohci` and the PHY's host-port) has no connector on this board and
+ * stays disabled.
+ */
+
+#ifndef RK3128_USB
+#define RK3128_USB "disabled"
+#endif
+
+&usb2phy {
+	status = RK3128_USB;
+};
+
+&usb2phy_otg {
+	status = RK3128_USB;
+};
+
+&usb_otg {
+	dr_mode = "peripheral";
+	status = RK3128_USB;
+};

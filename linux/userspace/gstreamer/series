@@ -1,0 +1,4 @@
+0001-v4l2codecs-hevc-crop-meta.patch
+0010-CVE-2026-119727-h265-sei-decoding-units.patch
+0011-CVE-2026-53702-h265-sei-cpb-count.patch
+616-0001-h264parse-preserve-independent-vui-range.patch

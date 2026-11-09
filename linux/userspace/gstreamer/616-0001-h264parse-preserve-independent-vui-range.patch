@@ -1,0 +1,63 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] h264parse: preserve independently signalled VUI range
+
+video_full_range_flag belongs to video_signal_type, independently of the
+optional colour description or recognised matrix/transfer/primaries. Keep
+that range even for a legal stream with no colour description at all.
+
+Raw YUV GstVideoInfo replaces incomplete colourimetry when its matrix is
+unknown, also discarding a known range. Supply only the missing matrix
+from its normal format/size defaults; retain the stream range and any
+known transfer/primaries. No pixels or decode path are changed.
+
+---
+--- a/gst/videoparsers/gsth264parse.c
++++ b/gst/videoparsers/gsth264parse.c
+@@ -2273,23 +2273,33 @@
+       }
+     }
+ 
+-    if (vui->video_signal_type_present_flag &&
+-        vui->colour_description_present_flag) {
++    if (vui->video_signal_type_present_flag) {
+       GstVideoColorimetry ci = { 0, };
+       gchar *old_colorimetry = NULL;
+-
++
+-      ci.matrix = gst_video_color_matrix_from_iso (vui->matrix_coefficients);
+-      ci.transfer =
+-          gst_video_transfer_function_from_iso (vui->transfer_characteristics);
+-      ci.primaries = gst_video_color_primaries_from_iso (vui->colour_primaries);
+-
+-      if (ci.matrix != GST_VIDEO_COLOR_MATRIX_UNKNOWN
+-          && ci.transfer != GST_VIDEO_TRANSFER_UNKNOWN
+-          && ci.primaries != GST_VIDEO_COLOR_PRIMARIES_UNKNOWN) {
+-        if (vui->video_full_range_flag)
+-          ci.range = GST_VIDEO_COLOR_RANGE_0_255;
++      if (vui->colour_description_present_flag) {
++        ci.matrix = gst_video_color_matrix_from_iso (vui->matrix_coefficients);
++        ci.transfer =
++            gst_video_transfer_function_from_iso (vui->transfer_characteristics);
++        ci.primaries = gst_video_color_primaries_from_iso (vui->colour_primaries);
++      }
++
++      /* Range is present even when colour_description_present_flag is zero. */
++      ci.range = vui->video_full_range_flag ? GST_VIDEO_COLOR_RANGE_0_255 :
++          GST_VIDEO_COLOR_RANGE_16_235;
++
++      if (ci.matrix == GST_VIDEO_COLOR_MATRIX_UNKNOWN) {
++        GstVideoInfo defaults;
++
++        /* Raw YUV caps need a matrix or GstVideoInfo replaces all colorimetry,
++         * including this independently signalled range. Use its normal size-
++         * based matrix default, retaining range and any known attributes. */
++        gst_video_info_init (&defaults);
++        if (gst_video_info_set_format (&defaults, GST_VIDEO_FORMAT_I420,
++                h264parse->width, h264parse->height))
++          ci.matrix = defaults.colorimetry.matrix;
+         else
+-          ci.range = GST_VIDEO_COLOR_RANGE_16_235;
++          ci.matrix = GST_VIDEO_COLOR_MATRIX_BT601;
+       }
+ 
+       old_colorimetry =

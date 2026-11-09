@@ -1,0 +1,153 @@
+From: Comzee <117947104+Comzee@users.noreply.github.com>
+Subject: [PATCH] pmdomain: rockchip: initialize RK3128 NoC priorities from DT
+
+The RK312x BSP initializes the external LCDC NoC port to board-selected
+high/low priorities. Merely preserving the reset values across domain
+transitions leaves this policy absent on mainline. Honor the optional
+vendor priority pair for RK3128 QoS nodes, with strict range validation,
+checked masked writes. Apply it to an already powered domain at probe
+without changing its inherited clock gates, and after each power-on/restore
+with the existing domain clocks enabled. Nodes without
+the property retain their existing behavior.
+
+Signed-off-by: Comzee <117947104+Comzee@users.noreply.github.com>
+---
+diff --git a/drivers/pmdomain/rockchip/pm-domains.c b/drivers/pmdomain/rockchip/pm-domains.c
+index e193f97..57a2f4d 100644
+--- a/drivers/pmdomain/rockchip/pm-domains.c
++++ b/drivers/pmdomain/rockchip/pm-domains.c
+@@ -89,6 +89,7 @@ struct rockchip_pmu_info {
+ #define QOS_BANDWIDTH		0x10
+ #define QOS_SATURATION		0x14
+ #define QOS_EXTCONTROL		0x18
++#define QOS_PRIORITY_MASK	(GENMASK(9, 8) | GENMASK(3, 0))
+ 
+ struct rockchip_pm_domain {
+ 	struct generic_pm_domain genpd;
+@@ -97,6 +98,9 @@ struct rockchip_pm_domain {
+ 	int num_qos;
+ 	struct regmap **qos_regmap;
+ 	u32 *qos_save_regs[MAX_QOS_REGS_NUM];
++	/* Optional board policy, reapplied after a domain loses its registers. */
++	u32 *qos_priority;
++	bool has_qos_priority;
+ 	int num_clks;
+ 	struct clk_bulk_data *clks;
+ 	struct device_node *node;
+@@ -453,6 +457,24 @@ static int rockchip_pmu_set_idle_request(struct rockchip_pm_domain *pd,
+ 	return 0;
+ }
+ 
++static int rockchip_pmu_set_qos_priority(struct rockchip_pm_domain *pd)
++{
++	int i, ret;
++
++	if (!pd->has_qos_priority)
++		return 0;
++
++	for (i = 0; i < pd->num_qos; i++) {
++		if (pd->qos_priority[i] == U32_MAX)
++			continue;
++		ret = regmap_update_bits(pd->qos_regmap[i], QOS_PRIORITY,
++					 QOS_PRIORITY_MASK, pd->qos_priority[i]);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
+ static int rockchip_pmu_save_qos(struct rockchip_pm_domain *pd)
+ {
+ 	int i;
+@@ -652,7 +674,7 @@ static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
+ 	guard(mutex)(&pmu->mutex);
+ 
+ 	if (rockchip_pmu_domain_is_on(pd) == power_on)
+-		return 0;
++		return power_on ? rockchip_pmu_set_qos_priority(pd) : 0;
+ 
+ 	ret = clk_bulk_enable(pd->num_clks, pd->clks);
+ 	if (ret < 0) {
+@@ -682,6 +704,9 @@ static int rockchip_pd_power(struct rockchip_pm_domain *pd, bool power_on)
+ 			goto out;
+ 
+ 		rockchip_pmu_restore_qos(pd);
++		ret = rockchip_pmu_set_qos_priority(pd);
++		if (ret)
++			goto out;
+ 	}
+ 
+ out:
+@@ -793,6 +818,30 @@ static void rockchip_pd_detach_dev(struct generic_pm_domain *genpd,
+ 	pm_clk_destroy(dev);
+ }
+ 
++static int rockchip_pmu_parse_qos_priority(struct rockchip_pm_domain *pd,
++					   struct device_node *node, int index)
++{
++	u32 levels[2];
++	int ret;
++
++	pd->qos_priority[index] = U32_MAX;
++	if (!of_property_present(node, "rockchip,priority"))
++		return 0;
++	if (!of_device_is_compatible(node, "rockchip,rk3128-qos") ||
++	    of_property_count_u32_elems(node, "rockchip,priority") != 2)
++		return -EINVAL;
++	ret = of_property_read_u32_array(node, "rockchip,priority", levels, 2);
++	if (ret)
++		return ret;
++	if (levels[0] > 3 || levels[1] > 3)
++		return -EINVAL;
++
++	/* RK312x CPU_AXI_QOS_PRIORITY_LEVEL(high, low), from the BSP. */
++	pd->qos_priority[index] = (levels[0] << 8) | (levels[0] << 2) | levels[1];
++	pd->has_qos_priority = true;
++	return 0;
++}
++
+ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+ 				      struct device_node *node)
+ {
+@@ -873,6 +922,12 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+ 			error = -ENOMEM;
+ 			goto err_unprepare_clocks;
+ 		}
++		pd->qos_priority = devm_kcalloc(pmu->dev, pd->num_qos,
++						sizeof(*pd->qos_priority), GFP_KERNEL);
++		if (!pd->qos_priority) {
++			error = -ENOMEM;
++			goto err_unprepare_clocks;
++		}
+ 
+ 		for (j = 0; j < MAX_QOS_REGS_NUM; j++) {
+ 			pd->qos_save_regs[j] = devm_kcalloc(pmu->dev,
+@@ -892,7 +947,13 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+ 				goto err_unprepare_clocks;
+ 			}
+ 			pd->qos_regmap[j] = syscon_node_to_regmap(qos_node);
++			error = rockchip_pmu_parse_qos_priority(pd, qos_node, j);
+ 			of_node_put(qos_node);
++			if (error) {
++				dev_err(pmu->dev, "%pOFn: invalid QoS priority at index %d: %d\n",
++					node, j, error);
++				goto err_unprepare_clocks;
++			}
+ 			if (IS_ERR(pd->qos_regmap[j])) {
+ 				error = -ENODEV;
+ 				goto err_unprepare_clocks;
+@@ -900,6 +961,14 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
+ 		}
+ 	}
+ 
++	/* The NoC syscon is accessible on domains the bootloader left on. */
++	if (pd->has_qos_priority && rockchip_pmu_domain_is_on(pd)) {
++		/* Preserve the bootloader's live display clock gates. */
++		error = rockchip_pmu_set_qos_priority(pd);
++		if (error)
++			goto err_unprepare_clocks;
++	}
++
+ 	if (pd->info->name)
+ 		pd->genpd.name = pd->info->name;
+ 	else

@@ -1,0 +1,87 @@
+From 07dcf344b54de494877637f3eeaa15d889e70a2f Mon Sep 17 00:00:00 2001
+From: mali-re-kernel spike <spike@local>
+Date: Fri, 6 Nov 2026 20:35:40 -0600
+Subject: [PATCH 5/5] drm/lima: runtime switches for the hardware A/B of 0102
+ and 0103
+
+/sys/module/lima/parameters/l2_flush_always (0644, default N): Y puts
+back lima's invalidate-every-task L2 behaviour.
+/sys/module/lima/parameters/irq_start (0644, default Y): N starts a
+queued task from a work item instead of the IRQ handler (about the
+kworker hop of plain drm_sched).
+
+So one boot can measure both ways (hardware-test.sh GPUT, the Demo's fps)
+without a rebuild.
+
+Spike: RK3128 reference #375 (mali-re kernel area), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_drv.c   | 8 ++++++++
+ drivers/gpu/drm/lima/lima_drv.h   | 2 ++
+ drivers/gpu/drm/lima/lima_sched.c | 5 +++--
+ 3 files changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index 6a3d5e2..cfde4d5 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -22,6 +22,8 @@ uint lima_heap_init_nr_pages = 8;
+ uint lima_max_error_tasks;
+ uint lima_job_hang_limit;
+ int lima_l2_max_reads = 0x1c;
++bool lima_l2_flush_always;
++bool lima_irq_start = true;
+ 
+ MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+@@ -38,6 +40,12 @@ module_param_named(job_hang_limit, lima_job_hang_limit, uint, 0444);
+ MODULE_PARM_DESC(l2_max_reads, "L2 cache MAX_READS (outstanding reads); -1 keeps the hardware reset value like the vendor driver (default 0x1c)");
+ module_param_named(l2_max_reads, lima_l2_max_reads, int, 0444);
+ 
++MODULE_PARM_DESC(l2_flush_always, "invalidate the L2 before every task (lima's old behaviour) instead of the vendor's conditional invalidate");
++module_param_named(l2_flush_always, lima_l2_flush_always, bool, 0644);
++
++MODULE_PARM_DESC(irq_start, "start the next queued task from the IRQ handler (vendor upper-half scheduling); 0 = from a work item");
++module_param_named(irq_start, lima_irq_start, bool, 0644);
++
+ static int lima_ioctl_get_param(struct drm_device *dev, void *data, struct drm_file *file)
+ {
+ 	struct drm_lima_get_param *args = data;
+diff --git a/drivers/gpu/drm/lima/lima_drv.h b/drivers/gpu/drm/lima/lima_drv.h
+index 81697c6..ac543e6 100644
+--- a/drivers/gpu/drm/lima/lima_drv.h
++++ b/drivers/gpu/drm/lima/lima_drv.h
+@@ -12,6 +12,8 @@
+ extern int lima_sched_timeout_ms;
+ extern uint lima_heap_init_nr_pages;
+ extern int lima_l2_max_reads;
++extern bool lima_l2_flush_always;
++extern bool lima_irq_start;
+ extern uint lima_max_error_tasks;
+ extern uint lima_job_hang_limit;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+index 058dc30..d456c07 100644
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -248,7 +248,7 @@ static struct lima_vm *lima_sched_hw_start(struct lima_sched_pipe *pipe,
+ 	 * a while.
+ 	 */
+ 	for (i = 0; i < pipe->num_l2_cache; i++) {
+-		if (task->flush_l2)
++		if (task->flush_l2 || READ_ONCE(lima_l2_flush_always))
+ 			lima_l2_cache_flush(pipe->l2_cache[i]);
+ 		else
+ 			lima_l2_cache_flush_conditional(pipe->l2_cache[i],
+@@ -693,7 +693,8 @@ void lima_sched_pipe_task_done(struct lima_sched_pipe *pipe)
+ 		spin_lock(&pipe->hw_lock);
+ 		pipe->current_task = NULL;
+ 		next = pipe->next_task;
+-		if (next && (next->vm == pipe->current_vm || !pipe->put_vm)) {
++		if (next && READ_ONCE(lima_irq_start) &&
++		    (next->vm == pipe->current_vm || !pipe->put_vm)) {
+ 			struct lima_vm *old;
+ 
+ 			pipe->next_task = NULL;
+-- 
+2.53.0
+

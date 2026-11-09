@@ -1,0 +1,257 @@
+lima: pack the PP's uniforms as the Mali blob does (driver-side, PP only), and give each source of an fmad its own
+uniform load. Ours (development record #366 wrote it, #375 checked it on the board and moved it into the image build;
+docs/RK3128-LINUX.md "GPU: blob baseline" finding 3 and "GPU: on the board with lima"): on lima at 1920x1080 the packed
+case and 100 draws switching between a packed and an unpacked program read back exact, LIMA_DEBUG=dump shows the
+uploaded buffer in the packed layout, and the Demo, Games and Photos renders are byte-identical to the build without it.
+
+The ticket's literal fix, packed_uniforms in lima_init_screen_caps, is rejected: with it Mesa lays uniforms out tightly
+with no vec4 alignment (gl_nir_link_uniforms.c adds each with pad_and_align = false), so a vec3 or vec4 can straddle two
+slots, and the PP's load.u reads one aligned vec4 slot (reference UI's polygon fill: u_e1 would sit at dwords 7-9, across slots 1
+and 2). Instead lima keeps the API layout and repacks per fragment shader:
+- lima_program.c lima_nir_pack_pp_uniforms: for a shader with only direct uniform loads in its first 32 slots, the used
+  components of each slot (from component 0 to the last read) go, widest first, into the first slot with room; loads
+  are rewritten to full vec4 loads of the new slot plus a swizzle (folded into the users by copy propagation). The map
+  is in lima_fs_compiled_shader.state (so the disk cache keeps it).
+- lima_draw.c lima_update_pp_uniform: uploads in the shader's layout, also when only the compiled FS changed.
+- lima_nir_duplicate.c: a uniform read by both the mul and the add of an fmad gets a load for each (as load_const does),
+  so both read ^uniform in one instruction; ppir shares the slot when the index and size match.
+Measured with tools/malitrace/lima-compare.sh --pinned --patch (after dot2-add.patch) on capture 20261106T175604Z: Demo
+63 -> 61 PP instructions (program 1 3 -> 2 = blob, packing; program 22 5 -> 4, the fmad loads alone); reference UI unchanged
+(its uniforms are vec4s and vec3s with nothing to fill them); on its own, without dot2-add.patch, the fmad loads also take
+the reference UI polygon fill from 15 to 11. Off the board, LIMA_DEBUG=dump of a draw through lima's
+no-op drm-shim shows the uploaded fp16 buffer in the packed layout the shader reads. Applies to 26.2.6 + 0001-0003
+(without dot2-add.patch, which #375 left out of the build) and, on its own or after dot2-add.patch, to Mesa main.
+
+diff --git a/src/gallium/drivers/lima/ir/lima_nir_duplicate.c b/src/gallium/drivers/lima/ir/lima_nir_duplicate.c
+index dfc57ea..c2e9e81 100644
+--- a/src/gallium/drivers/lima/ir/lima_nir_duplicate.c
++++ b/src/gallium/drivers/lima/ir/lima_nir_duplicate.c
+@@ -113,7 +113,9 @@ duplicate_intrinsic(nir_builder *b, nir_intrinsic_instr *itr,
+    if (itr->instr.pass_flags)
+       return false;
+ 
+-   return duplicate_def_at_use(b, &itr->def, false);
++   /* a uniform read by both the mul and the add of an fmad gets a load for
++    * each, so both can read ^uniform in one instruction (the slot is shared) */
++   return duplicate_def_at_use(b, &itr->def, op == nir_intrinsic_load_uniform);
+ }
+ 
+ /* Duplicate load uniforms for every user.
+diff --git a/src/gallium/drivers/lima/lima_context.h b/src/gallium/drivers/lima/lima_context.h
+index 513dc07..01634df 100644
+--- a/src/gallium/drivers/lima/lima_context.h
++++ b/src/gallium/drivers/lima/lima_context.h
+@@ -43,6 +43,9 @@ struct lima_depth_stencil_alpha_state {
+    struct pipe_depth_stencil_alpha_state base;
+ };
+ 
++/* PP uniform slots (vec4) a shader may use for lima to pack them */
++#define LIMA_PP_PACK_MAX_SLOTS 32
++
+ struct lima_fs_compiled_shader {
+    struct lima_bo *bo;
+    void *shader;
+@@ -53,6 +56,14 @@ struct lima_fs_compiled_shader {
+       int frag_color1_reg;
+       int frag_depth_reg;
+       bool uses_discard;
++      /* Packed PP uniforms (lima_nir_pack_pp_uniforms): when set, the PP
++       * uniform buffer has uniform_slots vec4s, and the first
++       * uniform_width[i] components of the API's vec4 slot i go to the
++       * component uniform_dst[i] (slot * 4 + component); width 0: unused. */
++      bool uniform_packed;
++      uint8_t uniform_slots;
++      uint8_t uniform_dst[LIMA_PP_PACK_MAX_SLOTS];
++      uint8_t uniform_width[LIMA_PP_PACK_MAX_SLOTS];
+    } state;
+ };
+ 
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+index 50a8236..a362ab8 100644
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -910,26 +910,43 @@ lima_update_pp_uniform(struct lima_context *ctx)
+ {
+    const float *const_buff = ctx->const_buffer[MESA_SHADER_FRAGMENT].buffer;
+    size_t const_buff_size = ctx->const_buffer[MESA_SHADER_FRAGMENT].size / sizeof(float);
++   struct lima_fs_compiled_shader *fs = ctx->fs;
+ 
+    if (!const_buff)
+       return;
+ 
++   size_t size = const_buff_size;
++   if (fs->state.uniform_packed)
++      size = fs->state.uniform_slots * 4;
++
+    uint16_t *fp16_const_buff =
+       lima_ctx_buff_alloc(ctx, lima_ctx_buff_pp_uniform,
+-                          const_buff_size * sizeof(uint16_t));
++                          size * sizeof(uint16_t));
+ 
+    uint32_t *array =
+       lima_ctx_buff_alloc(ctx, lima_ctx_buff_pp_uniform_array, 4);
+ 
+-   for (int i = 0; i < const_buff_size; i++)
+-       fp16_const_buff[i] = _mesa_float_to_half(const_buff[i]);
++   if (fs->state.uniform_packed) {
++      /* the shader's packed layout (lima_nir_pack_pp_uniforms) */
++      memset(fp16_const_buff, 0, size * sizeof(uint16_t));
++      for (int i = 0; i < LIMA_PP_PACK_MAX_SLOTS; i++) {
++         for (int c = 0; c < fs->state.uniform_width[i]; c++) {
++            if (i * 4 + c < const_buff_size)
++               fp16_const_buff[fs->state.uniform_dst[i] + c] =
++                  _mesa_float_to_half(const_buff[i * 4 + c]);
++         }
++      }
++   } else {
++      for (int i = 0; i < const_buff_size; i++)
++          fp16_const_buff[i] = _mesa_float_to_half(const_buff[i]);
++   }
+ 
+    *array = lima_ctx_buff_va(ctx, lima_ctx_buff_pp_uniform);
+ 
+    struct lima_job *job = lima_job_get(ctx);
+ 
+    lima_dump_command_stream_print(
+-      job->dump, fp16_const_buff, const_buff_size * 2,
++      job->dump, fp16_const_buff, size * 2,
+       false, "add pp uniform data at va %x\n",
+       lima_ctx_buff_va(ctx, lima_ctx_buff_pp_uniform));
+    lima_dump_command_stream_print(
+@@ -1091,8 +1108,10 @@ lima_draw_vbo_update(struct pipe_context *pctx,
+ 
+    lima_pack_vs_cmd(ctx, info, draw);
+ 
+-   if (ctx->dirty & LIMA_CONTEXT_DIRTY_CONST_BUFF &&
+-       ctx->const_buffer[MESA_SHADER_FRAGMENT].dirty) {
++   /* the layout of the PP uniforms is the compiled shader's */
++   if ((ctx->dirty & LIMA_CONTEXT_DIRTY_CONST_BUFF &&
++        ctx->const_buffer[MESA_SHADER_FRAGMENT].dirty) ||
++       ctx->dirty & LIMA_CONTEXT_DIRTY_COMPILED_FS) {
+       lima_update_pp_uniform(ctx);
+       ctx->const_buffer[MESA_SHADER_FRAGMENT].dirty = false;
+    }
+diff --git a/src/gallium/drivers/lima/lima_program.c b/src/gallium/drivers/lima/lima_program.c
+index 6399c6a..02523b6 100644
+--- a/src/gallium/drivers/lima/lima_program.c
++++ b/src/gallium/drivers/lima/lima_program.c
+@@ -28,6 +28,7 @@
+ 
+ #include "tgsi/tgsi_dump.h"
+ #include "compiler/nir/nir.h"
++#include "compiler/nir/nir_builder.h"
+ #include "compiler/nir/nir_serialize.h"
+ #include "nir/tgsi_to_nir.h"
+ 
+@@ -232,6 +233,103 @@ lima_vec_to_regs_filter_cb(const nir_instr *instr, unsigned writemask,
+    return !lima_alu_to_scalar_filter_cb(instr, data);
+ }
+ 
++/* The PP reads uniforms one vec4 slot per instruction (load.u), and lima gets
++ * every uniform in a vec4 slot of its own (packed_uniforms is off: Mesa's packed
++ * layout is tight and lets a vec3 or vec4 straddle two slots, which a load.u
++ * cannot read). So pack here, the way the Mali blob lays them out: the used
++ * components of each slot keep their order and go, largest first, into the first
++ * slot with room (a float beside a vec3, two vec2 in one slot); a shader that
++ * reads two uniforms in one instruction then needs one load.u, not a load.u and
++ * a mov. lima_update_pp_uniform uploads the buffer in this layout.
++ */
++static bool
++lima_nir_pack_pp_uniforms(nir_shader *s, struct lima_fs_compiled_shader *fs)
++{
++   uint8_t width[LIMA_PP_PACK_MAX_SLOTS] = {0};
++   uint8_t dst[LIMA_PP_PACK_MAX_SLOTS];
++   uint8_t fill[LIMA_PP_PACK_MAX_SLOTS] = {0};
++   unsigned num_slots = 0;
++
++   fs->state.uniform_packed = false;
++
++   nir_foreach_function_impl(impl, s) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++            if (intr->intrinsic != nir_intrinsic_load_uniform)
++               continue;
++            /* indirect access needs the API layout */
++            if (!nir_src_is_const(intr->src[0]))
++               return false;
++            unsigned slot = nir_intrinsic_base(intr) + nir_src_as_uint(intr->src[0]);
++            if (slot >= LIMA_PP_PACK_MAX_SLOTS || intr->def.bit_size != 32)
++               return false;
++            nir_component_mask_t read = nir_def_components_read(&intr->def);
++            width[slot] = MAX2(width[slot], util_last_bit(read));
++            num_slots = MAX2(num_slots, slot + 1);
++         }
++      }
++   }
++
++   /* first fit, widest first; slots of equal width keep their order */
++   unsigned dst_slots = 0;
++   bool moved = false;
++   for (unsigned w = 4; w > 0; w--) {
++      for (unsigned i = 0; i < num_slots; i++) {
++         if (width[i] != w)
++            continue;
++         unsigned d = 0;
++         while (d < dst_slots && fill[d] + w > 4)
++            d++;
++         if (d == dst_slots)
++            dst_slots++;
++         dst[i] = d * 4 + fill[d];
++         fill[d] += w;
++         if (dst[i] != i * 4)
++            moved = true;
++      }
++   }
++
++   if (!moved)
++      return false;
++
++   nir_foreach_function_impl(impl, s) {
++      nir_builder b = nir_builder_create(impl);
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr_safe(instr, block) {
++            if (instr->type != nir_instr_type_intrinsic)
++               continue;
++            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++            if (intr->intrinsic != nir_intrinsic_load_uniform)
++               continue;
++            unsigned slot = nir_intrinsic_base(intr) + nir_src_as_uint(intr->src[0]);
++            unsigned n = intr->def.num_components;
++            unsigned c = dst[slot] & 3;
++
++            b.cursor = nir_before_instr(instr);
++            nir_def *load = nir_load_uniform(&b, 4, 32, nir_imm_int(&b, 0),
++                                             .base = dst[slot] >> 2, .range = 1,
++                                             .dest_type = nir_intrinsic_dest_type(intr));
++            nir_def *comps[4];
++            for (unsigned i = 0; i < n; i++)
++               comps[i] = c + i < 4 ? nir_channel(&b, load, c + i) : nir_undef(&b, 1, 32);
++            nir_def_replace(&intr->def, nir_vec(&b, comps, n));
++         }
++      }
++      nir_progress(true, impl, nir_metadata_control_flow);
++   }
++
++   fs->state.uniform_packed = true;
++   fs->state.uniform_slots = dst_slots;
++   for (unsigned i = 0; i < LIMA_PP_PACK_MAX_SLOTS; i++) {
++      fs->state.uniform_width[i] = i < num_slots ? width[i] : 0;
++      fs->state.uniform_dst[i] = i < num_slots && width[i] ? dst[i] : 0;
++   }
++   return true;
++}
++
+ static void
+ lima_program_optimize_fs_nir(struct nir_shader *s,
+                              struct lima_fs_key *key,
+@@ -338,6 +436,7 @@ lima_fs_compile_shader(struct lima_context *ctx,
+          tex_options.lower_srgb |= (1 << i);
+    }
+ 
++   lima_nir_pack_pp_uniforms(nir, fs);
+    lima_program_optimize_fs_nir(nir, key, &tex_options);
+ 
+    if (lima_debug & LIMA_DEBUG_PP)

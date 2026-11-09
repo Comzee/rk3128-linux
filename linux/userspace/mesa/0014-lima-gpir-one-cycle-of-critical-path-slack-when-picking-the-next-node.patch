@@ -1,0 +1,97 @@
+lima/gpir: one cycle of critical-path slack when picking the next node
+
+What the blob does. The GP backend of libGLES_mali.so does NOT schedule under a
+register-pressure constraint on its first try. Its driver loop at 0x000fc780-
+0x000fcb38 is: schedule the block list (0x000f6954), allocate work registers
+(0x000fa20c), compare what the allocation needed against what is available
+(0x000fc990: ldr r2,[r7,#8]; ldr r1,[r7,#4]; cmp r2,r1; ble <done>), and only
+when it does not fit lower the pressure (0x000fb198) and go round again, with an
+iteration budget and a convergence guard - if the register count stops improving
+for more than 3 rounds it gives up with "%s register allocation failed with
+convergence for vertex shader" (string at 0x0010ede8, referenced from 0x000fcac8),
+against the plain "register allocation failed" (0x0010ee2c) below that, and
+"Insufficient MaliGP2 work register space" (0x0010ee60) when the allocation
+cannot be helped. So its scheduler is free to pick for slot occupancy and is
+corrected afterwards, where lima's single pass has to respect the 11 live value
+registers as it goes.
+
+Porting that loop is not what this patch does - lima's scheduler deliberately
+avoids re-scheduling by modelling the bypass network as the register file - but
+it does explain the one place lima is needlessly strict. try_node() walks the
+ready list, which is ordered by sched.dist, and breaks out the moment the
+distance drops below the best candidate's, so only nodes on the longest
+remaining path are ever tried and the packing score (how many of a node's loads
+fit in the same instruction) can only break ties inside that single tier. The GP
+is not critical-path bound on these shaders - it issues 6 slots an instruction
+and the Demo's heavy vertex shaders already run at 94-97 % slot occupancy - so
+one cycle of slack, letting a node just off the path win when it packs strictly
+better, is the cheap half of what the blob gets from its loop.
+
+Demo GP instructions (= GP cycles of issue), one limacompile process per program:
+  prog        1  4  7 10 13 16 19 22 25 28 31 34 37 40  43  46 51 | total
+  blob       12 13 24  5 61 14 14 29 29 22 29 28 28 15 138 138 14 |  613
+  0001-0016  12 12 26  4 64 15 15 29 29 28 33 36 28 15 115 115 11 |  587
+  +this      12 12 26  4 64 15 15 29 29 28 32 31 29 15 115 115 11 |  582
+Program 34 is the win (36 -> 31, 8 over the blob -> 3), program 31 one better on
+98 draws a frame, program 37 one worse on 3. reference UI is unchanged in every scene
+(Games/Clock 33, Photos 34, Home 49) and so is every PP count. No shader in any
+captured scene spills (0:0 spills:fills for all 68).
+
+Larger slack is NOT monotone and costs the shader that matters most - ignition's
+program 13, 25 200 vertices a frame:
+  slack    0   1   2   3   4   6   8  16  inf
+  total  587 582 580 583 577 575 571 578 579
+  p13     64  64  64  64  64  66  65  65  66
+so 1 is the value, chosen for program 13 holding still, not for the total.
+
+Picture risk: BIT-IDENTICAL, by construction. This changes only which of two
+already-ready nodes the scheduler takes first; it adds, removes and reorders
+nothing but GP moves, which are exact copies, and every arithmetic node keeps
+its operands and its opcode. There is no arithmetic in this patch.
+
+What this does NOT fix, measured so the next round does not chase it: ignition's
+program 13 stays at 64 against the blob's 61, and it is not a scheduling problem.
+Its final schedule fills 622 of 640 ALU slots (97 %); program 34's 340 of 360 and
+program 31's 311 of 330. lima's packing is already near saturation, so the
+remaining 3 instructions are 18 slots of WORK the blob does not do - move nodes
+threading values through the bypass network, of which program 13's schedule has
+60 in the pass slot and 50 in the complex slot. That is register pressure and
+instruction selection, not the scheduler; the varying half of it is what 0012 and
+0013 (FP16 mediump varyings, stride 8) already took from 32 bytes a vertex to 16.
+
+diff --git a/src/gallium/drivers/lima/ir/gp/scheduler.c b/src/gallium/drivers/lima/ir/gp/scheduler.c
+index c4700dc..3f63daa 100644
+--- a/src/gallium/drivers/lima/ir/gp/scheduler.c
++++ b/src/gallium/drivers/lima/ir/gp/scheduler.c
+@@ -1285,6 +1285,22 @@ static void ASSERTED verify_max_nodes(sched_ctx *ctx)
+    assert(ctx->instr->alu_non_cplx_slot_free >= alu_num_slot_needed_by_max + alu_num_slot_needed_by_non_cplx_store);
+ }
+ 
++/* How far below the best critical-path distance try_node() still considers a
++ * candidate. The ready list is ordered by sched.dist, so 0 - what this was -
++ * means only the nodes on the longest remaining path are ever tried, and the
++ * packing score (how many of a node's loads fit in the same instruction) only
++ * ever breaks ties inside that one tier. One cycle of slack lets the scheduler
++ * take a node just off the critical path when it packs strictly better, which
++ * is what the GP's 6 slots per instruction want: the critical path of a GP
++ * vertex shader is not what bounds it, slot occupancy is.
++ *
++ * Measured on the Demo's 17 programs (one limacompile process per program);
++ * larger values are not monotone and cost the heaviest shader, program 13:
++ *   slack  0   1   2   3   4   6   8  16  inf     program 13 (25 200 vertices
++ *   total 587 582 580 583 577 575 571 578 579     a frame): 64 64 64 64 64 66 65 65 66
++ */
++#define GPIR_SCHED_DIST_SLACK 1
++
+ static bool try_node(sched_ctx *ctx)
+ {
+    gpir_node *best_node = NULL;
+@@ -1301,7 +1317,7 @@ static bool try_node(sched_ctx *ctx)
+         &node->list != &ctx->ready_list;
+         node = list_entry(node->list.next, gpir_node, list)) {
+       if (best_score != INT_MIN) {
+-         if (node->sched.dist < best_node->sched.dist)
++         if (node->sched.dist < best_node->sched.dist - GPIR_SCHED_DIST_SLACK)
+             break;
+       }
+ 

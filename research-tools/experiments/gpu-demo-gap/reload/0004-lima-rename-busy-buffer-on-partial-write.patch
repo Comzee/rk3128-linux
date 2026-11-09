@@ -1,0 +1,181 @@
+From 3ca8e8d78301bbc474cf9995494b6102f486458b Mon Sep 17 00:00:00 2001
+From: mali-re-reload <spike@localhost>
+Date: Fri, 6 Nov 2026 20:27:16 -0600
+Subject: [PATCH] lima: rename a busy buffer on a partial write instead of
+ flushing and waiting
+
+glBufferSubData of part of a vertex buffer that a pending or running job
+still reads made lima_transfer_map flush every job using the BO (the
+current frame's job included) and wait for the GPU. An app that refills a
+sprite buffer several times a frame (the RK3128 reference Demo) got its
+on-screen job split in two (a full colour and depth write-back, then a
+reload of both) and a CPU stall per call, so CPU and GPU never overlap.
+
+Track the written range of each buffer; a write to a range nothing was
+written to needs no sync, and a partial write (PIPE_MAP_DISCARD_RANGE) to a
+busy buffer gets a new BO with the old bytes outside the range, the way the
+Mali blob reads such a buffer from a fresh copy each time.
+---
+ src/gallium/drivers/lima/lima_context.h  |  1 +
+ src/gallium/drivers/lima/lima_job.c      | 11 +++++
+ src/gallium/drivers/lima/lima_resource.c | 60 ++++++++++++++++++++++++
+ src/gallium/drivers/lima/lima_resource.h |  3 ++
+ 4 files changed, 75 insertions(+)
+
+diff --git a/src/gallium/drivers/lima/lima_context.h b/src/gallium/drivers/lima/lima_context.h
+index 513dc07..96372e7 100644
+--- a/src/gallium/drivers/lima/lima_context.h
++++ b/src/gallium/drivers/lima/lima_context.h
+@@ -327,6 +327,7 @@ struct pipe_context *
+ lima_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags);
+ 
+ void lima_flush(struct lima_context *ctx);
++bool lima_job_bo_pending(struct lima_context *ctx, struct lima_bo *bo);
+ void lima_flush_job_accessing_bo(
+    struct lima_context *ctx, struct lima_bo *bo, bool write);
+ void lima_flush_previous_job_writing_resource(
+diff --git a/src/gallium/drivers/lima/lima_job.c b/src/gallium/drivers/lima/lima_job.c
+index 8e803f7..3ebefdf 100644
+--- a/src/gallium/drivers/lima/lima_job.c
++++ b/src/gallium/drivers/lima/lima_job.c
+@@ -1044,6 +1044,17 @@ lima_flush(struct lima_context *ctx)
+    }
+ }
+ 
++/* whether a job of this context that is not submitted yet uses the BO (for any access) */
++bool
++lima_job_bo_pending(struct lima_context *ctx, struct lima_bo *bo)
++{
++   hash_table_foreach(ctx->jobs, entry) {
++      if (lima_job_has_bo(entry->data, bo, true))
++         return true;
++   }
++   return false;
++}
++
+ void
+ lima_flush_job_accessing_bo(
+    struct lima_context *ctx, struct lima_bo *bo, bool write)
+diff --git a/src/gallium/drivers/lima/lima_resource.c b/src/gallium/drivers/lima/lima_resource.c
+index bb1a314..de8e244 100644
+--- a/src/gallium/drivers/lima/lima_resource.c
++++ b/src/gallium/drivers/lima/lima_resource.c
+@@ -187,6 +187,8 @@ lima_resource_create_bo(struct pipe_screen *pscreen,
+       return NULL;
+    }
+ 
++   util_range_init(&res->valid_buffer_range);
++
+    return pres;
+ }
+ 
+@@ -308,6 +310,8 @@ lima_resource_destroy(struct pipe_screen *pscreen, struct pipe_resource *pres)
+ 
+    FREE(res->index_cache);
+ 
++   util_range_destroy(&res->valid_buffer_range);
++
+    FREE(res);
+ }
+ 
+@@ -337,6 +341,9 @@ lima_resource_from_handle(struct pipe_screen *pscreen,
+    *pres = *templat;
+    pres->screen = pscreen;
+    pipe_reference_init(&pres->reference, 1);
++   /* an imported buffer may hold anything */
++   util_range_init(&res->valid_buffer_range);
++   util_range_add(pres, &res->valid_buffer_range, 0, pres->width0);
+    res->levels[0].offset = handle->offset;
+    res->levels[0].stride = handle->stride;
+ 
+@@ -600,6 +607,55 @@ lima_transfer_map(struct pipe_context *pctx,
+       lima_bo_unreference(res->bo);
+       res->bo = new_bo;
+ 
++      if (pres->bind & PIPE_BIND_VERTEX_BUFFER)
++         ctx->dirty |= LIMA_CONTEXT_DIRTY_VERTEX_BUFF;
++
++      bo = res->bo;
++      if (pres->target == PIPE_BUFFER)
++         util_range_set_empty(&res->valid_buffer_range);
++   }
++   else if (pres->target == PIPE_BUFFER &&
++            !(usage & (PIPE_MAP_UNSYNCHRONIZED | PIPE_MAP_READ)) &&
++            (usage & PIPE_MAP_WRITE) &&
++            !util_ranges_intersect(&res->valid_buffer_range,
++                                   box->x, box->x + box->width)) {
++      /* Nothing was ever written in this range, so no job reads it:
++       * write without flushing or waiting. */
++   }
++   else if (pres->target == PIPE_BUFFER &&
++            (usage & PIPE_MAP_DISCARD_RANGE) &&
++            !(usage & (PIPE_MAP_UNSYNCHRONIZED | PIPE_MAP_READ |
++                       PIPE_MAP_PERSISTENT | PIPE_MAP_COHERENT)) &&
++            (lima_job_bo_pending(ctx, bo) ||
++             !lima_bo_wait(bo, LIMA_GEM_WAIT_WRITE, 0))) {
++      /* glBufferSubData of part of a buffer that a job still reads
++       * (a vertex buffer refilled every frame): give the resource a new BO
++       * holding the old bytes outside the range instead of flushing the
++       * job and waiting for the GPU, which split the frame's job (a
++       * write-back and reload of the whole render target) and stalled the
++       * CPU on every such call. Jobs keep the old BO through their
++       * references; the GPU only reads buffers on lima, so the old BO can
++       * be read while it is in use. */
++      struct lima_bo *new_bo = lima_bo_create(screen, bo->size, bo->flags);
++      if (!new_bo)
++         return NULL;
++      if (!lima_bo_map(bo) || !lima_bo_map(new_bo)) {
++         lima_bo_unreference(new_bo);
++         return NULL;
++      }
++
++      unsigned start = res->valid_buffer_range.start;
++      unsigned end = res->valid_buffer_range.end;
++      unsigned x0 = box->x, x1 = box->x + box->width;
++      if (start < x0)
++         memcpy(new_bo->map + start, bo->map + start, MIN2(end, x0) - start);
++      if (end > x1)
++         memcpy(new_bo->map + MAX2(start, x1), bo->map + MAX2(start, x1),
++                end - MAX2(start, x1));
++
++      lima_bo_unreference(res->bo);
++      res->bo = new_bo;
++
+       if (pres->bind & PIPE_BIND_VERTEX_BUFFER)
+          ctx->dirty |= LIMA_CONTEXT_DIRTY_VERTEX_BUFF;
+ 
+@@ -616,6 +672,10 @@ lima_transfer_map(struct pipe_context *pctx,
+       lima_bo_wait(bo, op, OS_TIMEOUT_INFINITE);
+    }
+ 
++   if (pres->target == PIPE_BUFFER && (usage & PIPE_MAP_WRITE))
++      util_range_add(pres, &res->valid_buffer_range,
++                     box->x, box->x + box->width);
++
+    if (!lima_bo_map(bo))
+       return NULL;
+ 
+diff --git a/src/gallium/drivers/lima/lima_resource.h b/src/gallium/drivers/lima/lima_resource.h
+index 1c61519..7f1c0fd 100644
+--- a/src/gallium/drivers/lima/lima_resource.h
++++ b/src/gallium/drivers/lima/lima_resource.h
+@@ -26,6 +26,7 @@
+ #define H_LIMA_RESOURCE
+ 
+ #include "pipe/p_state.h"
++#include "util/u_range.h"
+ 
+ /* max texture size is 4096x4096 */
+ #define LIMA_MAX_MIP_LEVELS 13
+@@ -59,6 +60,8 @@ struct lima_resource {
+    bool modifier_constant;
+    unsigned full_updates;
+    unsigned reload;
++   /* PIPE_BUFFER: the bytes ever written since the BO was (re)allocated; a job can read nothing outside it */
++   struct util_range valid_buffer_range;
+ 
+    struct lima_resource_level levels[LIMA_MAX_MIP_LEVELS];
+ };
+-- 
+2.53.0
+

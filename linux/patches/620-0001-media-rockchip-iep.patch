@@ -1,0 +1,1538 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] media: rockchip: add RK3128 IEP v1 mem2mem driver
+
+Expose RGB/YUV layouts, I2/I4 deinterlacing, BCSH, RGB mapping/colour
+controls and validated 3x3/5x5 spatial modes. Initialize DDE weights and
+select the measured CSC range; compare physical aliases behind the MMU.
+Keep buffers owned until DMA stops; serialize jobs, bound completion, and
+gate only the IEP clocks through runtime PM. No HEVC/VPU bus mux writes.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 782389b..4e43169 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -23723,6 +23723,14 @@ F:	Documentation/devicetree/bindings/rng/rockchip,rk3568-rng.yaml
+ F:	Documentation/devicetree/bindings/rng/rockchip,rk3588-rng.yaml
+ F:	drivers/char/hw_random/rockchip-rng.c
+ 
++ROCKCHIP IEP V1 DRIVER
++M:	RK3128 reference contributors <reference@example.invalid>
++L:	linux-media@vger.kernel.org
++S:	Maintained
++F:	Documentation/devicetree/bindings/media/rockchip,rk3128-iep.yaml
++F:	drivers/media/platform/rockchip/rockchip-iep.c
++F:	include/uapi/linux/rk-iep.h
++
+ ROCKCHIP RASTER 2D GRAPHIC ACCELERATION UNIT DRIVER
+ M:	Jacob Chen <jacob-chen@iotwrt.com>
+ M:	Ezequiel Garcia <ezequiel@vanguardiasur.com.ar>
+diff --git a/drivers/media/platform/rockchip/Kconfig b/drivers/media/platform/rockchip/Kconfig
+index ba401d3..8645e0f 100644
+--- a/drivers/media/platform/rockchip/Kconfig
++++ b/drivers/media/platform/rockchip/Kconfig
+@@ -6,3 +6,17 @@ source "drivers/media/platform/rockchip/rga/Kconfig"
+ source "drivers/media/platform/rockchip/rkcif/Kconfig"
+ source "drivers/media/platform/rockchip/rkisp1/Kconfig"
+ source "drivers/media/platform/rockchip/rkvdec/Kconfig"
++
++config VIDEO_ROCKCHIP_IEP
++	tristate "Rockchip RK3128 image enhancement processor"
++	depends on V4L_MEM2MEM_DRIVERS
++	depends on VIDEO_DEV && OF
++	depends on ARCH_ROCKCHIP || COMPILE_TEST
++	select V4L2_MEM2MEM_DEV
++	select VIDEOBUF2_DMA_CONTIG
++	help
++	  V4L2 mem2mem driver for RK3128 IEP v1 RGB/YUV layouts, I2/I4
++	  deinterlacing, RGB mapping, colour and 3x3/5x5 spatial enhancement.
++	  Larger spatial radii fail pixel validation and are not exposed.
++	  The device tree must explicitly enable the block to use it.
++	  Buffers may be allocated with mmap or imported through DMA-BUF.
+diff --git a/drivers/media/platform/rockchip/Makefile b/drivers/media/platform/rockchip/Makefile
+index 0e0b2cb..39e1590 100644
+--- a/drivers/media/platform/rockchip/Makefile
++++ b/drivers/media/platform/rockchip/Makefile
+@@ -3,3 +3,4 @@ obj-y += rga/
+ obj-y += rkcif/
+ obj-y += rkisp1/
+ obj-y += rkvdec/
++obj-$(CONFIG_VIDEO_ROCKCHIP_IEP) += rockchip-iep.o
+diff --git a/drivers/media/platform/rockchip/rockchip-iep.c b/drivers/media/platform/rockchip/rockchip-iep.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/media/platform/rockchip/rockchip-iep.c
+@@ -0,0 +1,1424 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * RK3128 IEP v1, V4L2 memory-to-memory interface.
++ * Register programming derived from Rockchip's GPL-2.0 IEP driver
++ * (Copyright (C) 2013 ROCKCHIP, Inc.), verified against the RK3128 reference board kernel.
++ * No display direct path, GRF bus switching, scaling or temporal denoise:
++ * the vendor v1 capability probe disables the latter two. RGB filters
++ * use the internal CSCs for YUV endpoints.
++ */
++#include <linux/clk.h>
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/dma-buf.h>
++#include <linux/fixp-arith.h>
++#include <linux/interrupt.h>
++#include <linux/iopoll.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/reset.h>
++#include <linux/sort.h>
++#include <linux/rk-iep.h>
++#include <linux/workqueue.h>
++#include <linux/unaligned.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-event.h>
++#include <media/v4l2-ioctl.h>
++#include <media/v4l2-mem2mem.h>
++#include <media/videobuf2-dma-contig.h>
++
++#define IEP_CFG0 0x00
++#define IEP_CFG1 0x04
++#define IEP_STATUS 0x08
++#define IEP_INT 0x0c
++#define IEP_START 0x10
++#define IEP_DONE 0x18
++#define IEP_STRIDE 0x20
++#define IEP_SRC_SIZE 0x28
++#define IEP_DST_SIZE 0x2c
++#define IEP_YUV0 0x40
++#define IEP_YUV1 0x44
++#define IEP_YUV2 0x48
++#define IEP_RGB 0x4c
++#define IEP_RGB_COE 0x50
++#define IEP_SRC_Y 0x80
++#define IEP_DST_Y 0xb0
++#define IEP_MOTION 0xe0
++#define IEP_IRQ_ENABLE BIT(8)
++#define IEP_IRQ_CLEAR BIT(16)
++#define IEP_IRQ_PENDING BIT(0)
++#define IEP_MIN_WIDTH 16
++#define IEP_MIN_HEIGHT 16
++#define IEP_MAX_WIDTH 1920
++#define IEP_MAX_HEIGHT 1088
++
++struct iep_format {
++	u32 fourcc;
++	u8 config, bpp, vsub;
++	bool planar, vu;
++};
++
++/* Config includes the byte/plane swaps in CONFIG1's source nibble. */
++static const struct iep_format iep_formats[] = {
++	{ V4L2_PIX_FMT_NV12, 3, 1, 2 },
++	{ V4L2_PIX_FMT_NV21, 3 | BIT(4), 1, 2 },
++	{ V4L2_PIX_FMT_NV16, 2, 1, 1 },
++	{ V4L2_PIX_FMT_NV61, 2 | BIT(4), 1, 1 },
++	{ V4L2_PIX_FMT_YUV420, 3 | BIT(5), 1, 2, true },
++	{ V4L2_PIX_FMT_YVU420, 3 | BIT(5), 1, 2, true, true },
++	{ V4L2_PIX_FMT_YUV422P, 2 | BIT(5), 1, 1, true },
++	{ V4L2_PIX_FMT_ABGR32, 0, 4, 0 }, /* B G R A bytes */
++	{ V4L2_PIX_FMT_RGBA32, BIT(2), 4, 0 }, /* R G B A */
++	{ V4L2_PIX_FMT_BGRA32, BIT(3), 4, 0 }, /* A B G R */
++	{ V4L2_PIX_FMT_ARGB32, BIT(3) | BIT(2), 4, 0 }, /* A R G B */
++	{ V4L2_PIX_FMT_RGB565, 1, 2, 0 },
++	{ V4L2_PIX_FMT_RK_IEP_BGR565, 1 | BIT(2), 2, 0 },
++	{ V4L2_PIX_FMT_RK_IEP_YVU422, 2 | BIT(5), 1, 1, true, true },
++};
++
++static const struct iep_format *iep_find_format(u32 fourcc)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(iep_formats); i++)
++		if (iep_formats[i].fourcc == fourcc)
++			return &iep_formats[i];
++	return NULL;
++}
++
++struct iep_dev {
++	struct device *dev;
++	void __iomem *regs;
++	struct clk_bulk_data clocks[2];
++	struct reset_control *resets;
++	struct v4l2_device v4l2;
++	struct video_device *video;
++	struct v4l2_m2m_dev *m2m;
++	struct mutex lock; /* video ioctls, queues and context list */
++	struct list_head contexts;
++	struct work_struct work;
++	struct iep_ctx *active; /* IRQ target, protected by irq_lock */
++	spinlock_t irq_lock; /* protects register access across clock gating */
++	bool irq_active;
++	u32 irq_status;
++	int irq;
++	bool disconnected;
++	bool broken; /* a reset failure must never return a live DMA buffer */
++};
++
++struct iep_ctx {
++	struct v4l2_fh fh;
++	struct iep_dev *iep;
++	struct list_head list;
++	struct v4l2_pix_format fmt[2];
++	struct v4l2_ctrl_handler controls;
++	struct v4l2_ctrl *brightness, *contrast, *saturation, *hue;
++	struct v4l2_ctrl *filter, *amount, *threshold, *radius;
++	struct v4l2_ctrl *cg, *cg_enable, *order, *color, *coefficient, *alpha;
++	struct v4l2_ctrl *pattern, *solid, *dither_up;
++	struct v4l2_ctrl *weights, *deinterlace, *ei_mode, *ei_smooth;
++	struct v4l2_ctrl *ei_select, *ei_radius, *hf, *hf_factor;
++	struct vb2_v4l2_buffer *history; /* removed from m2m, still owned by vb2 */
++	u32 temporal_mode; /* immutable while either queue streams */
++	atomic_t abort;
++	struct completion done; /* an old abort cannot complete a peer job */
++	u32 sequence[2];
++};
++
++struct iep_span {
++	phys_addr_t start;
++	size_t length;
++};
++
++struct iep_buffer {
++	struct v4l2_m2m_buffer m2m;
++	struct iep_span *spans;
++	unsigned int num_spans;
++};
++
++static struct iep_buffer *iep_buffer(struct vb2_buffer *vb)
++{
++	return container_of(to_vb2_v4l2_buffer(vb), struct iep_buffer, m2m.vb);
++}
++
++static int iep_span_compare(const void *a, const void *b)
++{
++	const struct iep_span *sa = a, *sb = b;
++
++	return sa->start < sb->start ? -1 : sa->start > sb->start;
++}
++
++/* DMA aliases can have different IOVAs. Compare the physical ranges too,
++ * including imports of an allocation exported from the other MMAP queue.
++ * vb2 holds the existing attachment mapped, so these pages cannot migrate
++ * after prepare. The temporary attachment is gone before any DMA starts.
++ */
++static int iep_buffer_spans(struct iep_ctx *ctx, struct vb2_buffer *vb, u32 size)
++{
++	struct iep_buffer *buf = iep_buffer(vb);
++	struct dma_buf_attachment *attachment = NULL;
++	struct sg_table own, *sgt;
++	struct scatterlist *sg;
++	struct iep_span *spans;
++	unsigned int i, count = 0, used = 0;
++	u32 remaining = size;
++	int ret;
++
++	if (vb->memory == VB2_MEMORY_DMABUF) {
++		attachment = dma_buf_attach(vb->planes[0].dbuf, ctx->iep->dev);
++		if (IS_ERR(attachment))
++			return PTR_ERR(attachment);
++		sgt = dma_buf_map_attachment_unlocked(attachment, DMA_BIDIRECTIONAL);
++		if (IS_ERR(sgt)) {
++			ret = PTR_ERR(sgt);
++			goto detach;
++		}
++	} else {
++		ret = dma_get_sgtable_attrs(ctx->iep->dev, &own,
++					    vb2_plane_vaddr(vb, 0),
++					    vb2_dma_contig_plane_dma_addr(vb, 0),
++					    vb2_plane_size(vb, 0),
++					    vb->vb2_queue->dma_attrs);
++		if (ret)
++			return ret;
++		sgt = &own;
++	}
++	for_each_sg(sgt->sgl, sg, sgt->orig_nents, i) {
++		count++;
++		remaining -= min_t(u32, remaining, sg->length);
++		if (!remaining)
++			break;
++	}
++	ret = -EINVAL;
++	/* The MMU maps pages; reject pathological sub-page scatterlists. */
++	if (remaining || count > DIV_ROUND_UP(size, PAGE_SIZE) + 2)
++		goto unmap;
++	spans = kcalloc(count, sizeof(*spans), GFP_KERNEL);
++	if (!spans) {
++		ret = -ENOMEM;
++		goto unmap;
++	}
++	remaining = size;
++	for_each_sg(sgt->sgl, sg, count, i) {
++		spans[i].start = sg_phys(sg);
++		spans[i].length = min_t(u32, remaining, sg->length);
++		remaining -= spans[i].length;
++	}
++	sort(spans, count, sizeof(*spans), iep_span_compare, NULL);
++	for (i = 0; i < count; i++) {
++		if (used && spans[i].start <= spans[used - 1].start + spans[used - 1].length) {
++			phys_addr_t end = max(spans[used - 1].start + spans[used - 1].length,
++					      spans[i].start + spans[i].length);
++
++			spans[used - 1].length = end - spans[used - 1].start;
++		} else {
++			spans[used++] = spans[i];
++		}
++	}
++	dev_dbg(ctx->iep->dev, "buffer memory=%u bytes=%u physical_spans=%u\n",
++		vb->memory, size, used);
++	kfree(buf->spans);
++	buf->spans = spans;
++	buf->num_spans = used;
++	ret = 0;
++ unmap:
++	if (attachment)
++		dma_buf_unmap_attachment_unlocked(attachment, sgt, DMA_BIDIRECTIONAL);
++	else
++		sg_free_table(&own);
++ detach:
++	if (attachment)
++		dma_buf_detach(vb->planes[0].dbuf, attachment);
++	return ret;
++}
++
++static bool iep_physical_overlap(struct vb2_v4l2_buffer *a, struct vb2_v4l2_buffer *b)
++{
++	struct iep_buffer *ab = iep_buffer(&a->vb2_buf), *bb = iep_buffer(&b->vb2_buf);
++	unsigned int i = 0, j = 0;
++
++	while (i < ab->num_spans && j < bb->num_spans) {
++		struct iep_span *as = &ab->spans[i], *bs = &bb->spans[j];
++
++		if (as->start + as->length <= bs->start)
++			i++;
++		else if (bs->start + bs->length <= as->start)
++			j++;
++		else
++			return true;
++	}
++	return false;
++}
++
++static struct iep_ctx *fh_ctx(void *fh)
++{
++	return container_of(fh, struct iep_ctx, fh);
++}
++
++static unsigned int queue_index(enum v4l2_buf_type type)
++{
++	return V4L2_TYPE_IS_OUTPUT(type) ? 0 : 1;
++}
++
++static irqreturn_t iep_irq(int irq, void *data)
++{
++	struct iep_dev *iep = data;
++	unsigned long flags;
++	irqreturn_t ret = IRQ_NONE;
++
++	spin_lock_irqsave(&iep->irq_lock, flags);
++	if (iep->irq_active &&
++	    (readl(iep->regs + IEP_INT) & IEP_IRQ_PENDING)) {
++		writel(IEP_IRQ_CLEAR | IEP_IRQ_ENABLE, iep->regs + IEP_INT);
++		WRITE_ONCE(iep->irq_status, readl(iep->regs + IEP_STATUS));
++		if (iep->active)
++			complete(&iep->active->done);
++		ret = IRQ_HANDLED;
++	}
++	spin_unlock_irqrestore(&iep->irq_lock, flags);
++	return ret;
++}
++
++/* The caller holds the control-handler lock. Rejected legacy S_CTRL values
++ * can remain in p_new/val; only the committed value may affect a DMA job.
++ */
++static s32 iep_ctrl_value(const struct v4l2_ctrl *ctrl)
++{
++	return ctrl->cur.val;
++}
++
++static void iep_addresses(struct iep_dev *iep, u32 reg,
++			  const struct v4l2_pix_format *pix, dma_addr_t addr)
++{
++	const struct iep_format *fmt = iep_find_format(pix->pixelformat);
++	u32 chroma = pix->bytesperline * pix->height;
++	u32 uv = fmt->vsub ? addr + chroma : 0, v = 0;
++
++	if (fmt->planar) {
++		v = uv + chroma / (2 * fmt->vsub);
++		if (fmt->vu)
++			swap(uv, v);
++	}
++	writel(addr, iep->regs + reg);
++	writel(uv, iep->regs + reg + 4);
++	writel(v, iep->regs + reg + 8);
++}
++
++static int iep_program(struct iep_ctx *ctx, dma_addr_t src, dma_addr_t prev,
++		       dma_addr_t dst, dma_addr_t dst1)
++{
++	struct iep_dev *iep = ctx->iep;
++	struct v4l2_pix_format *in = &ctx->fmt[0], *out = &ctx->fmt[1];
++	const struct iep_format *sf = iep_find_format(in->pixelformat);
++	const struct iep_format *df = iep_find_format(out->pixelformat);
++	bool syuv = sf->vsub, dyuv = df->vsub, rgb, cg, color;
++	u32 cfg0 = 0, cfg1 = sf->config | (df->config << 8);
++	u32 order, coefficient, pattern, solid, dither_up;
++	u32 filter, contrast, saturation, hue, brightness, amount, threshold, radius;
++	static const u32 motion[] = {
++		0x40404040, 0x3c3e3f3f, 0x3336393b, 0x272a2d31,
++		0x181c2023, 0x0c0e1215, 0x03040609, 0x00000001,
++	};
++	unsigned int i, csc;
++	s32 cosine, sine;
++
++	/* The vendor copies every command and address/table word per job.
++	 * Do not inherit reset or previous-client values in the RGB pipeline.
++	 */
++	for (i = 0x20; i <= 0x54; i += 4)
++		writel(0, iep->regs + i);
++	for (i = 0x80; i <= 0x3fc; i += 4)
++		writel(0, iep->regs + i);
++
++	mutex_lock(ctx->controls.lock);
++	brightness = iep_ctrl_value(ctx->brightness);
++	contrast = iep_ctrl_value(ctx->contrast);
++	saturation = iep_ctrl_value(ctx->saturation);
++	hue = iep_ctrl_value(ctx->hue);
++	filter = iep_ctrl_value(ctx->filter);
++	amount = iep_ctrl_value(ctx->amount);
++	threshold = iep_ctrl_value(ctx->threshold);
++	radius = iep_ctrl_value(ctx->radius);
++	cg = iep_ctrl_value(ctx->cg_enable);
++	color = iep_ctrl_value(ctx->color);
++	order = iep_ctrl_value(ctx->order);
++	coefficient = iep_ctrl_value(ctx->coefficient);
++	pattern = iep_ctrl_value(ctx->pattern);
++	dither_up = iep_ctrl_value(ctx->dither_up);
++	solid = ctx->solid->p_cur.p_u8[0] |
++		(ctx->solid->p_cur.p_u8[1] << 8) | (ctx->solid->p_cur.p_u8[2] << 16);
++	cfg1 |= (u32)iep_ctrl_value(ctx->alpha) << 24;
++	rgb = filter || cg || color;
++	/* Compound table values must come from p_cur, never rejected p_new. */
++	if (cg)
++		for (i = 0; i < 768; i += 4)
++			writel(get_unaligned_le32(ctx->cg->p_cur.p_u8 + i),
++			       iep->regs + 0x100 + i);
++	if (filter) {
++		for (i = 0; i < 256; i += 4)
++			writel(get_unaligned_le32(ctx->weights->p_cur.p_u8 + i),
++			       iep->regs + 0x400 + i);
++		for (i = 256; i < 512; i += 4) {
++			u32 word = 0;
++			unsigned int j;
++
++			for (j = 0; j < 4 && i + j < 337; j++)
++				word |= (u32)ctx->weights->p_cur.p_u8[i + j] << (j * 8);
++			writel(word, iep->regs + 0x400 + i);
++		}
++	}
++	if (in->field != V4L2_FIELD_NONE) {
++		cfg0 |= iep_ctrl_value(ctx->ei_mode) << 12;
++		cfg0 |= iep_ctrl_value(ctx->ei_smooth) << 15;
++		cfg0 |= iep_ctrl_value(ctx->ei_select) << 23;
++		cfg0 |= iep_ctrl_value(ctx->ei_radius) << 21;
++		cfg0 |= iep_ctrl_value(ctx->hf) << 11;
++		cfg0 |= iep_ctrl_value(ctx->hf_factor) << 1;
++	}
++	mutex_unlock(ctx->controls.lock);
++	/* Combined I2/I4+RGB corrupts DC; I4O2+RGB times out on v1.
++	 * Reject the same committed snapshot used to program this job.
++	 */
++	if (in->field != V4L2_FIELD_NONE &&
++	    (rgb || (ctx->temporal_mode == 2 && !dyuv)))
++		return -EINVAL;
++	if (!syuv && (brightness || contrast != 128 || saturation != 128 || hue || pattern))
++		return -EINVAL;
++
++	if (!syuv)
++		cfg0 |= 0;
++	else if (in->field != V4L2_FIELD_NONE && ctx->temporal_mode == 2)
++		cfg0 |= 1 << 8; /* I4O2 */
++	else if (in->field != V4L2_FIELD_NONE && ctx->temporal_mode == 1)
++		cfg0 |= (in->field == V4L2_FIELD_INTERLACED_TB ? 2 : 3) << 8;
++	else if (in->field == V4L2_FIELD_INTERLACED_TB)
++		cfg0 |= 5 << 8; /* I2O1 top first */
++	else if (in->field == V4L2_FIELD_INTERLACED_BT)
++		cfg0 |= 4 << 8; /* I2O1 bottom first */
++	else
++		cfg0 |= 6 << 8; /* libiep selects bypass for progressive YUV */
++	/* libiep's I2O1 preset leaves EI mode/smoothing/radius and HF at zero. */
++
++	if (brightness || contrast != 128 || saturation != 128 || hue || pattern)
++		cfg0 |= BIT(14);
++	if (!filter || (cfg0 & BIT(14))) {
++		cosine = div_s64((s64)fixp_cos32((s32)hue) * 128, S32_MAX);
++		sine = -div_s64((s64)fixp_sin32((s32)hue) * 128, S32_MAX);
++		writel(((saturation * contrast / 128) << 16) |
++		       (contrast << 8) | (brightness & 0x3f), iep->regs + IEP_YUV0);
++		writel(((cosine & 0xff) << 8) | (sine & 0xff), iep->regs + IEP_YUV1);
++	}
++	if (filter)
++		cfg0 |= filter << 18;
++	if (cg)
++		cfg0 |= BIT(17);
++	if (color || filter)
++		cfg0 |= BIT(16);
++	cfg0 |= order << 20;
++	csc = in->ycbcr_enc == V4L2_YCBCR_ENC_709 ? 2 : 0;
++	if (in->quantization == V4L2_QUANTIZATION_FULL_RANGE)
++		csc++;
++	if (syuv && (!dyuv || rgb))
++		cfg1 |= BIT(20) | (csc << 16);
++	/* RK3128 RGB->YUV range selector has opposite polarity. */
++	if (dyuv && (!syuv || rgb)) {
++		csc = out->ycbcr_enc == V4L2_YCBCR_ENC_709 ? 2 : 0;
++		if (out->quantization == V4L2_QUANTIZATION_FULL_RANGE)
++			csc++;
++		cfg1 |= BIT(21) | ((csc ^ 1) << 18);
++	}
++	if (sf->bpp == 2 && dither_up)
++		cfg1 |= BIT(14);
++	if (df->bpp == 2)
++		cfg1 |= BIT(15);
++
++	/* 0 selects black; normal video is explicitly mode 3. */
++	if (!filter || (cfg0 & BIT(14)))
++		writel(((pattern ? pattern - 1 : 3) << 24) | solid, iep->regs + IEP_YUV2);
++	writel(cfg0, iep->regs + IEP_CFG0);
++	writel(cfg1, iep->regs + IEP_CFG1);
++	writel((in->bytesperline / 4) | ((out->bytesperline / 4) << 16),
++	       iep->regs + IEP_STRIDE);
++	writel((in->width - 1) | ((in->height - 1) << 16), iep->regs + IEP_SRC_SIZE);
++	writel((out->width - 1) | ((out->height - 1) << 16), iep->regs + IEP_DST_SIZE);
++	/* iep_config_yuv_dns() sets these four selectors unconditionally,
++	 * including when temporal denoise is disabled. Preserve the shipped
++	 * routing: luma spatial/temporal = 0/1, chroma spatial/temporal = 2/3.
++	 */
++	writel((1 << 28) | (2 << 26) | (3 << 24) |
++	       (threshold << 16) | (amount << 8) | radius, iep->regs + IEP_RGB);
++	writel(coefficient, iep->regs + IEP_RGB_COE);
++	/* libiep's RGB setup leaves history images zero after init(). Keep
++	 * the unused spatial/temporal address slots cleared for RGB jobs.
++	 * I2O1/bypass retain their field-invariant address aliases.
++	 */
++	iep_addresses(iep, IEP_SRC_Y, in, src);
++	iep_addresses(iep, IEP_DST_Y, out, dst);
++	if (ctx->temporal_mode && in->field != V4L2_FIELD_NONE) {
++		/* Vendor src = older frame, src1 = newer frame, with the two
++		 * slots exchanged for bottom-first. No buffer is copied.
++		 */
++		bool tb = in->field == V4L2_FIELD_INTERLACED_TB;
++
++		iep_addresses(iep, IEP_SRC_Y, in, tb ? prev : src);
++		iep_addresses(iep, IEP_SRC_Y + 12, in, tb ? src : prev);
++		/* I4O2's physical outputs reverse with the bottom-first
++		 * source swap. Keep capture buffers in chronological order.
++		 */
++		if (!tb && ctx->temporal_mode == 2) {
++			iep_addresses(iep, IEP_DST_Y, out, dst1);
++			iep_addresses(iep, IEP_DST_Y + 12, out, dst);
++		} else {
++			iep_addresses(iep, IEP_DST_Y + 12, out, dst1);
++		}
++	} else if (syuv && ((!rgb && dyuv) || in->field != V4L2_FIELD_NONE)) {
++		iep_addresses(iep, IEP_SRC_Y + 12, in, src);
++		iep_addresses(iep, IEP_DST_Y + 12, out, dst);
++	}
++	for (i = 0; i < ARRAY_SIZE(motion); i++)
++		writel(motion[i], iep->regs + IEP_MOTION + i * 4);
++	/* Flush posted configuration writes before the commit, as the vendor
++	 * register-copy path does with its DSB before starting a frame.
++	 */
++	readl(iep->regs + IEP_CFG1);
++	writel(IEP_IRQ_CLEAR, iep->regs + IEP_INT);
++	writel(IEP_IRQ_ENABLE, iep->regs + IEP_INT);
++	writel(1, iep->regs + IEP_DONE);
++	writel(1, iep->regs + IEP_START);
++	return 0;
++}
++
++/* m2m serializes jobs; only this worker owns hardware and runtime PM. It
++ * never takes the ioctl mutex: STREAMOFF/release wait for job_finish.
++ */
++static bool iep_overlap(dma_addr_t a, u32 asize, dma_addr_t b, u32 bsize)
++{
++	return a <= b ? b - a < asize : a - b < bsize;
++}
++
++static void iep_work(struct work_struct *work)
++{
++	struct iep_dev *iep = container_of(work, struct iep_dev, work);
++	struct iep_ctx *ctx = v4l2_m2m_get_curr_priv(iep->m2m);
++	struct vb2_v4l2_buffer *src, *dst, *dst1 = NULL;
++	enum vb2_buffer_state state = VB2_BUF_STATE_ERROR;
++	dma_addr_t sa, da, pa = 0, d1a = 0;
++	bool temporal;
++	unsigned long completed, flags;
++	bool powered = false;
++	int ret;
++
++	if (WARN_ON(!ctx))
++		return;
++	temporal = ctx->temporal_mode && ctx->fmt[0].field != V4L2_FIELD_NONE;
++	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
++	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
++	if (temporal && !ctx->history && !atomic_read(&ctx->abort) &&
++	    !READ_ONCE(iep->disconnected) && !iep->broken) {
++		ctx->history = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
++		ctx->history->sequence = ctx->sequence[0]++;
++		v4l2_m2m_job_finish(iep->m2m, ctx->fh.m2m_ctx);
++		return;
++	}
++	if (temporal && ctx->temporal_mode == 2) {
++		/* Remove the first capture so next_dst_buf obtains the second. */
++		dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++		dst1 = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
++	}
++	if (atomic_read(&ctx->abort) || READ_ONCE(iep->disconnected) || iep->broken)
++		goto finish;
++	/* Reject in-place/overlapping buffers, including aliases imported from
++	 * the same DMA-BUF: this is not an in-place processor.
++	 */
++	sa = vb2_dma_contig_plane_dma_addr(&src->vb2_buf, 0);
++	da = vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, 0);
++	if (iep_physical_overlap(src, dst) ||
++	    iep_overlap(sa, ctx->fmt[0].sizeimage, da, ctx->fmt[1].sizeimage))
++		goto finish;
++	if (temporal) {
++		pa = vb2_dma_contig_plane_dma_addr(&ctx->history->vb2_buf, 0);
++		if (iep_physical_overlap(ctx->history, dst) ||
++		    iep_overlap(pa, ctx->fmt[0].sizeimage, da, ctx->fmt[1].sizeimage))
++			goto finish;
++	}
++	if (dst1) {
++		d1a = vb2_dma_contig_plane_dma_addr(&dst1->vb2_buf, 0);
++		if (iep_physical_overlap(src, dst1) || iep_physical_overlap(ctx->history, dst1) ||
++		    iep_physical_overlap(dst, dst1) ||
++		    iep_overlap(sa, ctx->fmt[0].sizeimage, d1a, ctx->fmt[1].sizeimage) ||
++		    iep_overlap(pa, ctx->fmt[0].sizeimage, d1a, ctx->fmt[1].sizeimage) ||
++		    iep_overlap(da, ctx->fmt[1].sizeimage, d1a, ctx->fmt[1].sizeimage))
++			goto finish;
++	}
++	ret = pm_runtime_resume_and_get(iep->dev);
++	if (ret < 0) {
++		dev_err_ratelimited(iep->dev, "runtime resume failed: %d\n", ret);
++		goto finish;
++	}
++	powered = true;
++	/* Mask and synchronize the previous job's IRQ before reusing done. */
++	writel(IEP_IRQ_CLEAR, iep->regs + IEP_INT);
++	synchronize_irq(iep->irq);
++	reinit_completion(&ctx->done);
++	if (atomic_read(&ctx->abort))
++		goto finish;
++	spin_lock_irqsave(&iep->irq_lock, flags);
++	iep->active = ctx;
++	spin_unlock_irqrestore(&iep->irq_lock, flags);
++	ret = iep_program(ctx, sa, pa, da, dst1 ? d1a : da);
++	if (ret)
++		goto finish;
++	completed = wait_for_completion_timeout(&ctx->done, msecs_to_jiffies(1000));
++	if (completed) {
++		dev_dbg(iep->dev, "completed raw_rgb=%#x status=%#x\n",
++			readl(iep->regs + 0x7c), READ_ONCE(iep->irq_status));
++		/* The frame-end IRQ is the vendor's DMA completion fence. An
++		 * abort waits for this same fence instead of returning live DMA.
++		 */
++		if (!atomic_read(&ctx->abort))
++			state = VB2_BUF_STATE_DONE;
++	} else {
++		dev_err_ratelimited(iep->dev,
++				    "job timed out: %ux%u stride=%u/%u src=%pad dst=%pad status=%#x irq=%#x last=%#x cfg=%#x\n",
++				    ctx->fmt[0].width, ctx->fmt[0].height,
++				    ctx->fmt[0].bytesperline, ctx->fmt[1].bytesperline, &sa, &da,
++				    readl(iep->regs + IEP_STATUS), readl(iep->regs + IEP_INT),
++				    READ_ONCE(iep->irq_status), readl(iep->regs + IEP_CFG0));
++		/* A true hardware fault is not a successful cancellation. Keep
++		 * the AXI master held in reset and reject all subsequent jobs.
++		 * No IRQ/MMIO access may race the asserted AHB reset.
++		 */
++		writel(IEP_IRQ_CLEAR, iep->regs + IEP_INT);
++		spin_lock_irqsave(&iep->irq_lock, flags);
++		iep->irq_active = false;
++		iep->active = NULL;
++		spin_unlock_irqrestore(&iep->irq_lock, flags);
++		synchronize_irq(iep->irq);
++		ret = reset_control_assert(iep->resets);
++		WRITE_ONCE(iep->broken, true);
++		if (ret)
++			dev_err(iep->dev, "failed to assert IEP reset: %d\n", ret);
++	}
++finish:
++	if (powered) {
++		if (!iep->broken)
++			writel(IEP_IRQ_CLEAR, iep->regs + IEP_INT);
++		spin_lock_irqsave(&iep->irq_lock, flags);
++		iep->active = NULL;
++		spin_unlock_irqrestore(&iep->irq_lock, flags);
++		synchronize_irq(iep->irq);
++		pm_runtime_put_sync(iep->dev);
++	}
++	src = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
++	src->sequence = ctx->sequence[0]++;
++	if (!dst1)
++		dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++	else
++		dst1 = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++	v4l2_m2m_buf_copy_metadata(ctx->history ? ctx->history : src, dst);
++	dst->sequence = ctx->sequence[1]++;
++	dst->field = V4L2_FIELD_NONE;
++	if (temporal && ctx->history &&
++	    src->vb2_buf.timestamp > ctx->history->vb2_buf.timestamp)
++		dst->vb2_buf.timestamp +=
++			(src->vb2_buf.timestamp - ctx->history->vb2_buf.timestamp) / 2;
++	if (dst1) {
++		v4l2_m2m_buf_copy_metadata(src, dst1);
++		dst1->sequence = ctx->sequence[1]++;
++		dst1->field = V4L2_FIELD_NONE;
++	}
++	v4l2_m2m_buf_done(dst, state);
++	if (dst1)
++		v4l2_m2m_buf_done(dst1, state);
++	if (ctx->history) {
++		v4l2_m2m_buf_done(ctx->history, state);
++		ctx->history = NULL;
++	}
++	if (temporal && state == VB2_BUF_STATE_DONE)
++		ctx->history = src;
++	else
++		v4l2_m2m_buf_done(src, state);
++	v4l2_m2m_job_finish(iep->m2m, ctx->fh.m2m_ctx);
++}
++
++static void iep_device_run(void *priv)
++{
++	struct iep_ctx *ctx = priv;
++
++	atomic_set(&ctx->abort, 0);
++	schedule_work(&ctx->iep->work);
++}
++
++static void iep_job_abort(void *priv)
++{
++	struct iep_ctx *ctx = priv;
++
++	/* Bounded by the worker timeout; never synthesize a DMA completion. */
++	atomic_set(&ctx->abort, 1);
++}
++
++static int iep_job_ready(void *priv)
++{
++	struct iep_ctx *ctx = priv;
++
++	return ctx->temporal_mode != 2 ||
++		ctx->fmt[0].field == V4L2_FIELD_NONE ||
++		v4l2_m2m_num_dst_bufs_ready(ctx->fh.m2m_ctx) >= 2;
++}
++
++static const struct v4l2_m2m_ops iep_m2m_ops = {
++	.device_run = iep_device_run,
++	.job_abort = iep_job_abort,
++	.job_ready = iep_job_ready,
++};
++
++static int iep_queue_setup(struct vb2_queue *q, unsigned int *nbufs,
++			   unsigned int *nplanes, unsigned int sizes[],
++			   struct device *alloc_devs[])
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(q);
++	u32 size = ctx->fmt[queue_index(q->type)].sizeimage;
++
++	if (*nplanes)
++		return *nplanes == 1 && sizes[0] >= size ? 0 : -EINVAL;
++	*nplanes = 1;
++	sizes[0] = size;
++	return 0;
++}
++
++static int iep_buf_prepare(struct vb2_buffer *vb)
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++	struct v4l2_pix_format *f = &ctx->fmt[queue_index(vb->type)];
++
++	if (vb2_plane_size(vb, 0) < f->sizeimage)
++		return -EINVAL;
++	if (V4L2_TYPE_IS_OUTPUT(vb->type) &&
++	    vb2_get_plane_payload(vb, 0) < f->sizeimage)
++		return -EINVAL;
++	if (V4L2_TYPE_IS_OUTPUT(vb->type))
++		to_vb2_v4l2_buffer(vb)->field = f->field;
++	vb2_set_plane_payload(vb, 0, f->sizeimage);
++	return iep_buffer_spans(ctx, vb, f->sizeimage);
++}
++
++static void iep_buf_cleanup(struct vb2_buffer *vb)
++{
++	kfree(iep_buffer(vb)->spans);
++	iep_buffer(vb)->spans = NULL;
++	iep_buffer(vb)->num_spans = 0;
++}
++
++static void iep_buf_queue(struct vb2_buffer *vb)
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++
++	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
++}
++
++static void iep_return_buffers(struct vb2_queue *q, enum vb2_buffer_state state)
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(q);
++	struct vb2_v4l2_buffer *vb;
++
++	for (;;) {
++		vb = V4L2_TYPE_IS_OUTPUT(q->type) ?
++			v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx) :
++			v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++		if (!vb)
++			break;
++		v4l2_m2m_buf_done(vb, state);
++	}
++}
++
++static int iep_prepare_streaming(struct vb2_queue *q)
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(q);
++	if (READ_ONCE(ctx->iep->disconnected) || READ_ONCE(ctx->iep->broken))
++		return -ENODEV;
++	/* Scaling is not exposed: independent strides are permitted, sizes and colour
++	 * descriptions must match, capture is always progressive.
++	 */
++	if (ctx->fmt[0].width != ctx->fmt[1].width ||
++	    ctx->fmt[0].height != ctx->fmt[1].height ||
++	    ctx->fmt[0].colorspace != ctx->fmt[1].colorspace ||
++	    ctx->fmt[0].ycbcr_enc != ctx->fmt[1].ycbcr_enc ||
++	    (iep_find_format(ctx->fmt[0].pixelformat)->vsub &&
++	     iep_find_format(ctx->fmt[1].pixelformat)->vsub &&
++	     ctx->fmt[0].quantization != ctx->fmt[1].quantization) ||
++	    ctx->fmt[0].xfer_func != ctx->fmt[1].xfer_func)
++		return -EINVAL;
++	return 0;
++}
++
++static int iep_start_streaming(struct vb2_queue *q, unsigned int count)
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(q);
++
++	ctx->sequence[queue_index(q->type)] = 0;
++	mutex_lock(ctx->controls.lock);
++	ctx->temporal_mode = iep_ctrl_value(ctx->deinterlace);
++	mutex_unlock(ctx->controls.lock);
++	return 0;
++}
++
++static void iep_stop_streaming(struct vb2_queue *q)
++{
++	struct iep_ctx *ctx = vb2_get_drv_priv(q);
++
++	if (ctx->history) {
++		v4l2_m2m_buf_done(ctx->history, VB2_BUF_STATE_ERROR);
++		ctx->history = NULL;
++	}
++	iep_return_buffers(q, VB2_BUF_STATE_ERROR);
++}
++
++static const struct vb2_ops iep_queue_ops = {
++	.queue_setup = iep_queue_setup,
++	.buf_prepare = iep_buf_prepare,
++	.buf_cleanup = iep_buf_cleanup,
++	.buf_queue = iep_buf_queue,
++	.prepare_streaming = iep_prepare_streaming,
++	.start_streaming = iep_start_streaming,
++	.stop_streaming = iep_stop_streaming,
++};
++
++static int iep_queue_init(void *priv, struct vb2_queue *src, struct vb2_queue *dst)
++{
++	struct iep_ctx *ctx = priv;
++	struct vb2_queue *queues[] = { src, dst };
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(queues); i++) {
++		struct vb2_queue *q = queues[i];
++
++		q->type = i ? V4L2_BUF_TYPE_VIDEO_CAPTURE : V4L2_BUF_TYPE_VIDEO_OUTPUT;
++		q->io_modes = VB2_MMAP | VB2_DMABUF;
++		q->drv_priv = ctx;
++		q->buf_struct_size = sizeof(struct iep_buffer);
++		q->dma_attrs = DMA_ATTR_FORCE_CONTIGUOUS;
++		q->ops = &iep_queue_ops;
++		q->mem_ops = &vb2_dma_contig_memops;
++		q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++		q->lock = &ctx->iep->lock;
++		q->dev = ctx->iep->dev;
++		ret = vb2_queue_init(q);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int iep_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
++{
++	strscpy(cap->driver, "rockchip-iep", sizeof(cap->driver));
++	strscpy(cap->card, "RK3128 IEP", sizeof(cap->card));
++	return 0;
++}
++
++static int iep_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
++{
++	if (f->index >= ARRAY_SIZE(iep_formats))
++		return -EINVAL;
++	f->pixelformat = iep_formats[f->index].fourcc;
++	if (f->pixelformat == V4L2_PIX_FMT_RK_IEP_BGR565)
++		strscpy(f->description, "BGR 5-6-5 LE", sizeof(f->description));
++	if (f->pixelformat == V4L2_PIX_FMT_RK_IEP_YVU422)
++		strscpy(f->description, "Planar YVU 4:2:2", sizeof(f->description));
++	return 0;
++}
++
++static int iep_enum_size(struct file *file, void *priv, struct v4l2_frmsizeenum *f)
++{
++	if (f->index || !iep_find_format(f->pixel_format))
++		return -EINVAL;
++	f->type = V4L2_FRMSIZE_TYPE_STEPWISE;
++	f->stepwise.min_width = IEP_MIN_WIDTH;
++	f->stepwise.max_width = IEP_MAX_WIDTH;
++	f->stepwise.step_width = 4;
++	f->stepwise.min_height = IEP_MIN_HEIGHT;
++	f->stepwise.max_height = IEP_MAX_HEIGHT;
++	f->stepwise.step_height = 4;
++	return 0;
++}
++
++static void iep_adjust_fmt(struct v4l2_pix_format *p, bool output)
++{
++	const struct iep_format *fmt = iep_find_format(p->pixelformat);
++
++	if (!fmt)
++		fmt = &iep_formats[0];
++	p->pixelformat = fmt->fourcc;
++	p->width = clamp_t(u32, ALIGN(p->width, 4), IEP_MIN_WIDTH, IEP_MAX_WIDTH);
++	p->height = clamp_t(u32, ALIGN(p->height, 4), IEP_MIN_HEIGHT, IEP_MAX_HEIGHT);
++	if (!fmt->vsub || !output || (p->field != V4L2_FIELD_INTERLACED_TB &&
++			p->field != V4L2_FIELD_INTERLACED_BT))
++		p->field = V4L2_FIELD_NONE;
++	p->bytesperline = clamp_t(u32, ALIGN(p->bytesperline, 8), ALIGN(p->width * fmt->bpp, 8), 8192);
++	p->sizeimage = p->bytesperline * p->height;
++	if (fmt->vsub)
++		p->sizeimage += p->sizeimage / fmt->vsub;
++	if (p->colorspace != V4L2_COLORSPACE_REC709 &&
++	    p->colorspace != V4L2_COLORSPACE_SMPTE170M)
++		p->colorspace = V4L2_COLORSPACE_SMPTE170M;
++	if (p->ycbcr_enc != V4L2_YCBCR_ENC_601 && p->ycbcr_enc != V4L2_YCBCR_ENC_709)
++		p->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(p->colorspace);
++	if (p->quantization != V4L2_QUANTIZATION_FULL_RANGE &&
++	    p->quantization != V4L2_QUANTIZATION_LIM_RANGE)
++		p->quantization = V4L2_QUANTIZATION_LIM_RANGE;
++	if (!p->xfer_func || p->xfer_func >= V4L2_XFER_FUNC_LAST)
++		p->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(p->colorspace);
++	if (!fmt->vsub)
++		p->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	p->flags = 0;
++	p->priv = V4L2_PIX_FMT_PRIV_MAGIC;
++}
++
++static void iep_copy_color(struct v4l2_pix_format *dst,
++			   const struct v4l2_pix_format *src)
++{
++	dst->colorspace = src->colorspace;
++	dst->ycbcr_enc = src->ycbcr_enc;
++	dst->quantization = !iep_find_format(dst->pixelformat) ||
++		iep_find_format(dst->pixelformat)->vsub ?
++		src->quantization : V4L2_QUANTIZATION_FULL_RANGE;
++	dst->xfer_func = src->xfer_func;
++}
++
++static int iep_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct iep_ctx *ctx = fh_ctx(file->private_data);
++	bool output = V4L2_TYPE_IS_OUTPUT(f->type);
++
++	/* Both queues share matrix/transfer metadata. RGB-to-YUV capture may
++	 * choose its range explicitly; RGB capture is always full range.
++	 */
++	if (!output) {
++		u32 quantization = f->fmt.pix.quantization;
++
++		iep_copy_color(&f->fmt.pix, &ctx->fmt[0]);
++		if (!iep_find_format(ctx->fmt[0].pixelformat)->vsub &&
++		    (quantization == V4L2_QUANTIZATION_FULL_RANGE ||
++		     quantization == V4L2_QUANTIZATION_LIM_RANGE))
++			f->fmt.pix.quantization = quantization;
++	}
++	iep_adjust_fmt(&f->fmt.pix, output);
++
++	return 0;
++}
++
++static int iep_get_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct iep_ctx *ctx = fh_ctx(file->private_data);
++
++	f->fmt.pix = ctx->fmt[queue_index(f->type)];
++	return 0;
++}
++
++static int iep_set_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct iep_ctx *ctx = fh_ctx(file->private_data);
++	struct vb2_queue *q = v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type);
++
++	if (vb2_is_busy(q))
++		return -EBUSY;
++	iep_try_fmt(file, priv, f);
++	ctx->fmt[queue_index(f->type)] = f->fmt.pix;
++	if (V4L2_TYPE_IS_OUTPUT(f->type))
++		iep_copy_color(&ctx->fmt[1], &f->fmt.pix);
++	return 0;
++}
++
++static const struct v4l2_ioctl_ops iep_ioctl_ops = {
++	.vidioc_querycap = iep_querycap,
++	.vidioc_enum_fmt_vid_cap = iep_enum_fmt,
++	.vidioc_enum_fmt_vid_out = iep_enum_fmt,
++	.vidioc_enum_framesizes = iep_enum_size,
++	.vidioc_g_fmt_vid_cap = iep_get_fmt,
++	.vidioc_g_fmt_vid_out = iep_get_fmt,
++	.vidioc_try_fmt_vid_cap = iep_try_fmt,
++	.vidioc_try_fmt_vid_out = iep_try_fmt,
++	.vidioc_s_fmt_vid_cap = iep_set_fmt,
++	.vidioc_s_fmt_vid_out = iep_set_fmt,
++	.vidioc_reqbufs = v4l2_m2m_ioctl_reqbufs,
++	.vidioc_create_bufs = v4l2_m2m_ioctl_create_bufs,
++	.vidioc_prepare_buf = v4l2_m2m_ioctl_prepare_buf,
++	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
++	.vidioc_qbuf = v4l2_m2m_ioctl_qbuf,
++	.vidioc_dqbuf = v4l2_m2m_ioctl_dqbuf,
++	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
++	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
++	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
++	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
++	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
++};
++
++/* Positive table initialization is required even on a fresh power-up. */
++static const char * const iep_filters[] = { "Bypass", "Denoise", "Detail", "Edge" };
++
++static const struct v4l2_ctrl_config iep_filter_control = {
++	.id = V4L2_CID_RK_IEP_FILTER,
++	.name = "Spatial filter",
++	.type = V4L2_CTRL_TYPE_MENU,
++	.min = RK_IEP_FILTER_BYPASS, .max = RK_IEP_FILTER_EDGE,
++	.def = RK_IEP_FILTER_BYPASS,
++	.qmenu = iep_filters,
++};
++
++static const struct v4l2_ctrl_config iep_threshold_control = {
++	.id = V4L2_CID_RK_IEP_THRESHOLD,
++	.name = "Spatial threshold",
++	.type = V4L2_CTRL_TYPE_INTEGER,
++	.min = 0, .max = 255, .step = 1, .def = 255,
++};
++
++static const struct v4l2_ctrl_config iep_radius_control = {
++	.id = V4L2_CID_RK_IEP_RADIUS,
++	.name = "Spatial radius code",
++	.type = V4L2_CTRL_TYPE_INTEGER,
++	.min = 0, .max = 1, .step = 1, .def = 1,
++};
++
++static int iep_control_set(struct v4l2_ctrl *ctrl)
++{
++	struct iep_ctx *ctx = container_of(ctrl->handler, struct iep_ctx, controls);
++
++	if (ctrl->id == V4L2_CID_RK_IEP_DEINTERLACE && ctx->fh.m2m_ctx &&
++	    (vb2_is_streaming(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx)) ||
++	     vb2_is_streaming(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx))))
++		return -EBUSY;
++	return 0;
++}
++
++static const struct v4l2_ctrl_ops iep_control_ops = {
++	.s_ctrl = iep_control_set,
++};
++
++static const char * const iep_deinterlacers[] = { "I2O1", "I4O1", "I4O2" };
++
++static const struct v4l2_ctrl_config iep_dei_controls[] = {
++	{ .id = V4L2_CID_RK_IEP_DEINTERLACE, .name = "Deinterlace mode",
++	  .type = V4L2_CTRL_TYPE_MENU, .max = 2, .qmenu = iep_deinterlacers,
++	  .ops = &iep_control_ops },
++	{ .id = V4L2_CID_RK_IEP_EI_MODE, .name = "Deinterlace EI mode",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_EI_SMOOTH, .name = "Deinterlace EI smoothing",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_EI_SELECT, .name = "Deinterlace EI selection",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_EI_RADIUS, .name = "Deinterlace EI radius",
++	  .type = V4L2_CTRL_TYPE_INTEGER, .max = 3, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_HF, .name = "Deinterlace high frequency",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_HF_FACTOR, .name = "Deinterlace HF factor",
++	  .type = V4L2_CTRL_TYPE_INTEGER, .max = 127, .step = 1 },
++};
++
++/* V4L2's scalar U8 default cannot describe an identity curve or Y/U/V
++ * defaults. Use the same initializer for current and WHICH_DEF_VAL reads.
++ */
++static void iep_table_init(const struct v4l2_ctrl *ctrl, u32 from,
++			   union v4l2_ctrl_ptr ptr)
++{
++	u32 i;
++
++	for (i = from; i < ctrl->elems; i++)
++		ptr.p_u8[i] = ctrl->id == V4L2_CID_RK_IEP_CG_TABLE ?
++			i % 256 : i ? 128 : 16;
++}
++
++static void iep_table_min(const struct v4l2_ctrl *ctrl, u32 index,
++			  union v4l2_ctrl_ptr ptr)
++{
++	ptr.p_u8[index] = ctrl->minimum;
++}
++
++static void iep_table_max(const struct v4l2_ctrl *ctrl, u32 index,
++			  union v4l2_ctrl_ptr ptr)
++{
++	ptr.p_u8[index] = ctrl->maximum;
++}
++
++static const struct v4l2_ctrl_type_ops iep_table_ops = {
++	.equal = v4l2_ctrl_type_op_equal,
++	.init = iep_table_init,
++	.minimum = iep_table_min,
++	.maximum = iep_table_max,
++	.log = v4l2_ctrl_type_op_log,
++	.validate = v4l2_ctrl_type_op_validate,
++};
++
++static const struct v4l2_ctrl_config iep_rgb_controls[] = {
++	{ .id = V4L2_CID_RK_IEP_CG_ENABLE, .name = "RGB mapping enable",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_CG_TABLE, .name = "RGB mapping B G R",
++	  .type = V4L2_CTRL_TYPE_U8, .max = 255, .step = 1, .dims = { 3, 256 },
++	  .type_ops = &iep_table_ops },
++	{ .id = V4L2_CID_RK_IEP_ORDER, .name = "RGB DDE before mapping",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_COLOR, .name = "RGB color enable",
++	  .type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1 },
++	{ .id = V4L2_CID_RK_IEP_COEFFICIENT, .name = "RGB color coefficient",
++	  .type = V4L2_CTRL_TYPE_INTEGER, .max = 127, .step = 1, .def = 32 },
++	{ .id = V4L2_CID_RK_IEP_ALPHA, .name = "Output alpha",
++	  .type = V4L2_CTRL_TYPE_INTEGER, .max = 255, .step = 1, .def = 255 },
++	{ .id = V4L2_CID_RK_IEP_DDE_WEIGHTS, .name = "Spatial DDE weights",
++	  .type = V4L2_CTRL_TYPE_U8, .min = 1, .max = 63, .step = 1, .def = 1, .dims = { 337 } },
++};
++
++static const struct v4l2_ctrl_config iep_dither_control = {
++	.id = V4L2_CID_RK_IEP_DITHER_UP, .name = "RGB565 dither up",
++	.type = V4L2_CTRL_TYPE_BOOLEAN, .max = 1, .step = 1, .def = 1,
++};
++
++static const char * const iep_patterns[] = { "Normal", "Black", "Blue", "Solid YUV" };
++static const struct v4l2_ctrl_config iep_pattern_control = {
++	.id = V4L2_CID_TEST_PATTERN, .name = "Test Pattern",
++	.type = V4L2_CTRL_TYPE_MENU, .max = 3, .qmenu = iep_patterns,
++};
++static const struct v4l2_ctrl_config iep_solid_control = {
++	.id = V4L2_CID_RK_IEP_SOLID, .name = "Solid Y U V",
++	.type = V4L2_CTRL_TYPE_U8, .max = 255, .step = 1, .dims = { 3 },
++	.type_ops = &iep_table_ops,
++};
++
++static void iep_v4l2_release(struct v4l2_device *v4l2)
++{
++	struct iep_dev *iep = container_of(v4l2, struct iep_dev, v4l2);
++
++	v4l2_m2m_release(iep->m2m);
++	v4l2_device_unregister(v4l2);
++	mutex_destroy(&iep->lock);
++	put_device(iep->dev);
++	kfree(iep);
++}
++
++static int iep_open(struct file *file)
++{
++	struct iep_dev *iep = video_drvdata(file);
++	struct iep_ctx *ctx;
++	int ret;
++
++	if (mutex_lock_interruptible(&iep->lock))
++		return -ERESTARTSYS;
++	if (iep->disconnected) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	ctx = kzalloc_obj(*ctx);
++	if (!ctx) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++	ctx->iep = iep;
++	init_completion(&ctx->done);
++	v4l2_fh_init(&ctx->fh, iep->video);
++	ctx->fmt[0].width = 640;
++	ctx->fmt[0].height = 480;
++	iep_adjust_fmt(&ctx->fmt[0], true);
++	ctx->fmt[1] = ctx->fmt[0];
++	v4l2_ctrl_handler_init(&ctx->controls, 31);
++	ctx->brightness = v4l2_ctrl_new_std(&ctx->controls, NULL,
++					    V4L2_CID_BRIGHTNESS, -32, 31, 1, 0);
++	ctx->contrast = v4l2_ctrl_new_std(&ctx->controls, NULL, V4L2_CID_CONTRAST, 0, 255, 1, 128);
++	ctx->saturation = v4l2_ctrl_new_std(&ctx->controls, NULL,
++					    V4L2_CID_SATURATION, 0, 255, 1, 128);
++	ctx->hue = v4l2_ctrl_new_std(&ctx->controls, NULL, V4L2_CID_HUE, -30, 30, 1, 0);
++	ctx->amount = v4l2_ctrl_new_std(&ctx->controls, NULL, V4L2_CID_SHARPNESS, 0, 127, 1, 8);
++	ctx->filter = v4l2_ctrl_new_custom(&ctx->controls, &iep_filter_control, NULL);
++	ctx->threshold = v4l2_ctrl_new_custom(&ctx->controls, &iep_threshold_control, NULL);
++	ctx->radius = v4l2_ctrl_new_custom(&ctx->controls, &iep_radius_control, NULL);
++	ctx->cg_enable = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[0], NULL);
++	ctx->cg = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[1], NULL);
++	ctx->order = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[2], NULL);
++	ctx->color = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[3], NULL);
++	ctx->coefficient = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[4], NULL);
++	ctx->alpha = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[5], NULL);
++	ctx->weights = v4l2_ctrl_new_custom(&ctx->controls, &iep_rgb_controls[6], NULL);
++	ctx->deinterlace = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[0], NULL);
++	ctx->ei_mode = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[1], NULL);
++	ctx->ei_smooth = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[2], NULL);
++	ctx->ei_select = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[3], NULL);
++	ctx->ei_radius = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[4], NULL);
++	ctx->hf = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[5], NULL);
++	ctx->hf_factor = v4l2_ctrl_new_custom(&ctx->controls, &iep_dei_controls[6], NULL);
++	ctx->pattern = v4l2_ctrl_new_custom(&ctx->controls, &iep_pattern_control, NULL);
++	ctx->solid = v4l2_ctrl_new_custom(&ctx->controls, &iep_solid_control, NULL);
++	ctx->dither_up = v4l2_ctrl_new_custom(&ctx->controls, &iep_dither_control, NULL);
++	ret = ctx->controls.error;
++	if (ret)
++		goto free_ctx;
++	ctx->fh.ctrl_handler = &ctx->controls;
++	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(iep->m2m, ctx, iep_queue_init);
++	if (IS_ERR(ctx->fh.m2m_ctx)) {
++		ret = PTR_ERR(ctx->fh.m2m_ctx);
++		goto free_ctx;
++	}
++	file->private_data = &ctx->fh;
++	v4l2_fh_add(&ctx->fh, file);
++	list_add(&ctx->list, &iep->contexts);
++	v4l2_device_get(&iep->v4l2);
++	mutex_unlock(&iep->lock);
++	return 0;
++free_ctx:
++	v4l2_ctrl_handler_free(&ctx->controls);
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++unlock:
++	mutex_unlock(&iep->lock);
++	return ret;
++}
++
++static int iep_release(struct file *file)
++{
++	struct iep_ctx *ctx = fh_ctx(file->private_data);
++	struct iep_dev *iep = ctx->iep;
++
++	mutex_lock(&iep->lock);
++	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
++	list_del(&ctx->list);
++	v4l2_ctrl_handler_free(&ctx->controls);
++	v4l2_fh_del(&ctx->fh, file);
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++	mutex_unlock(&iep->lock);
++	v4l2_device_put(&iep->v4l2);
++	return 0;
++}
++
++static const struct v4l2_file_operations iep_fops = {
++	.owner = THIS_MODULE,
++	.open = iep_open,
++	.release = iep_release,
++	.unlocked_ioctl = video_ioctl2,
++	.poll = v4l2_m2m_fop_poll,
++	.mmap = v4l2_m2m_fop_mmap,
++};
++
++static int iep_runtime_resume(struct device *dev)
++{
++	struct iep_dev *iep = dev_get_drvdata(dev);
++	int ret;
++	unsigned long flags;
++
++	if (READ_ONCE(iep->broken))
++		return -ENODEV;
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(iep->clocks), iep->clocks);
++	if (ret)
++		return ret;
++	udelay(5);
++	ret = reset_control_deassert(iep->resets);
++	if (ret) {
++		clk_bulk_disable_unprepare(ARRAY_SIZE(iep->clocks), iep->clocks);
++		return ret;
++	}
++	spin_lock_irqsave(&iep->irq_lock, flags);
++	iep->irq_active = true;
++	spin_unlock_irqrestore(&iep->irq_lock, flags);
++	return 0;
++}
++
++static int iep_runtime_suspend(struct device *dev)
++{
++	struct iep_dev *iep = dev_get_drvdata(dev);
++
++	unsigned long flags;
++
++	spin_lock_irqsave(&iep->irq_lock, flags);
++	if (iep->irq_active)
++		writel(IEP_IRQ_CLEAR, iep->regs + IEP_INT);
++	iep->irq_active = false;
++	spin_unlock_irqrestore(&iep->irq_lock, flags);
++	clk_bulk_disable_unprepare(ARRAY_SIZE(iep->clocks), iep->clocks);
++	return 0;
++}
++
++static int __maybe_unused iep_suspend(struct device *dev)
++{
++	struct iep_dev *iep = dev_get_drvdata(dev);
++
++	int ret;
++
++	/* m2m_suspend waits on curr_ctx after dropping its scheduler lock.
++	 * Serialize with release so that context cannot be freed underneath it.
++	 */
++	mutex_lock(&iep->lock);
++	v4l2_m2m_suspend(iep->m2m);
++	ret = pm_runtime_force_suspend(dev);
++	if (ret)
++		v4l2_m2m_resume(iep->m2m);
++	mutex_unlock(&iep->lock);
++	return ret;
++}
++
++static int __maybe_unused iep_resume(struct device *dev)
++{
++	struct iep_dev *iep = dev_get_drvdata(dev);
++	int ret;
++
++	mutex_lock(&iep->lock);
++	ret = pm_runtime_force_resume(dev);
++	if (!ret)
++		v4l2_m2m_resume(iep->m2m);
++	mutex_unlock(&iep->lock);
++	return ret;
++}
++
++static const struct dev_pm_ops iep_pm_ops = {
++	SET_RUNTIME_PM_OPS(iep_runtime_suspend, iep_runtime_resume, NULL)
++	SET_SYSTEM_SLEEP_PM_OPS(iep_suspend, iep_resume)
++};
++
++static int iep_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct iep_dev *iep;
++	int ret;
++
++	iep = kzalloc_obj(*iep);
++	if (!iep)
++		return -ENOMEM;
++	iep->dev = get_device(dev);
++	iep->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(iep->regs)) {
++		ret = PTR_ERR(iep->regs);
++		goto free_dev;
++	}
++	iep->clocks[0].id = "axi";
++	iep->clocks[1].id = "ahb";
++	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(iep->clocks), iep->clocks);
++	if (ret)
++		goto free_dev;
++	iep->resets = devm_reset_control_array_get_exclusive(dev);
++	if (IS_ERR(iep->resets)) {
++		ret = PTR_ERR(iep->resets);
++		goto free_dev;
++	}
++	/* The MMU is a runtime-PM supplier and resumes before this device.
++	 * Finish the initial interface reset now, with clocks running, so
++	 * the supplier can access its DTE register on the first job.
++	 */
++	ret = clk_bulk_prepare_enable(ARRAY_SIZE(iep->clocks), iep->clocks);
++	if (ret)
++		goto free_dev;
++	ret = reset_control_assert(iep->resets);
++	if (!ret) {
++		udelay(5);
++		ret = reset_control_deassert(iep->resets);
++	}
++	clk_bulk_disable_unprepare(ARRAY_SIZE(iep->clocks), iep->clocks);
++	if (ret)
++		goto free_dev;
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		goto free_dev;
++	/* One IOVA extent per image, including physically scattered imports. */
++	ret = vb2_dma_contig_set_max_seg_size(dev, DMA_BIT_MASK(32));
++	if (ret)
++		goto free_dev;
++	mutex_init(&iep->lock);
++	INIT_LIST_HEAD(&iep->contexts);
++	INIT_WORK(&iep->work, iep_work);
++	spin_lock_init(&iep->irq_lock);
++	platform_set_drvdata(pdev, iep);
++	iep->irq = platform_get_irq(pdev, 0);
++	if (iep->irq < 0) {
++		ret = iep->irq;
++		goto free_dev;
++	}
++	ret = devm_request_irq(dev, iep->irq, iep_irq, IRQF_SHARED, dev_name(dev), iep);
++	if (ret)
++		goto free_dev;
++	iep->v4l2.release = iep_v4l2_release;
++	ret = v4l2_device_register(dev, &iep->v4l2);
++	if (ret)
++		goto free_irq;
++	iep->m2m = v4l2_m2m_init(&iep_m2m_ops);
++	if (IS_ERR(iep->m2m)) {
++		ret = PTR_ERR(iep->m2m);
++		goto unregister;
++	}
++	iep->video = video_device_alloc();
++	if (!iep->video) {
++		ret = -ENOMEM;
++		goto release_m2m;
++	}
++	strscpy(iep->video->name, "rockchip-iep", sizeof(iep->video->name));
++	iep->video->fops = &iep_fops;
++	iep->video->ioctl_ops = &iep_ioctl_ops;
++	iep->video->release = video_device_release;
++	iep->video->v4l2_dev = &iep->v4l2;
++	iep->video->lock = &iep->lock;
++	iep->video->vfl_dir = VFL_DIR_M2M;
++	iep->video->device_caps = V4L2_CAP_VIDEO_M2M | V4L2_CAP_STREAMING |
++		V4L2_CAP_EXT_PIX_FORMAT;
++	video_set_drvdata(iep->video, iep);
++	pm_runtime_enable(dev);
++	ret = video_register_device(iep->video, VFL_TYPE_VIDEO, -1);
++	if (ret)
++		goto disable_pm;
++	dev_info(dev, "IEP v1 on %s, idle until queued\n", video_device_node_name(iep->video));
++	return 0;
++disable_pm:
++	pm_runtime_disable(dev);
++	video_device_release(iep->video);
++release_m2m:
++	v4l2_m2m_release(iep->m2m);
++unregister:
++	v4l2_device_unregister(&iep->v4l2);
++free_irq:
++	devm_free_irq(dev, iep->irq, iep);
++free_dev:
++	put_device(iep->dev);
++	kfree(iep);
++	return dev_err_probe(dev, ret, "IEP probe failed\n");
++}
++
++static void iep_remove(struct platform_device *pdev)
++{
++	struct iep_dev *iep = platform_get_drvdata(pdev);
++	struct iep_ctx *ctx;
++
++	mutex_lock(&iep->lock);
++	WRITE_ONCE(iep->disconnected, true);
++	v4l2_device_disconnect(&iep->v4l2);
++	video_unregister_device(iep->video);
++	list_for_each_entry(ctx, &iep->contexts, list) {
++		vb2_queue_error(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx));
++		vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx));
++	}
++	v4l2_m2m_suspend(iep->m2m);
++	flush_work(&iep->work);
++	mutex_unlock(&iep->lock);
++	pm_runtime_disable(iep->dev);
++	if (!pm_runtime_status_suspended(iep->dev))
++		iep_runtime_suspend(iep->dev);
++	devm_free_irq(iep->dev, iep->irq, iep);
++	v4l2_device_put(&iep->v4l2);
++}
++
++static const struct of_device_id iep_match[] = {
++	{ .compatible = "rockchip,rk3128-iep" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, iep_match);
++
++static struct platform_driver iep_driver = {
++	.probe = iep_probe,
++	.remove = iep_remove,
++	.driver = {
++		.name = "rockchip-iep",
++		.of_match_table = iep_match,
++		.pm = &iep_pm_ops,
++	},
++};
++module_platform_driver(iep_driver);
++MODULE_DESCRIPTION("Rockchip RK3128 IEP v1 mem2mem driver");
++MODULE_AUTHOR("RK3128 reference contributors");
++MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/include/uapi/linux/rk-iep.h b/include/uapi/linux/rk-iep.h
+new file mode 100644
+--- /dev/null
++++ b/include/uapi/linux/rk-iep.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++#ifndef _UAPI_LINUX_RK_IEP_H
++#define _UAPI_LINUX_RK_IEP_H
++
++#include <linux/v4l2-controls.h>
++#include <linux/videodev2.h>
++
++/* Experimental allocation; reserve with upstream before upstream submission. */
++#define V4L2_CID_USER_RK_IEP_BASE (V4L2_CID_USER_BASE + 0x1240)
++#define V4L2_CID_RK_IEP_FILTER (V4L2_CID_USER_RK_IEP_BASE + 0)
++#define V4L2_CID_RK_IEP_THRESHOLD (V4L2_CID_USER_RK_IEP_BASE + 1)
++#define V4L2_CID_RK_IEP_RADIUS (V4L2_CID_USER_RK_IEP_BASE + 2)
++
++#define V4L2_CID_RK_IEP_CG_ENABLE (V4L2_CID_USER_RK_IEP_BASE + 3)
++#define V4L2_CID_RK_IEP_CG_TABLE (V4L2_CID_USER_RK_IEP_BASE + 4)
++#define V4L2_CID_RK_IEP_ORDER (V4L2_CID_USER_RK_IEP_BASE + 5)
++#define V4L2_CID_RK_IEP_COLOR (V4L2_CID_USER_RK_IEP_BASE + 6)
++#define V4L2_CID_RK_IEP_COEFFICIENT (V4L2_CID_USER_RK_IEP_BASE + 7)
++#define V4L2_CID_RK_IEP_ALPHA (V4L2_CID_USER_RK_IEP_BASE + 8)
++#define V4L2_CID_RK_IEP_DDE_WEIGHTS (V4L2_CID_USER_RK_IEP_BASE + 9)
++
++#define V4L2_CID_RK_IEP_DEINTERLACE (V4L2_CID_USER_RK_IEP_BASE + 10)
++#define V4L2_CID_RK_IEP_EI_MODE (V4L2_CID_USER_RK_IEP_BASE + 11)
++#define V4L2_CID_RK_IEP_EI_SMOOTH (V4L2_CID_USER_RK_IEP_BASE + 12)
++#define V4L2_CID_RK_IEP_EI_SELECT (V4L2_CID_USER_RK_IEP_BASE + 13)
++#define V4L2_CID_RK_IEP_EI_RADIUS (V4L2_CID_USER_RK_IEP_BASE + 14)
++#define V4L2_CID_RK_IEP_HF (V4L2_CID_USER_RK_IEP_BASE + 15)
++#define V4L2_CID_RK_IEP_HF_FACTOR (V4L2_CID_USER_RK_IEP_BASE + 16)
++
++#define V4L2_CID_RK_IEP_SOLID (V4L2_CID_USER_RK_IEP_BASE + 17)
++
++#define V4L2_CID_RK_IEP_DITHER_UP (V4L2_CID_USER_RK_IEP_BASE + 18)
++/* Experimental single-buffer layouts without a standard V4L2 fourcc. */
++#define V4L2_PIX_FMT_RK_IEP_BGR565 v4l2_fourcc('R', 'K', 'B', '5')
++#define V4L2_PIX_FMT_RK_IEP_YVU422 v4l2_fourcc('R', 'K', 'V', '6')
++
++enum rk_iep_filter {
++	RK_IEP_FILTER_BYPASS,
++	RK_IEP_FILTER_DENOISE,
++	RK_IEP_FILTER_DETAIL,
++	RK_IEP_FILTER_EDGE,
++};
++#endif

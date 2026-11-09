@@ -1,0 +1,16 @@
+--- a/src/gallium/drivers/lima/lima_context.h	2026-11-06 20:30:59.789768223 -0600
++++ b/src/gallium/drivers/lima/lima_context.h	2026-11-06 20:31:13.872108849 -0600
+@@ -240,8 +240,12 @@
+    unsigned min_index;
+    unsigned max_index;
+ 
++   /* plb_index turns per job, not per frame, and a GP job writes plb[i] and gp_tile_heap[i] that the PP job of the
++    * job LIMA_CTX_NUM_PLB before it reads (implicit sync in the kernel), so the GP of job k waits for the PP of job
++    * k - LIMA_CTX_NUM_PLB. With more jobs per frame than PLBs (an app with offscreen passes: 4-5 jobs a frame), the
++    * on-screen GP of frame N+1 can never overlap the on-screen PP of frame N. Up to 8, set with LIMA_CTX_NUM_PLB. */
+    #define LIMA_CTX_PLB_MIN_NUM  1
+-   #define LIMA_CTX_PLB_MAX_NUM  4
++   #define LIMA_CTX_PLB_MAX_NUM  8
+    #define LIMA_CTX_PLB_DEF_NUM  2
+    #define LIMA_CTX_PLB_BLK_SIZE 512
+    unsigned plb_size;

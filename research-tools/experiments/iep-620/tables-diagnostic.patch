@@ -1,0 +1,236 @@
+--- a/drivers/media/platform/rockchip/rockchip-iep.c
++++ b/drivers/media/platform/rockchip/rockchip-iep.c
+@@ -68,6 +68,8 @@
+ 	u32 irq_status;
+ 	int irq;
+ 	bool disconnected;
++	bool tables_saved;
++	u32 initial_tables[128];
+ 	bool broken; /* a reset failure must never return a live DMA buffer */
+ };
+ 
+@@ -78,7 +80,7 @@
+ 	struct v4l2_pix_format fmt[2];
+ 	struct v4l2_ctrl_handler controls;
+ 	struct v4l2_ctrl *brightness, *contrast, *saturation, *hue;
+-	struct v4l2_ctrl *filter, *amount, *threshold, *radius;
++	struct v4l2_ctrl *filter, *amount, *threshold, *radius, *lut;
+ 	atomic_t abort;
+ 	struct completion done; /* an old abort cannot complete a peer job */
+ 	u32 sequence[2];
+@@ -121,11 +123,14 @@
+ 	return ctrl->cur.val;
+ }
+ 
+-static int iep_program(struct iep_ctx *ctx, dma_addr_t src, dma_addr_t dst)
++static void iep_program(struct iep_ctx *ctx, dma_addr_t src, dma_addr_t dst)
+ {
+ 	struct iep_dev *iep = ctx->iep;
+ 	struct v4l2_pix_format *in = &ctx->fmt[0], *out = &ctx->fmt[1];
+-	u32 cfg0 = 0, cfg1 = 0xff000303; /* NV12 -> NV12, opaque alpha */
++	bool syuv = in->pixelformat == V4L2_PIX_FMT_NV12;
++	bool dyuv = out->pixelformat == V4L2_PIX_FMT_NV12;
++	u32 cfg0 = 0, cfg1 = 0xff000000 | (syuv ? 3 : 0) | (dyuv ? 0x300 : 0);
++	u32 lut;
+ 	u32 filter, contrast, saturation, hue, brightness, amount, threshold, radius;
+ 	static const u32 motion[] = {
+ 		0x40404040, 0x3c3e3f3f, 0x3336393b, 0x272a2d31,
+@@ -151,15 +156,12 @@
+ 	amount = iep_ctrl_value(ctx->amount);
+ 	threshold = iep_ctrl_value(ctx->threshold);
+ 	radius = iep_ctrl_value(ctx->radius);
++	lut = iep_ctrl_value(ctx->lut);
+ 	mutex_unlock(ctx->controls.lock);
+-	/* I2O1 needs history aliases, while the validated RGB path has none.
+-	 * Recheck the same committed snapshot that will program this job:
+-	 * controls may change after STREAMON, but formats cannot.
+-	 */
+-	if (filter && in->field != V4L2_FIELD_NONE)
+-		return -EINVAL;
+-
+-	if (in->field == V4L2_FIELD_INTERLACED_TB)
++
++	if (!syuv)
++		cfg0 = 0; /* RGB: DEI disabled, never YUV bypass */
++	else if (in->field == V4L2_FIELD_INTERLACED_TB)
+ 		cfg0 |= 5 << 8; /* I2O1 top first */
+ 	else if (in->field == V4L2_FIELD_INTERLACED_BT)
+ 		cfg0 |= 4 << 8; /* I2O1 bottom first */
+@@ -182,24 +184,35 @@
+ 		 * CG itself remains disabled.
+ 		 */
+ 		cfg0 |= (filter << 18) | BIT(16);
+-		/* Vendor CSC selectors: 601 limited/full, 709 limited/full. */
+-		csc = in->ycbcr_enc == V4L2_YCBCR_ENC_709 ? 2 : 0;
+-		if (in->quantization == V4L2_QUANTIZATION_FULL_RANGE)
+-			csc++;
+-		/* RK3128 RGB->YUV range polarity is opposite to YUV->RGB.
+-		 * Verified with four matrix/range ramps, not a DC offset fix.
+-		 */
+-		cfg1 |= BIT(20) | BIT(21) | (csc << 16) | ((csc ^ 1) << 18);
+-		/* Flat positive D/S weights give a uniform spatial kernel.
+-		 * Only 3x3/5x5 (radius 0/1) preserve DC on this revision.
+-		 * Tables read as zero: reload before every spatial job rather
+-		 * than treating readback or reset contents as initialization.
+-		 */
+-		for (i = 0x400; i < 0x550; i += 4)
+-			writel(0x01010101, iep->regs + i);
+-		writel(1, iep->regs + 0x550);
+-		for (i = 0x554; i <= 0x5fc; i += 4)
+-			writel(0, iep->regs + i);
++	}
++	csc = in->ycbcr_enc == V4L2_YCBCR_ENC_709 ? 2 : 0;
++	if (in->quantization == V4L2_QUANTIZATION_FULL_RANGE)
++		csc++;
++	if (syuv && (!dyuv || filter))
++		cfg1 |= BIT(20) | (csc << 16);
++	if (dyuv && (!syuv || filter))
++		cfg1 |= BIT(21) | ((csc ^ 1) << 18); /* observed RK3128 output range */
++	/* RESEARCH ONLY: related-chip DDE aperture hypothesis, not RK3128 ABI.
++	 * 0 restores first-job contents; 1 clears; 2/3/4 load flat 63/16/1 weights.
++	 * Reload every job; never access the MMU at +0x800.
++	 */
++	if (!iep->tables_saved) {
++		for (i = 0; i < ARRAY_SIZE(iep->initial_tables); i++)
++			iep->initial_tables[i] = readl(iep->regs + 0x400 + 4 * i);
++		iep->tables_saved = true;
++	}
++	{
++		for (i = 0x400; i <= 0x5fc; i += 4) {
++			u32 v = lut ? 0 : iep->initial_tables[(i - 0x400) / 4];
++
++			if (lut >= 2) {
++				if (i < 0x550)
++					v = lut == 2 ? 0x3f3f3f3f : lut == 3 ? 0x10101010 : 0x01010101;
++				else if (i == 0x550)
++					v = lut == 2 ? 0x3f : lut == 3 ? 0x10 : 1;
++			}
++			writel(v, iep->regs + i);
++		}
+ 	}
+ 	/* 0 selects a black screen; normal video is explicitly mode 3. */
+ 	if (!filter || (cfg0 & BIT(14)))
+@@ -221,13 +234,13 @@
+ 	 * the unused spatial/temporal address slots cleared for RGB jobs.
+ 	 * I2O1/bypass retain their field-invariant address aliases.
+ 	 */
+-	for (i = 0; i < (filter ? 1 : 4); i++) {
++	for (i = 0; i < (filter || !syuv || !dyuv ? 1 : 4); i++) {
+ 		writel(src, iep->regs + IEP_SRC_Y + i * 12);
+-		writel(src + in->bytesperline * in->height,
++		writel(syuv ? src + in->bytesperline * in->height : 0,
+ 		       iep->regs + IEP_SRC_Y + i * 12 + 4);
+ 		writel(0, iep->regs + IEP_SRC_Y + i * 12 + 8);
+ 		writel(dst, iep->regs + IEP_DST_Y + i * 12);
+-		writel(dst + out->bytesperline * out->height,
++		writel(dyuv ? dst + out->bytesperline * out->height : 0,
+ 		       iep->regs + IEP_DST_Y + i * 12 + 4);
+ 		writel(0, iep->regs + IEP_DST_Y + i * 12 + 8);
+ 	}
+@@ -241,7 +254,6 @@
+ 	writel(IEP_IRQ_ENABLE, iep->regs + IEP_INT);
+ 	writel(1, iep->regs + IEP_DONE);
+ 	writel(1, iep->regs + IEP_START);
+-	return 0;
+ }
+ 
+ /* m2m serializes jobs; only this worker owns hardware and runtime PM. It
+@@ -287,9 +299,7 @@
+ 	spin_lock_irqsave(&iep->irq_lock, flags);
+ 	iep->active = ctx;
+ 	spin_unlock_irqrestore(&iep->irq_lock, flags);
+-	ret = iep_program(ctx, sa, da);
+-	if (ret)
+-		goto finish;
++	iep_program(ctx, sa, da);
+ 	completed = wait_for_completion_timeout(&ctx->done, msecs_to_jiffies(1000));
+ 	if (completed) {
+ 		/* The frame-end IRQ is the vendor's DMA completion fence. An
+@@ -489,15 +499,16 @@
+ 
+ static int iep_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
+ {
+-	if (f->index)
++	if (f->index > 1)
+ 		return -EINVAL;
+-	f->pixelformat = V4L2_PIX_FMT_NV12;
++	f->pixelformat = f->index ? V4L2_PIX_FMT_ABGR32 : V4L2_PIX_FMT_NV12;
+ 	return 0;
+ }
+ 
+ static int iep_enum_size(struct file *file, void *priv, struct v4l2_frmsizeenum *f)
+ {
+-	if (f->index || f->pixel_format != V4L2_PIX_FMT_NV12)
++	if (f->index || (f->pixel_format != V4L2_PIX_FMT_NV12 &&
++			 f->pixel_format != V4L2_PIX_FMT_ABGR32))
+ 		return -EINVAL;
+ 	f->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+ 	f->stepwise.min_width = IEP_MIN_WIDTH;
+@@ -511,14 +522,18 @@
+ 
+ static void iep_adjust_fmt(struct v4l2_pix_format *p, bool output)
+ {
+-	p->pixelformat = V4L2_PIX_FMT_NV12;
++	bool rgb = p->pixelformat == V4L2_PIX_FMT_ABGR32;
++
++	p->pixelformat = rgb ? V4L2_PIX_FMT_ABGR32 : V4L2_PIX_FMT_NV12;
+ 	p->width = clamp_t(u32, ALIGN(p->width, 4), IEP_MIN_WIDTH, IEP_MAX_WIDTH);
+ 	p->height = clamp_t(u32, ALIGN(p->height, 4), IEP_MIN_HEIGHT, IEP_MAX_HEIGHT);
+-	if (!output || (p->field != V4L2_FIELD_INTERLACED_TB &&
++	if (rgb || !output || (p->field != V4L2_FIELD_INTERLACED_TB &&
+ 			p->field != V4L2_FIELD_INTERLACED_BT))
+ 		p->field = V4L2_FIELD_NONE;
+-	p->bytesperline = clamp_t(u32, ALIGN(p->bytesperline, 4), p->width, 8192);
+-	p->sizeimage = p->bytesperline * p->height * 3 / 2;
++	p->bytesperline = clamp_t(u32, ALIGN(p->bytesperline, 4),
++				 rgb ? p->width * 4 : p->width, 8192);
++	p->sizeimage = rgb ? p->bytesperline * p->height :
++		p->bytesperline * p->height * 3 / 2;
+ 	if (p->colorspace != V4L2_COLORSPACE_REC709 &&
+ 	    p->colorspace != V4L2_COLORSPACE_SMPTE170M)
+ 		p->colorspace = V4L2_COLORSPACE_SMPTE170M;
+@@ -602,7 +617,9 @@
+ 	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+ };
+ 
+-/* Positive table initialization is required even on a fresh power-up. */
++/* Spatial output failed the hardware DC reference by 108 codes. Keep the
++ * selectors reserved in the UAPI, but reject them before any job can use them.
++ */
+ static const char * const iep_filters[] = { "Bypass", "Denoise", "Detail", "Edge" };
+ 
+ static const struct v4l2_ctrl_config iep_filter_control = {
+@@ -625,7 +642,15 @@
+ 	.id = V4L2_CID_RK_IEP_RADIUS,
+ 	.name = "Spatial radius code",
+ 	.type = V4L2_CTRL_TYPE_INTEGER,
+-	.min = 0, .max = 1, .step = 1, .def = 1,
++	.min = 0, .max = 3, .step = 1, .def = 3,
++};
++
++/* Private research control, never included in the shipped UAPI. */
++static const struct v4l2_ctrl_config iep_lut_control = {
++	.id = V4L2_CID_USER_RK_IEP_BASE + 3,
++	.name = "Research DDE tables",
++	.type = V4L2_CTRL_TYPE_INTEGER,
++	.min = 0, .max = 4, .step = 1, .def = 0,
+ };
+ 
+ static void iep_v4l2_release(struct v4l2_device *v4l2)
+@@ -663,7 +688,7 @@
+ 	ctx->fmt[0].height = 480;
+ 	iep_adjust_fmt(&ctx->fmt[0], true);
+ 	ctx->fmt[1] = ctx->fmt[0];
+-	v4l2_ctrl_handler_init(&ctx->controls, 8);
++	v4l2_ctrl_handler_init(&ctx->controls, 9);
+ 	ctx->brightness = v4l2_ctrl_new_std(&ctx->controls, NULL,
+ 					    V4L2_CID_BRIGHTNESS, -32, 31, 1, 0);
+ 	ctx->contrast = v4l2_ctrl_new_std(&ctx->controls, NULL, V4L2_CID_CONTRAST, 0, 255, 1, 128);
+@@ -674,6 +699,7 @@
+ 	ctx->filter = v4l2_ctrl_new_custom(&ctx->controls, &iep_filter_control, NULL);
+ 	ctx->threshold = v4l2_ctrl_new_custom(&ctx->controls, &iep_threshold_control, NULL);
+ 	ctx->radius = v4l2_ctrl_new_custom(&ctx->controls, &iep_radius_control, NULL);
++	ctx->lut = v4l2_ctrl_new_custom(&ctx->controls, &iep_lut_control, NULL);
+ 	ret = ctx->controls.error;
+ 	if (ret)
+ 		goto free_ctx;

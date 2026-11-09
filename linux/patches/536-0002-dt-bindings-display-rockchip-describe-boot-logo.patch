@@ -1,0 +1,35 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] dt-bindings: display: rockchip: describe boot logo reservation
+
+Describe the optional named reservation used by the RK3128 reference board DRM takeover.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+--- a/Documentation/devicetree/bindings/display/rockchip/rockchip-vop.yaml
++++ b/Documentation/devicetree/bindings/display/rockchip/rockchip-vop.yaml
+@@ -77,9 +77,25 @@
+   iommus:
+     maxItems: 1
+ 
++  memory-region:
++    maxItems: 1
++    description:
++      Reserved bootloader scan-out memory. On RK3128 reference board the VOP driver
++      returns the pages to the allocator after a verified DRM takeover.
++      The region must remain reserved until then and must not have no-map
++      or reusable set.
++
++  memory-region-names:
++    items:
++      - const: boot-logo
++
+   power-domains:
+     maxItems: 1
+ 
++dependentRequired:
++  memory-region: [memory-region-names]
++  memory-region-names: [memory-region]
++
+ required:
+   - compatible
+   - reg

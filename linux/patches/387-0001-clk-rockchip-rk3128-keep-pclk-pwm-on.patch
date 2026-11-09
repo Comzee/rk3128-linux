@@ -1,0 +1,30 @@
+Linux-port DDR stability (development record #387): clk: rockchip: rk3128: keep pclk_pwm on.
+
+PCLK_PWM is the only clock of the RK3128's four PWM channels (rk3128.dtsi gives all four the
+same clock). On this board pwm1 and pwm2 drive the CPU and logic rails (pwm-regulator, u-boot
+starts them) and pwm0 drives the backlight. In a build without the PWM regulators nothing holds
+the clock but pwm-rockchip's backlight channel, so a backlight off (fb blank, DPMS off,
+brightness 0) disables the last enable of PCLK_PWM and the CRU gates it: the counters stop
+and both rail PWMs freeze at whatever level their output had at that instant, i.e. the CPU and
+logic voltages jump to the table's top (1.45 V, output low) or bottom (output high). On the
+frame (#387): the enable count went 1 -> 0 at the blank (attempt 387-4), and a regulator-less
+boot at 396 MHz reset at the blank (387-2); with this patch it stays at 1 (387-6). Marking the
+clock critical keeps it on whatever the consumers do; it costs one APB clock gate.
+---
+diff --git a/drivers/clk/rockchip/clk-rk3128.c b/drivers/clk/rockchip/clk-rk3128.c
+--- a/drivers/clk/rockchip/clk-rk3128.c
++++ b/drivers/clk/rockchip/clk-rk3128.c
+@@ -568,6 +568,13 @@
+ 	"pclk_peri",
+ 	"pclk_pmu",
+ 	"sclk_timer5",
++	/*
++	 * The one clock of all four PWMs: pwm1 and pwm2 drive the CPU and logic rails
++	 * (u-boot starts them), pwm0 the backlight. Gated, the counters stop and the
++	 * rail PWMs freeze at their current level: the backlight going off (its PWM
++	 * disabled) took the last enable away when no pwm-regulator held it.
++	 */
++	"pclk_pwm",
+ };
+ 
+ static void __iomem *rk3128_cru_base;

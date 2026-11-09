@@ -1,0 +1,2822 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Sun, 8 Nov 2026 03:00:00 +0000
+Subject: [PATCH] media: rockchip: add an RK3128 RGA1-plus mem2mem driver
+
+RGA1-plus has a distinct command ABI and internal MMU. Map DMA-SG image
+buffers through per-context DMA page tables and use a bounded image worker,
+with runtime PM and private resets.
+Drain context work before close and pending mem2mem scheduler work before
+freeing its device, including removal with open files.
+Leave board enablement to the device tree.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/MAINTAINERS b/MAINTAINERS
+index 782389b..28f0190 100644
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -23714,6 +23714,13 @@ F:	Documentation/userspace-api/media/v4l/metafmt-rkisp1.rst
+ F:	drivers/media/platform/rockchip/rkisp1
+ F:	include/uapi/linux/rkisp1-config.h
+ 
++ROCKCHIP RGA1-PLUS DRIVER
++M:	RK3128 reference <reference@example.invalid>
++L:	linux-media@vger.kernel.org
++S:	Maintained
++F:	Documentation/devicetree/bindings/media/rockchip,rk3128-rga.yaml
++F:	drivers/media/platform/rockchip/rga/rga1*
++
+ ROCKCHIP RK3568 RANDOM NUMBER GENERATOR SUPPORT
+ M:	Daniel Golle <daniel@makrotopia.org>
+ M:	Aurelien Jarno <aurelien@aurel32.net>
+diff --git a/drivers/media/platform/rockchip/rga/Kconfig b/drivers/media/platform/rockchip/rga/Kconfig
+index 846e555..75c9eab 100644
+--- a/drivers/media/platform/rockchip/rga/Kconfig
++++ b/drivers/media/platform/rockchip/rga/Kconfig
+@@ -13,3 +13,19 @@ config VIDEO_ROCKCHIP_RGA
+ 	  image scaling, rotation, BitBLT, alpha blending and image blur/sharpness.
+ 
+ 	  To compile this driver as a module choose m here.
++
++config VIDEO_ROCKCHIP_RGA1
++	tristate "Rockchip RK3128 RGA1-plus 2D accelerator"
++	depends on V4L_MEM2MEM_DRIVERS && VIDEO_DEV
++	depends on ARCH_ROCKCHIP || COMPILE_TEST
++	select VIDEOBUF2_DMA_SG
++	select V4L2_MEM2MEM_DEV
++	help
++	  V4L2 mem2mem driver for the RK3128 RGA1-plus blitter, with RGB,
++	  planar/semi-planar YUV and packed palette inputs; RGB/YUV output,
++	  crop/compose, scaling, integer rotation/AA, fill, alpha and raster controls.
++	  DMA-BUF import uses the internal MMU with 4 KiB DMA page tables.
++	  No userspace physical addresses are accepted.
++	  The device tree must enable the engine explicitly.
++
++	  To compile as a module choose M; the module is rockchip-rga1.
+diff --git a/drivers/media/platform/rockchip/rga/Makefile b/drivers/media/platform/rockchip/rga/Makefile
+index 7326a54..f23de99 100644
+--- a/drivers/media/platform/rockchip/rga/Makefile
++++ b/drivers/media/platform/rockchip/rga/Makefile
+@@ -2,3 +2,6 @@
+ rockchip-rga-objs := rga.o rga-hw.o rga3-hw.o rga-buf.o
+ 
+ obj-$(CONFIG_VIDEO_ROCKCHIP_RGA) += rockchip-rga.o
++
++rockchip-rga1-objs := rga1.o
++obj-$(CONFIG_VIDEO_ROCKCHIP_RGA1) += rockchip-rga1.o
+diff --git a/drivers/media/platform/rockchip/rga/rga1-hw.h b/drivers/media/platform/rockchip/rga/rga1-hw.h
+new file mode 100644
+index 0000000..21e138c 100644
+--- /dev/null
++++ b/drivers/media/platform/rockchip/rga/rga1-hw.h
+@@ -0,0 +1,434 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* RK3128 RGA1-plus. Register definitions from Rockchip's RGA1 driver/TRM. */
++#ifndef ROCKCHIP_RGA1_HW_H
++#define ROCKCHIP_RGA1_HW_H
++
++#ifdef RGA1_HOST_TEST
++#include <stdint.h>
++#include <string.h>
++typedef uint32_t u32;
++typedef int32_t s32;
++typedef int64_t s64;
++#else
++#include <linux/types.h>
++#include <linux/string.h>
++#endif
++
++#define RGA1_SYS_CTRL 0x000
++#define RGA1_CMD_CTRL 0x004
++#define RGA1_CMD_ADDR 0x008
++#define RGA1_STATUS 0x00c
++#define RGA1_INT 0x010
++#define RGA1_MMU_CTRL 0x168
++#define RGA1_COMMAND_BYTES 128
++#define RGA1_MAX_SRC 8192
++#define RGA1_MAX_DST 2048
++
++/* Command word indices, register offsets 0x100..0x17c. */
++enum {
++	R1_MODE,
++	R1_SRC_Y,
++	R1_SRC_UV,
++	R1_SRC_V,
++	R1_SRC_VIR,
++	R1_SRC_ACT,
++	R1_X_PARA,
++	R1_Y_PARA,
++	R1_TILE_X,
++	R1_TILE_Y,
++	R1_TILE_H,
++	R1_TILE_V,
++	R1_TILE_OFF_X,
++	R1_TILE_OFF_Y,
++	R1_BG,
++	R1_FG,
++	R1_KEY_MIN,
++	R1_KEY_MAX,
++	R1_LINE,
++	R1_DST,
++	R1_DST_VIR,
++	R1_DST_ACT,
++	R1_ALPHA,
++	R1_PAT,
++	R1_PRE_UV,
++	R1_PRE_V,
++	R1_FADING,
++	R1_MMU_TBL,
++	R1_YUV_OUT,
++	R1_DST_UV,
++};
++
++/* Values are the MODE_CTRL source fields. Names describe little-endian
++ * memory component order (unlike DRM's word-order names).
++ */
++enum rga1_format {
++	RGA1_RGBA32 = 0,
++	RGA1_BGRA32 = 0x100,
++	RGA1_ARGB32 = 0x200,
++	RGA1_ABGR32 = 0x300,
++	RGA1_RGB24 = 8,
++	RGA1_BGR24 = 0x108,
++	RGA1_RGB565 = 0x10,
++	RGA1_A5R5G5B1 = 0x220,
++	RGA1_A5B5G5R1 = 0x320,
++	RGA1_RGBA5551 = 0x20,
++	RGA1_BGRA5551 = 0x120,
++	RGA1_ARGB4444 = 0x230,
++	RGA1_ABGR4444 = 0x330,
++	RGA1_RGBA4444 = 0x30,
++	RGA1_BGRA4444 = 0x130,
++	RGA1_PAL1 = 0x80,
++	RGA1_PAL2 = 0x90,
++	RGA1_PAL4 = 0xa0,
++	RGA1_PAL8 = 0xb0,
++	RGA1_NV16 = 0x40,
++	RGA1_NV61 = 0x440,
++	RGA1_YUV422P = 0x50,
++	RGA1_YVU422P = 0x450,
++	RGA1_NV12 = 0x60,
++	RGA1_NV21 = 0x460,
++	RGA1_YUV420P = 0x70,
++	RGA1_YVU420P = 0x470,
++};
++
++struct rga1_image {
++	u32 y, uv, v;
++	u32 width, height, stride, vir_height;
++	enum rga1_format format;
++};
++
++static inline int rga1_palette(enum rga1_format f)
++{
++	return !!(f & 0x80);
++}
++static inline int rga1_yuv(enum rga1_format f)
++{
++	return (f & 0xc0) == 0x40;
++}
++static inline int rga1_planar(enum rga1_format f)
++{
++	return rga1_yuv(f) && (f & 0x10);
++}
++static inline int rga1_420(enum rga1_format f)
++{
++	return rga1_yuv(f) && (f & 0x20);
++}
++static inline u32 rga1_bpp(enum rga1_format f)
++{
++	if (rga1_yuv(f) || rga1_palette(f))
++		return 1;
++	if (f & 0x30)
++		return 2;
++	return f & 8 ? 3 : 4;
++}
++
++static inline u32 rga1_line_bytes(u32 width, enum rga1_format f)
++{
++	if (rga1_palette(f))
++		return (width + (8U >> ((f >> 4) & 3)) - 1) >>
++		       (3 - ((f >> 4) & 3));
++	return width * rga1_bpp(f);
++}
++
++static inline u32 rga1_fmt_bits(enum rga1_format f, int dst)
++{
++	if (rga1_palette(f))
++		return f; /* RGA1-plus palette selectors 8..11 (TRM), not RGA1 */
++	if (!dst && rga1_planar(f))
++		f &= ~0x400U;
++	return dst ? ((f & 0x30) << 19) | ((f & 8) << 22) |
++			       ((f & 0x100) << 18) | ((f & 0x200) << 18) :
++		     f;
++}
++
++static inline void rga1_src(u32 *cmd, const struct rga1_image *src)
++{
++	cmd[R1_SRC_Y] = src->y;
++	cmd[R1_SRC_UV] = rga1_yuv(src->format) ? src->uv : 0;
++	cmd[R1_SRC_V] = rga1_planar(src->format) ? src->v : 0;
++	if (rga1_planar(src->format) && (src->format & 0x400)) {
++		cmd[R1_SRC_UV] = src->v;
++		cmd[R1_SRC_V] = src->uv;
++	}
++	cmd[R1_SRC_VIR] =
++		(src->stride / 4) |
++		((src->vir_height ? src->vir_height : src->height) << 16);
++	cmd[R1_SRC_ACT] = (src->width - 1) | ((src->height - 1) << 16);
++}
++
++/* A signed pair must be packed with unsigned shifts, including reflections. */
++static inline u32 rga1_pair(s64 low, s64 high)
++{
++	return ((u32)low & 0xffff) | ((u32)high << 16);
++}
++
++/* 16.16 sine, integer degrees. No floating point in kernel or job paths. */
++static inline s32 rga1_sin(u32 angle)
++{
++	static const u32 table[91] = {
++		0,     1144,  2287,  3430,  4572,  5712,  6850,	 7987,	9121,
++		10252, 11380, 12505, 13626, 14742, 15855, 16962, 18064, 19161,
++		20252, 21336, 22415, 23486, 24550, 25607, 26656, 27697, 28729,
++		29753, 30767, 31772, 32768, 33754, 34729, 35693, 36647, 37590,
++		38521, 39441, 40348, 41243, 42126, 42995, 43852, 44695, 45525,
++		46341, 47143, 47930, 48703, 49461, 50203, 50931, 51643, 52339,
++		53020, 53684, 54332, 54963, 55578, 56175, 56756, 57319, 57865,
++		58393, 58903, 59396, 59870, 60326, 60764, 61183, 61584, 61966,
++		62328, 62672, 62997, 63303, 63589, 63856, 64104, 64332, 64540,
++		64729, 64898, 65048, 65177, 65287, 65376, 65446, 65496, 65526,
++		65536,
++
++	};
++	u32 a = angle % 180;
++	s32 value = table[a > 90 ? 180 - a : a];
++
++	return angle % 360 >= 180 ? -value : value;
++}
++
++/*
++ * Inverse affine matrix, 32.32, with the vendor's endpoint-aligned 16.16
++ * ratio. Generalising its quarter-turn and mirror cases also permits their
++ * combinations without a second blit. No signed left shifts or FP in kernel.
++ */
++struct rga1_affine {
++	s64 a, b, c, d, tx, ty;
++};
++static inline struct rga1_affine rga1_matrix(const struct rga1_image *src,
++					     const struct rga1_image *dst, u32 angle,
++					     int hflip, int vflip)
++{
++	s64 a, b = 0, c = 0, d, tx, ty;
++	u32 uw = (angle == 90 || angle == 270) ? dst->height : dst->width;
++	u32 uh = (angle == 90 || angle == 270) ? dst->width : dst->height;
++	s64 xs = (s64)(((src->width - 1) * 65536U) / (uw - 1)) * 65536;
++	s64 ys = (s64)(((src->height - 1) * 65536U) / (uh - 1)) * 65536;
++	a = xs;
++	d = ys;
++	if (angle == 90) {
++		a = d = 0;
++		b = xs;
++		c = -ys;
++	}
++	if (angle == 180) {
++		a = -xs;
++		d = -ys;
++	}
++	if (angle == 270) {
++		a = d = 0;
++		b = -xs;
++		c = ys;
++	}
++	if (angle % 90) {
++		s32 sn = rga1_sin(angle), cs = rga1_sin(angle + 90);
++
++		a = xs * cs / 65536;
++		b = xs * sn / 65536;
++		c = -ys * sn / 65536;
++		d = ys * cs / 65536;
++	}
++	if (hflip) {
++		a = -a;
++		c = -c;
++	}
++	if (vflip) {
++		b = -b;
++		d = -d;
++	}
++	tx = (a < 0 ? -a * (dst->width - 1) : 0) +
++	     (b < 0 ? -b * (dst->height - 1) : 0);
++	ty = (c < 0 ? -c * (dst->width - 1) : 0) +
++	     (d < 0 ? -d * (dst->height - 1) : 0);
++	if (angle % 90) {
++		tx = (s64)(src->width - 1) * 2147483648LL -
++		     (a * (dst->width - 1) + b * (dst->height - 1)) / 2;
++		ty = (s64)(src->height - 1) * 2147483648LL -
++		     (c * (dst->width - 1) + d * (dst->height - 1)) / 2;
++	}
++	return (struct rga1_affine){a, b, c, d, tx, ty};
++}
++
++/* A full tile at endpoint ratio <2 spans fewer than 23 source samples per
++ * axis (7*2*sqrt(2) plus the filter halo). Thirty-two samples also cover its
++ * clipped seed and bus look-behind. These are DMA bounds, not pixel clipping.
++ */
++static inline void rga1_source_span(const struct rga1_image *src,
++				    const struct rga1_image *dst, u32 angle, int hflip,
++				    int vflip, s64 *lo, s64 *hi)
++{
++	struct rga1_affine m = rga1_matrix(src, dst, angle, hflip, vflip);
++	s64 w = ((dst->width + 7) & ~7U) - 1;
++	s64 h = ((dst->height + 7) & ~7U) - 1;
++	s64 x0 = m.tx + (m.a < 0 ? m.a * w : 0) + (m.b < 0 ? m.b * h : 0);
++	s64 y0 = m.ty + (m.c < 0 ? m.c * w : 0) + (m.d < 0 ? m.d * h : 0);
++	s64 x1 = m.tx + (m.a > 0 ? m.a * w : 0) + (m.b > 0 ? m.b * h : 0);
++	s64 y1 = m.ty + (m.c > 0 ? m.c * w : 0) + (m.d > 0 ? m.d * h : 0);
++
++	*lo = ((y0 >> 32) - 32) * src->stride +
++	      ((x0 >> 32) - 32) * rga1_bpp(src->format) - 64;
++	*hi = ((y1 >> 32) + 33) * src->stride +
++	      ((x1 >> 32) + 33) * rga1_bpp(src->format) + 64;
++}
++
++static inline void rga1_blit_filter_halo(u32 *cmd, const struct rga1_image *src,
++				       const struct rga1_image *dst, u32 angle, int hflip,
++				       int vflip, u32 csc, u32 sampling, int halo)
++{
++	struct rga1_affine m = rga1_matrix(src, dst, angle, hflip, vflip);
++	s64 a = m.a, b = m.b, c = m.c, d = m.d, tx = m.tx, ty = m.ty;
++	s64 xmin, ymin, xmax, ymax;
++	s32 xp, yp;
++
++	xmin = tx + (a < 0 ? 7 * a : 0) + (b < 0 ? 7 * b : 0);
++	ymin = ty + (c < 0 ? 7 * c : 0) + (d < 0 ? 7 * d : 0);
++	xmax = tx + (a > 0 ? 7 * a : 0) + (b > 0 ? 7 * b : 0);
++	ymax = ty + (c > 0 ? 7 * c : 0) + (d > 0 ? 7 * d : 0);
++
++	if (sampling == 2 || halo) {
++		/* Bicubic needs the vendor's one-pixel halo on every side of a tile. */
++		xmin -= 4294967296LL;
++		ymin -= 4294967296LL;
++		xmax += 4294967296LL;
++		ymax += 4294967296LL;
++	}
++
++	memset(cmd, 0, RGA1_COMMAND_BYTES);
++	cmd[R1_MODE] = rga1_fmt_bits(src->format, 0) |
++		       rga1_fmt_bits(dst->format, 1) | (csc << 11) |
++		       (1U << 18) | (sampling << 20); /* tile scan */
++	rga1_src(cmd, src);
++	cmd[R1_X_PARA] = rga1_pair(a >> 18, b >> 18);
++	cmd[R1_Y_PARA] = rga1_pair(c >> 18, d >> 18);
++	cmd[R1_TILE_X] = rga1_pair(xmin >> 29, (xmax - xmin) >> 21);
++	cmd[R1_TILE_Y] = rga1_pair(ymin >> 29, (ymax - ymin) >> 21);
++	cmd[R1_TILE_H] = rga1_pair((8 * a) >> 22, (8 * c) >> 22);
++	cmd[R1_TILE_V] = rga1_pair((8 * b) >> 22, (8 * d) >> 22);
++	cmd[R1_TILE_OFF_X] = (tx - xmin) >> 18;
++	cmd[R1_TILE_OFF_Y] = (ty - ymin) >> 18;
++	/* The seed is relative to the first tile, even when that tile is fully
++	 * clipped. Clamping a fully clipped seed shifts every later source tile.
++	 * Prepare sizes the owned MMU guards from the full affine source span. */
++	xp = (s32)(short)(cmd[R1_TILE_X] & 0xffff) >> 3;
++	yp = (s32)(short)(cmd[R1_TILE_Y] & 0xffff) >> 3;
++	{
++		/* Visibility uses the encoded .3 origin and .11 extent, including
++		 * the fetch halo. Ideal/body-only bounds disagree at clipped tiles
++		 * whose last cached sample lies between -1 and zero. */
++		s32 xe = ((s32)(short)(cmd[R1_TILE_X] & 0xffff) * 256 +
++			  (s32)(cmd[R1_TILE_X] >> 16)) >> 11;
++		s32 ye = ((s32)(short)(cmd[R1_TILE_Y] & 0xffff) * 256 +
++			  (s32)(cmd[R1_TILE_Y] >> 16)) >> 11;
++
++		if (!(xe < -1 || xp > (s32)src->width - 1 ||
++		      ye < -1 || yp > (s32)src->height - 1)) {
++			if (xp < 0) xp = 0;
++			if (yp < 0) yp = 0;
++			if (xp >= (s32)src->width) xp = src->width - 1;
++			if (yp >= (s32)src->height) yp = src->height - 1;
++		}
++	}
++
++	cmd[R1_SRC_Y] += (s64)yp * src->stride + (s64)xp * rga1_bpp(src->format);
++	if (rga1_yuv(src->format)) {
++		u32 cy = rga1_420(src->format) ? yp / 2 : yp;
++		u32 cs = rga1_planar(src->format) ? src->stride / 2 :
++						    src->stride;
++		u32 cx = rga1_planar(src->format) ? (u32)(xp / 2) : (u32)xp & ~1U;
++
++		cmd[R1_SRC_UV] += cy * cs + cx;
++		if (rga1_planar(src->format))
++			cmd[R1_SRC_V] += cy * cs + cx;
++	}
++
++	cmd[R1_DST] = dst->y;
++	cmd[R1_DST_VIR] = dst->stride / 4;
++	cmd[R1_DST_ACT] = (dst->width - 1) | ((dst->height - 1) << 16) |
++			  (1U << 28) | (1U << 29);
++	/* No alpha/ROP/dither operation is requested by this interface. */
++}
++
++static inline void rga1_blit_filter(u32 *cmd, const struct rga1_image *src,
++				    const struct rga1_image *dst, u32 angle, int hflip,
++				    int vflip, u32 csc, u32 sampling)
++{
++	rga1_blit_filter_halo(cmd, src, dst, angle, hflip, vflip, csc, sampling, 0);
++}
++
++static inline void rga1_blit(u32 *cmd, const struct rga1_image *src,
++			     const struct rga1_image *dst, u32 angle, int hflip,
++			     int vflip, u32 csc)
++{
++	rga1_blit_filter(cmd, src, dst, angle, hflip, vflip, csc, 1);
++}
++
++/* Separate average-filter pass, reducing each axis by 1, 2, 4 or 8. */
++static inline void rga1_prescale(u32 *cmd, const struct rga1_image *src,
++				 const struct rga1_image *dst, u32 hx, u32 vy)
++{
++	memset(cmd, 0, RGA1_COMMAND_BYTES);
++	cmd[R1_MODE] = 5 | rga1_fmt_bits(src->format, 0) |
++		       rga1_fmt_bits(dst->format, 1);
++	rga1_src(cmd, src);
++	cmd[R1_DST] = dst->y;
++	if (rga1_yuv(dst->format)) {
++		cmd[R1_PRE_UV] = dst->uv;
++		cmd[R1_PRE_V] = rga1_planar(dst->format) ? dst->v : 0;
++		if (rga1_planar(dst->format) && (dst->format & 0x400)) {
++			cmd[R1_PRE_UV] = dst->v;
++			cmd[R1_PRE_V] = dst->uv;
++		}
++		cmd[R1_DST_UV] = dst->uv;
++		/* Keep the vendor's output subsampling selection with CSC off. */
++		cmd[R1_YUV_OUT] = (rga1_420(dst->format) ? 2 : 0) |
++				  (dst->format & 0x400 ? 8 : 0);
++	}
++	cmd[R1_DST_VIR] = dst->stride / 4;
++	cmd[R1_DST_ACT] = (dst->width - 1) | ((dst->height - 1) << 16);
++	cmd[R1_ALPHA] = (hx << 20) | (vy << 22);
++}
++/* Shipped Rockchip RGA1 ROP3 decode table, GPL-2.0, Zhang Shengqin. */
++static const u32 rga1_rop3[256] = {
++	0x000007,  0x000451, 0x006051, 0x800051,  0x007041,  0x800041,
++	0x804830,  0x0004f0, 0x800765, 0x0004b0,  0x000065,  0x0004f4,
++	0x000075,  0x0004e6, 0x804850, 0x800005,  0x006850,  0x800050,
++	0x805028,  0x000568, 0x804031, 0x000471,  0x2b6071,  0x18037aa,
++	0x8007aa,  0x036071, 0x002c6a, 0x803631,  0x002d68,  0x802721,
++	0x8002d0,  0x0006d0, 0x80066e, 0x000528,  0x000066,  0x00056c,
++	0x18007aa, 0x02e06a, 0x003471, 0x834031,  0x800631,  0x02b471,
++	0x006071,  0x8037aa, 0x0036d0, 0x8002d4,  0x002d28,  0x0006d4,
++	0x00006e,  0x000565, 0x003451, 0x800006,  0x0034f0,  0x834830,
++	0x800348,  0x000748, 0x002f48, 0x80034c,  0x0034b0,  0x00074c,
++	0x000031,  0x834850, 0x0034e6, 0x800071,  0x8006f4,  0x000431,
++	0x18007a1, 0xb6e870, 0x000074, 0x00046e,  0x002561,  0x802f28,
++	0x800728,  0x02a561, 0x0026c2, 0x8002c6,  0x007068,  0x18035aa,
++	0x002c2a,  0x0006c6, 0x00006c, 0x000475,  0x0024e2,  0x8036b0,
++	0x804051,  0x800004, 0x800251, 0x000651,  0x002e4a,  0x80024e,
++	0x000028,  0x824842, 0x0024a2, 0x00064e,  0x0024f4,  0x800068,
++	0x8006b0,  0x0234f0, 0x002741, 0x800345,  0x003651,  0x800255,
++	0x000030,  0x834051, 0xa34842, 0x0002b0,  0x800271,  0x02b651,
++	0x800368,  0x02a741, 0x00364e, 0x806830,  0x006870,  0x8037a2,
++	0x003431,  0x000745, 0x002521, 0x000655,  0x00346e,  0x800062,
++	0x8002f0,  0x0236d0, 0x0026d4, 0x807028,  0x0036c6,  0x806031,
++	0x8005aa,  0x000671, 0x800671, 0x0005aa,  0x006031,  0x8036c6,
++	0x007028,  0x802e55, 0x8236d0, 0x0002f0,  0x000070,  0x80346e,
++	0x800655,  0x802521, 0x800745, 0x803431,  0x0037a2,  0x806870,
++	0x006830,  0x80364e, 0x822f48, 0x000361,  0x82b651,  0x000271,
++	0x800231,  0x2b4051, 0x034051, 0x800030,  0x80026e,  0x803651,
++	0x80036c,  0x802741, 0x8234f0, 0x0006b0,  0x000068,  0x802c75,
++	0x80064e,  0x8024a2, 0x02c04a, 0x800021,  0x800275,  0x802e51,
++	0x800651,  0x000251, 0x800000, 0x004051,  0x0036b0,  0x8024e2,
++	0x800475,  0x000045, 0x8006c6, 0x802c2a,  0x0035aa,  0x807068,
++	0x8002f4,  0x8026c2, 0x822d68, 0x000728,  0x002f28,  0x802561,
++	0x80046e,  0x000046, 0x836870, 0x0007a2,  0x800431,  0x004071,
++	0x000071,  0x8034e6, 0x034850, 0x800031,  0x80074c,  0x8034b0,
++	0x800365,  0x802f48, 0x800748, 0x000341,  0x0026a2,  0x8034f0,
++	0x800002,  0x005048, 0x800565, 0x000055,  0x8006d4,  0x802d28,
++	0x8002e6,  0x8036d0, 0x0037aa, 0x806071,  0x82b471,  0x000631,
++	0x002e2a,  0x803471, 0x826862, 0x10007aa, 0x80056c,  0x000054,
++	0x800528,  0x005068, 0x8006d0, 0x0002d0,  0x002721,  0x802d68,
++	0x003631,  0x802c6a, 0x836071, 0x0007aa,  0x10037aa, 0xa36870,
++	0x800471,  0x004031, 0x800568, 0x005028,  0x000050,  0x800545,
++	0x800001,  0x004850, 0x8004e6, 0x00004e,  0x8004f4,  0x00004c,
++	0x8004b0,  0x004870, 0x8004f0, 0x004830,  0x000048,  0x80044e,
++	0x000051,  0x8004d4, 0x800451, 0x800007,
++};
++#endif
+diff --git a/drivers/media/platform/rockchip/rga/rga1.c b/drivers/media/platform/rockchip/rga/rga1.c
+new file mode 100644
+index 0000000..b04576c 100644
+--- /dev/null
++++ b/drivers/media/platform/rockchip/rga/rga1.c
+@@ -0,0 +1,2194 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * RK3128 RGA1-plus V4L2 mem2mem driver.
++ * Register programming derived from Rockchip's GPL RGA1 driver (2012),
++ * authors Zhang Shengqin et al., and the RK3128 TRM chapter 19.
++ *
++ * RGA1 has a different command/MMU ABI from RGA2. Keep its bounded,
++ * image worker separate; do not reset any shared VIO or VPU resource.
++ */
++#include <linux/clk.h>
++#include <linux/completion.h>
++#include <linux/dma-mapping.h>
++#include <linux/dma-buf.h>
++#include <linux/interrupt.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/reset.h>
++#include <linux/workqueue.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-event.h>
++#include <media/v4l2-ioctl.h>
++#include <media/v4l2-mem2mem.h>
++#include <media/videobuf2-dma-sg.h>
++
++#include "rga1-hw.h"
++#include "rga1-controls.h"
++
++#define RGA1_NAME "rockchip-rga1"
++#define RGA1_TIMEOUT_MS 1000
++#define RGA1_IRQ_ENABLE (BIT(10) | BIT(9) | BIT(8))
++#define RGA1_IRQ_CLEAR GENMASK(7, 4)
++
++struct rga1_dev {
++	struct device *dev;
++	void __iomem *regs;
++	struct clk_bulk_data *clks;
++	int num_clks, irq;
++	struct reset_control *resets;
++	struct v4l2_device v4l2;
++	struct video_device video;
++	struct v4l2_m2m_dev *m2m;
++	struct mutex mutex;
++	struct workqueue_struct *wq;
++	struct work_struct work;
++	struct completion done;
++	u32 irq_status, expected_irq;
++	bool disconnected, broken, clocks_on;
++	u32 *cmd;
++	dma_addr_t cmd_dma;
++};
++
++struct rga1_ctx {
++	struct v4l2_fh fh;
++	struct rga1_dev *rga;
++	struct v4l2_ctrl_handler ctrls;
++	struct v4l2_pix_format_mplane pix[2]; /* output, capture */
++	u32 sequence[2], angle;
++	struct v4l2_rect rect[2];
++	bool hflip, vflip, aborting, palette_expand, palette_first, from_palette;
++	void *scratch;
++	dma_addr_t scratch_dma;
++	size_t scratch_size;
++	struct rga1_image intermediate, expanded_image;
++	void *expanded;
++	dma_addr_t expanded_dma;
++	size_t expanded_size;
++	u32 *page_table;
++	dma_addr_t page_table_dma;
++	size_t page_table_size;
++	void *guard;
++	dma_addr_t guard_dma;
++	u32 hx, vy;
++	u32 operation, sampling, dither, alpha_mode, pd, global_alpha, color;
++	u32 key, key_min, key_max, rop, fading;
++	u32 pattern_size, csc_alias;
++	u32 foreground, palette_alpha, zero_key;
++	u32 gradient_wrap, alpha_calc, mix_dest, rop_mode, pattern_origin, mask_base,
++		rotate_aa;
++	u32 guard_lead, guard_gap;
++	size_t mask_size;
++	struct dma_buf *mask_buf;
++	struct dma_buf_attachment *mask_attach;
++	struct sg_table *mask_sgt;
++	u8 lut[1024], pattern[1024];
++	s32 gradient[8];
++	void *aux;
++	dma_addr_t aux_dma;
++};
++
++struct rga1_fmt {
++	u32 fourcc;
++	enum rga1_format hw;
++	bool yuv;
++	bool input;
++};
++
++static const struct rga1_fmt rga1_formats[] = {
++	{V4L2_PIX_FMT_RGB24, RGA1_RGB24, false, true},
++	{V4L2_PIX_FMT_BGR24, RGA1_BGR24, false, true},
++	{V4L2_PIX_FMT_RGB565, RGA1_RGB565, false, true},
++	{V4L2_PIX_FMT_NV12, RGA1_NV12, true, true},
++	{V4L2_PIX_FMT_NV16, RGA1_NV16, true, true},
++	{V4L2_PIX_FMT_RGBA32, RGA1_RGBA32, false, true},
++	{V4L2_PIX_FMT_RGBX32, RGA1_RGBA32, false, true},
++	{V4L2_PIX_FMT_ABGR32, RGA1_BGRA32, false, true},
++	{V4L2_PIX_FMT_XBGR32, RGA1_BGRA32, false, true},
++	{V4L2_PIX_FMT_ARGB32, RGA1_ARGB32, false, true},
++	{V4L2_PIX_FMT_XRGB32, RGA1_ARGB32, false, true},
++	{V4L2_PIX_FMT_BGRA32, RGA1_ABGR32, false, true},
++	{V4L2_PIX_FMT_BGRX32, RGA1_ABGR32, false, true},
++	{V4L2_PIX_FMT_RGBA555, RGA1_RGBA5551, false, true},
++	{V4L2_PIX_FMT_RGBX555, RGA1_RGBA5551, false, true},
++	{V4L2_PIX_FMT_BGRA555, RGA1_BGRA5551, false, true},
++	{V4L2_PIX_FMT_BGRX555, RGA1_BGRA5551, false, true},
++	{V4L2_PIX_FMT_ARGB444, RGA1_ARGB4444, false, true},
++	{V4L2_PIX_FMT_XRGB444, RGA1_ARGB4444, false, true},
++	{V4L2_PIX_FMT_ABGR444, RGA1_ABGR4444, false, true},
++	{V4L2_PIX_FMT_XBGR444, RGA1_ABGR4444, false, true},
++	{V4L2_PIX_FMT_RGBA444, RGA1_RGBA4444, false, true},
++	{V4L2_PIX_FMT_RGBX444, RGA1_RGBA4444, false, true},
++	{V4L2_PIX_FMT_BGRA444, RGA1_BGRA4444, false, true},
++	{V4L2_PIX_FMT_BGRX444, RGA1_BGRA4444, false, true},
++	{V4L2_PIX_FMT_NV21, RGA1_NV21, true, true},
++	{V4L2_PIX_FMT_NV61, RGA1_NV61, true, true},
++	{V4L2_PIX_FMT_YUV420, RGA1_YUV420P, true, true},
++	{V4L2_PIX_FMT_YVU420, RGA1_YVU420P, true, true},
++	{V4L2_PIX_FMT_YUV422P, RGA1_YUV422P, true, true},
++	{V4L2_PIX_FMT_YVU422M, RGA1_YVU422P, true, true},
++	{V4L2_PIX_FMT_PAL8, RGA1_PAL8, false, false},
++	{V4L2_PIX_FMT_RGA1_PAL1, RGA1_PAL1, false, true},
++	{V4L2_PIX_FMT_RGA1_PAL2, RGA1_PAL2, false, true},
++	{V4L2_PIX_FMT_RGA1_PAL4, RGA1_PAL4, false, true},
++};
++
++static const struct rga1_fmt *rga1_format(u32 fourcc)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(rga1_formats); i++)
++		if (rga1_formats[i].fourcc == fourcc)
++			return &rga1_formats[i];
++	return &rga1_formats[0];
++}
++
++static bool rga1_capture_format(const struct rga1_fmt *fmt)
++{
++	return !rga1_palette(fmt->hw) && fmt->hw != RGA1_ARGB4444 &&
++	       fmt->hw != RGA1_ABGR4444;
++}
++
++static struct rga1_ctx *rga1_ctx(struct file *file)
++{
++	return container_of(file_to_v4l2_fh(file), struct rga1_ctx, fh);
++}
++
++static unsigned int rga1_side(enum v4l2_buf_type type)
++{
++	return V4L2_TYPE_IS_OUTPUT(type) ? 0 : 1;
++}
++
++/* The standard YVU422M contract has three independently owned memory planes.
++ * Map each plane on a page boundary; no physical contiguity is assumed. */
++static bool rga1_multiplanar(u32 fourcc)
++{
++	return fourcc == V4L2_PIX_FMT_YVU422M;
++}
++
++static size_t rga1_pages(const struct v4l2_pix_format_mplane *p)
++{
++	size_t pages = 0;
++	unsigned int i;
++
++	for (i = 0; i < p->num_planes; i++)
++		pages += DIV_ROUND_UP(p->plane_fmt[i].sizeimage, PAGE_SIZE);
++	return pages;
++}
++
++static void rga1_size(struct v4l2_pix_format_mplane *p)
++{
++	const struct rga1_fmt *fmt = rga1_format(p->pixelformat);
++	u32 stride = ALIGN(clamp(p->plane_fmt[0].bytesperline,
++				 rga1_line_bytes(p->width, fmt->hw),
++				 RGA1_MAX_SRC * 4U),
++			   4);
++	u32 size = stride * p->height;
++
++	if (fmt->yuv && !rga1_multiplanar(p->pixelformat))
++		size += rga1_420(fmt->hw) ? size / 2 : size;
++	memset(p->plane_fmt, 0, sizeof(p->plane_fmt));
++	p->num_planes = 1;
++	p->plane_fmt[0].bytesperline = stride;
++	p->plane_fmt[0].sizeimage = size;
++	if (rga1_multiplanar(p->pixelformat)) {
++		p->num_planes = 3;
++		p->plane_fmt[1].bytesperline = p->plane_fmt[2].bytesperline = stride / 2;
++		p->plane_fmt[1].sizeimage = p->plane_fmt[2].sizeimage = size / 2;
++	}
++}
++
++/* DEFAULT is format-dependent: RGB defaults to full, YUV usually limited. */
++static u32 rga1_quant(const struct v4l2_pix_format_mplane *p)
++{
++	if (p->quantization != V4L2_QUANTIZATION_DEFAULT)
++		return p->quantization;
++	return V4L2_MAP_QUANTIZATION_DEFAULT(!rga1_format(p->pixelformat)->yuv,
++					     p->colorspace, p->ycbcr_enc);
++}
++
++static int rga1_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	struct v4l2_pix_format_mplane *p = &f->fmt.pix_mp;
++	bool output = V4L2_TYPE_IS_OUTPUT(f->type);
++	const struct rga1_fmt *fmt = rga1_format(p->pixelformat);
++	u32 max = output ? RGA1_MAX_SRC : RGA1_MAX_DST;
++
++	/* Palette and planar YUV are source formats in the normal blit path. */
++	if ((output && !fmt->input) ||
++	    (!output && (!rga1_capture_format(fmt) ||
++			 (rga1_planar(fmt->hw) && ctx->operation != 6))))
++		fmt = &rga1_formats[0];
++	p->pixelformat = fmt->fourcc;
++	p->width = clamp(p->width, 2U, max);
++	p->height = clamp(p->height, 2U, max);
++	if (fmt->yuv) {
++		p->width &= ~1U;
++		if (rga1_420(fmt->hw))
++			p->height &= ~1U;
++	}
++	p->field = V4L2_FIELD_NONE;
++	if (output) {
++		if (p->colorspace != V4L2_COLORSPACE_REC709 &&
++		    p->colorspace != V4L2_COLORSPACE_SMPTE170M &&
++		    p->colorspace != V4L2_COLORSPACE_JPEG &&
++		    p->colorspace != V4L2_COLORSPACE_SRGB)
++			p->colorspace = fmt->yuv ? V4L2_COLORSPACE_SMPTE170M :
++						   V4L2_COLORSPACE_SRGB;
++		if (p->ycbcr_enc != V4L2_YCBCR_ENC_601 &&
++		    p->ycbcr_enc != V4L2_YCBCR_ENC_709)
++			p->ycbcr_enc =
++				V4L2_MAP_YCBCR_ENC_DEFAULT(p->colorspace);
++		if (p->quantization > V4L2_QUANTIZATION_LIM_RANGE)
++			p->quantization = V4L2_QUANTIZATION_DEFAULT;
++		/* MODE_CTRL[12:11]=3 aliases 601 limited, not 709 full. */
++		if (fmt->yuv && p->ycbcr_enc == V4L2_YCBCR_ENC_709 &&
++		    rga1_quant(p) == V4L2_QUANTIZATION_FULL_RANGE)
++			p->quantization = V4L2_QUANTIZATION_LIM_RANGE;
++		if (!p->xfer_func || p->xfer_func > V4L2_XFER_FUNC_SMPTE2084)
++			p->xfer_func =
++				V4L2_MAP_XFER_FUNC_DEFAULT(p->colorspace);
++	} else {
++		u32 enc = p->ycbcr_enc, quant = p->quantization;
++
++		p->colorspace = ctx->pix[0].colorspace;
++		p->ycbcr_enc = ctx->pix[0].ycbcr_enc;
++		p->xfer_func = ctx->pix[0].xfer_func;
++		p->quantization = ctx->pix[0].quantization;
++		if (p->flags & V4L2_PIX_FMT_FLAG_SET_CSC) {
++			if (fmt->yuv) {
++				if (enc == V4L2_YCBCR_ENC_601 ||
++				    enc == V4L2_YCBCR_ENC_709)
++					p->ycbcr_enc = enc;
++				p->quantization =
++					quant <= V4L2_QUANTIZATION_LIM_RANGE ?
++						quant :
++						V4L2_QUANTIZATION_DEFAULT;
++				if (p->ycbcr_enc == V4L2_YCBCR_ENC_709 &&
++				    rga1_quant(p) ==
++					    V4L2_QUANTIZATION_FULL_RANGE)
++					p->quantization =
++						V4L2_QUANTIZATION_LIM_RANGE;
++			} else {
++				p->quantization =
++					rga1_format(ctx->pix[0].pixelformat)
++							->yuv ?
++						V4L2_QUANTIZATION_FULL_RANGE :
++						rga1_quant(&ctx->pix[0]);
++			}
++		}
++	}
++
++	p->flags = 0;
++	if (!output)
++		p->plane_fmt[0].bytesperline =
++			min(p->plane_fmt[0].bytesperline, 0x3ffcU);
++	rga1_size(p);
++	return 0;
++}
++
++static int rga1_g_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	f->fmt.pix_mp = rga1_ctx(file)->pix[rga1_side(f->type)];
++	return 0;
++}
++
++static int rga1_s_fmt(struct file *file, void *priv, struct v4l2_format *f)
++{
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	unsigned int side = rga1_side(f->type);
++	int ret = rga1_try_fmt(file, priv, f);
++
++	if (ret)
++		return ret;
++	if (vb2_is_busy(v4l2_m2m_get_vq(ctx->fh.m2m_ctx, f->type)) ||
++	    vb2_is_streaming(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx)) ||
++	    vb2_is_streaming(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx)))
++		return -EBUSY;
++	ctx->pix[side] = f->fmt.pix_mp;
++	ctx->rect[side] = (struct v4l2_rect){ .width = f->fmt.pix_mp.width,
++					      .height = f->fmt.pix_mp.height };
++	if (!side) {
++		ctx->pix[1].colorspace = ctx->pix[0].colorspace;
++		ctx->pix[1].ycbcr_enc = ctx->pix[0].ycbcr_enc;
++		ctx->pix[1].quantization = ctx->pix[0].quantization;
++		ctx->pix[1].xfer_func = ctx->pix[0].xfer_func;
++	}
++	return 0;
++}
++
++static int rga1_querycap(struct file *file, void *priv,
++			 struct v4l2_capability *cap)
++{
++	strscpy(cap->driver, RGA1_NAME, sizeof(cap->driver));
++	strscpy(cap->card, "RK3128 RGA1-plus", sizeof(cap->card));
++	return 0;
++}
++
++static int rga1_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
++{
++	bool output = V4L2_TYPE_IS_OUTPUT(f->type);
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	unsigned int i, index = 0;
++
++	for (i = 0; i < ARRAY_SIZE(rga1_formats); i++) {
++		const struct rga1_fmt *fmt = &rga1_formats[i];
++
++		if ((output && !fmt->input) ||
++		    (!output && (!rga1_capture_format(fmt) ||
++				 (rga1_planar(fmt->hw) && ctx->operation != 6))))
++			continue;
++		if (index++ == f->index)
++			break;
++	}
++	if (i == ARRAY_SIZE(rga1_formats))
++		return -EINVAL;
++	f->pixelformat = rga1_formats[i].fourcc;
++	if (rga1_palette(rga1_formats[i].hw) &&
++	    f->pixelformat != V4L2_PIX_FMT_PAL8)
++		strscpy(f->description, "RGA1 packed palette indices",
++			sizeof(f->description));
++	if (!output)
++		f->flags |= V4L2_FMT_FLAG_CSC_QUANTIZATION;
++	if (!output && rga1_formats[i].yuv)
++		f->flags |= V4L2_FMT_FLAG_CSC_YCBCR_ENC;
++	return 0;
++}
++
++static int rga1_g_selection(struct file *file, void *priv,
++			    struct v4l2_selection *sel)
++{
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	unsigned int side = rga1_side(sel->type);
++	u32 active = side ? V4L2_SEL_TGT_COMPOSE : V4L2_SEL_TGT_CROP;
++
++	if (sel->type != V4L2_BUF_TYPE_VIDEO_OUTPUT &&
++	    sel->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)
++		return -EINVAL;
++	if (sel->target == active) {
++		sel->r = ctx->rect[side];
++		return 0;
++	}
++	if (sel->target != active + 1 && sel->target != active + 2)
++		return -EINVAL;
++	sel->r = (struct v4l2_rect){ .width = ctx->pix[side].width,
++				     .height = ctx->pix[side].height };
++	return 0;
++}
++
++static int rga1_s_selection(struct file *file, void *priv,
++			    struct v4l2_selection *sel)
++{
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	unsigned int side = rga1_side(sel->type);
++	const struct rga1_fmt *fmt = rga1_format(ctx->pix[side].pixelformat);
++	struct v4l2_rect *r = &sel->r;
++	u32 minimum = side && (ctx->operation == 1 || ctx->operation == 5) ? 1 :
++									     2;
++
++	if ((sel->type != V4L2_BUF_TYPE_VIDEO_OUTPUT &&
++	     sel->type != V4L2_BUF_TYPE_VIDEO_CAPTURE) ||
++	    sel->target != (side ? V4L2_SEL_TGT_COMPOSE : V4L2_SEL_TGT_CROP) ||
++	    sel->flags)
++		return -EINVAL;
++	if (vb2_is_streaming(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx)) ||
++	    vb2_is_streaming(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx)))
++		return -EBUSY;
++	/* Exact selections: never round a requested edge or silently lose a border. */
++	if (r->left < 0 || r->top < 0 || r->width < minimum ||
++	    r->height < minimum || r->width > ctx->pix[side].width ||
++	    r->height > ctx->pix[side].height ||
++	    (u32)r->left > ctx->pix[side].width - r->width ||
++	    (u32)r->top > ctx->pix[side].height - r->height ||
++	    (fmt->yuv && ((r->left | r->width) & 1)) ||
++	    (rga1_420(fmt->hw) && ((r->top | r->height) & 1)) ||
++	    (rga1_palette(fmt->hw) && (r->left % (8U >> ((fmt->hw >> 4) & 3)))))
++		return -EINVAL;
++	ctx->rect[side] = *r;
++	return 0;
++}
++
++static int rga1_sg_check(struct sg_table *sgt, size_t size);
++
++static void rga1_put_mask(struct rga1_ctx *ctx)
++{
++	if (!ctx->mask_buf)
++		return;
++	dma_buf_unmap_attachment_unlocked(ctx->mask_attach, ctx->mask_sgt, DMA_TO_DEVICE);
++	dma_buf_detach(ctx->mask_buf, ctx->mask_attach);
++	dma_buf_put(ctx->mask_buf);
++	ctx->mask_buf = NULL;
++	ctx->mask_attach = NULL;
++	ctx->mask_sgt = NULL;
++}
++
++/* Replacement is transactional: a bad fd/exporter leaves the old mask owned.
++ * The caller serializes producers and brackets CPU access with DMA_BUF_SYNC. */
++static int rga1_set_mask(struct rga1_ctx *ctx, int fd)
++{
++	struct dma_buf *buf;
++	struct dma_buf_attachment *attach;
++	struct sg_table *sgt;
++	int ret;
++
++	if (fd == -1) {
++		rga1_put_mask(ctx);
++		return 0;
++	}
++	buf = dma_buf_get(fd);
++	if (IS_ERR(buf))
++		return PTR_ERR(buf);
++	attach = dma_buf_attach(buf, ctx->rga->dev);
++	if (IS_ERR(attach)) {
++		ret = PTR_ERR(attach);
++		goto put;
++	}
++	sgt = dma_buf_map_attachment_unlocked(attach, DMA_TO_DEVICE);
++	if (IS_ERR(sgt)) {
++		ret = PTR_ERR(sgt);
++		goto detach;
++	}
++	ret = rga1_sg_check(sgt, min_t(size_t, buf->size, 1));
++	if (ret) {
++		dma_buf_unmap_attachment_unlocked(attach, sgt, DMA_TO_DEVICE);
++		goto detach;
++	}
++	rga1_put_mask(ctx);
++	ctx->mask_buf = buf;
++	ctx->mask_attach = attach;
++	ctx->mask_sgt = sgt;
++	return 0;
++detach:
++	dma_buf_detach(buf, attach);
++put:
++	dma_buf_put(buf);
++	return ret;
++}
++
++static bool rga1_has_alpha(u32 fourcc)
++{
++	switch (fourcc) {
++	case V4L2_PIX_FMT_RGBA32:
++	case V4L2_PIX_FMT_ABGR32:
++	case V4L2_PIX_FMT_ARGB32:
++	case V4L2_PIX_FMT_BGRA32:
++		return true;
++	default:
++		return false;
++	}
++}
++
++static int rga1_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct rga1_ctx *ctx =
++		container_of(ctrl->handler, struct rga1_ctx, ctrls);
++
++	/* Freeze the matrix and prescale allocation until both queues stop. */
++	if (ctx->fh.m2m_ctx &&
++	    (vb2_is_streaming(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx)) ||
++	     vb2_is_streaming(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx))))
++		return -EBUSY;
++	switch (ctrl->id) {
++	case V4L2_CID_RGA1_ROTATE_AA:
++		ctx->rotate_aa = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_GRADIENT_WRAP:
++		ctx->gradient_wrap = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_ALPHA_CALC:
++		ctx->alpha_calc = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_MIX_DEST:
++		ctx->mix_dest = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_ROP_MODE:
++		ctx->rop_mode = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_PATTERN_ORIGIN:
++		ctx->pattern_origin = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_ZERO_KEY:
++		ctx->zero_key = ctrl->val;
++		break;
++
++	case V4L2_CID_RGA1_FG_COLOR:
++		ctx->foreground = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_PALETTE_ALPHA:
++		ctx->palette_alpha = ctrl->val;
++		break;
++
++	case V4L2_CID_RGA1_CSC_ALIAS:
++		ctx->csc_alias = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_LUT:
++		memcpy(ctx->lut, ctrl->p_new.p_u8, sizeof(ctx->lut));
++		break;
++	case V4L2_CID_RGA1_PATTERN:
++		memcpy(ctx->pattern, ctrl->p_new.p_u8, sizeof(ctx->pattern));
++		break;
++	case V4L2_CID_RGA1_GRADIENT:
++		memcpy(ctx->gradient, ctrl->p_new.p_s32, sizeof(ctx->gradient));
++		break;
++
++	case V4L2_CID_RGA1_PATTERN_SIZE:
++		ctx->pattern_size = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_OPERATION:
++		ctx->operation = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_SAMPLING:
++		ctx->sampling = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_DITHER:
++		ctx->dither = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_ALPHA_MODE:
++		ctx->alpha_mode = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_PORTER_DUFF:
++		ctx->pd = ctrl->val;
++		break;
++	case V4L2_CID_ALPHA_COMPONENT:
++		ctx->global_alpha = ctrl->val;
++		break;
++	case V4L2_CID_BG_COLOR:
++		ctx->color = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_COLORKEY:
++		ctx->key = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_KEY_MIN:
++		ctx->key_min = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_KEY_MAX:
++		ctx->key_max = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_ROP:
++		ctx->rop = ctrl->val;
++		break;
++	case V4L2_CID_RGA1_FADING:
++		ctx->fading = ctrl->val;
++		break;
++
++	case V4L2_CID_ROTATE:
++		ctx->angle = ctrl->val;
++		break;
++	case V4L2_CID_HFLIP:
++		ctx->hflip = ctrl->val;
++		break;
++	case V4L2_CID_VFLIP:
++		ctx->vflip = ctrl->val;
++		break;
++	default:
++		return -EINVAL;
++	}
++	return 0;
++}
++
++static const struct v4l2_ctrl_ops rga1_ctrl_ops = { .s_ctrl = rga1_ctrl };
++
++static const char *const rga1_operations[] = {
++	"Blit",	       "Fill",	       "Unavailable", "Unavailable",
++	"Unavailable", "Pattern fill", "Prescale",
++};
++
++static const struct v4l2_ctrl_config rga1_controls[] = {
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_ROTATE_AA,
++	 .name = "RGA1 rotation antialias",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{
++		.ops = &rga1_ctrl_ops,
++		.id = V4L2_CID_RGA1_OPERATION,
++		.name = "RGA1 operation",
++		.type = V4L2_CTRL_TYPE_MENU,
++		.qmenu = rga1_operations,
++		.menu_skip_mask = BIT(2) | BIT(3) | BIT(4),
++		.max = 6,
++	},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_SAMPLING,
++	 .name = "RGA1 sampling",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 2,
++	 .step = 1,
++	 .def = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_DITHER,
++	 .name = "RGA1 down dither",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_ALPHA_MODE,
++	 .name = "RGA1 alpha mode",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 3,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_PORTER_DUFF,
++	 .name = "RGA1 Porter Duff",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 12,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_COLORKEY,
++	 .name = "RGA1 color key",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 2,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_KEY_MIN,
++	 .name = "RGA1 key minimum",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 0xffffff,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_KEY_MAX,
++	 .name = "RGA1 key maximum",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 0xffffff,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_ROP,
++	 .name = "RGA1 raster truth tables",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 65536,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_FADING,
++	 .name = "RGA1 fading",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 0xffffff,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_LUT,
++	 .name = "RGA1 palette RGBA bytes",
++	 .type = V4L2_CTRL_TYPE_U8,
++	 .max = 255,
++	 .step = 1,
++	 .dims = {1024}},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_PATTERN,
++	 .name = "RGA1 pattern bytes",
++	 .type = V4L2_CTRL_TYPE_U8,
++	 .max = 255,
++	 .step = 1,
++	 .dims = {1024}},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_GRADIENT,
++	 .name = "RGA1 fill gradient",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .min = -32768,
++	 .max = 32767,
++	 .step = 1,
++	 .dims = {8}},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_PATTERN_SIZE,
++	 .name = "RGA1 pattern dimensions",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .min = 0x10001,
++	 .max = 0xff00ff,
++	 .def = 0x10001,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_CSC_ALIAS,
++	 .name = "RGA1 BT601 limited alias",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_FG_COLOR,
++	 .name = "RGA1 1bpp foreground RGB",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 0xffffff,
++	 .step = 1,
++	 .def = 0xffffff},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_PALETTE_ALPHA,
++	 .name = "RGA1 palette one bit alpha",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_ZERO_KEY,
++	 .name = "RGA1 alpha zero key",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_GRADIENT_WRAP,
++	 .name = "RGA1 gradient wrap",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_ALPHA_CALC,
++	 .name = "RGA1 straight alpha coefficient",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_MIX_DEST,
++	 .name = "RGA1 destination alpha mix",
++	 .type = V4L2_CTRL_TYPE_BOOLEAN,
++	 .max = 1,
++	 .step = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_ROP_MODE,
++	 .name = "RGA1 ROP operand mode",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 2,
++	 .step = 1,
++	 .def = 1},
++	{.ops = &rga1_ctrl_ops,
++	 .id = V4L2_CID_RGA1_PATTERN_ORIGIN,
++	 .name = "RGA1 pattern origin",
++	 .type = V4L2_CTRL_TYPE_INTEGER,
++	 .max = 0x00ff00ff,
++	 .step = 1},
++};
++
++static int rga1_queue_setup(struct vb2_queue *q, unsigned int *nbufs,
++			    unsigned int *nplanes, unsigned int sizes[],
++			    struct device *alloc_devs[])
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(q);
++	const struct v4l2_pix_format_mplane *p = &ctx->pix[rga1_side(q->type)];
++	unsigned int i;
++
++	if (*nplanes && *nplanes != p->num_planes)
++		return -EINVAL;
++	for (i = 0; i < p->num_planes; i++) {
++		if (*nplanes && sizes[i] < p->plane_fmt[i].sizeimage)
++			return -EINVAL;
++		if (!*nplanes)
++			sizes[i] = p->plane_fmt[i].sizeimage;
++	}
++	*nplanes = p->num_planes;
++	return 0;
++}
++
++/* The engine consumes 32-bit, page-aligned DMA addresses, never CPU PFNs.
++ * Reject exporters whose DMA segment layout cannot be represented exactly.
++ */
++static int rga1_sg_check(struct sg_table *sgt, size_t size)
++{
++	struct scatterlist *sg;
++	unsigned int i;
++	size_t total = 0, needed = PAGE_ALIGN(size);
++
++	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
++		dma_addr_t addr = sg_dma_address(sg);
++		size_t len = sg_dma_len(sg);
++
++		if (!len || !IS_ALIGNED(addr, PAGE_SIZE) ||
++		    !IS_ALIGNED(len, PAGE_SIZE) ||
++		    upper_32_bits((u64)addr + len - 1))
++			return -EINVAL;
++		total += len < needed - total ? len : needed - total;
++	}
++	return total >= PAGE_ALIGN(size) ? 0 : -EINVAL;
++}
++
++static unsigned int rga1_sg_discontinuities(struct sg_table *sgt)
++{
++	struct scatterlist *sg;
++	dma_addr_t end = 0;
++	unsigned int i, jumps = 0;
++
++	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
++		if (i && sg_dma_address(sg) != end)
++			jumps++;
++		end = sg_dma_address(sg) + sg_dma_len(sg);
++	}
++	return jumps;
++}
++
++static int rga1_buf_prepare(struct vb2_buffer *vb)
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
++	const struct v4l2_pix_format_mplane *p = &ctx->pix[rga1_side(vb->type)];
++	unsigned int i;
++
++	if (vb->num_planes != p->num_planes)
++		return -EINVAL;
++	if (V4L2_TYPE_IS_OUTPUT(vb->type)) {
++		if (vbuf->field == V4L2_FIELD_ANY)
++			vbuf->field = V4L2_FIELD_NONE;
++		if (vbuf->field != V4L2_FIELD_NONE)
++			return -EINVAL;
++	}
++	for (i = 0; i < p->num_planes; i++) {
++		u32 size = p->plane_fmt[i].sizeimage;
++		struct sg_table *sgt = vb2_dma_sg_plane_desc(vb, i);
++
++		if (vb2_plane_size(vb, i) < size || vb->planes[i].data_offset ||
++		    rga1_sg_check(sgt, size) ||
++		    (V4L2_TYPE_IS_OUTPUT(vb->type) &&
++		     vb2_get_plane_payload(vb, i) < size))
++			return -EINVAL;
++		if (rga1_sg_discontinuities(sgt))
++			dev_info_once(ctx->rga->dev,
++				      "internal MMU maps discontiguous DMA-BUF pages (%u "
++				      "discontinuities)\n",
++				      rga1_sg_discontinuities(sgt));
++	}
++	for (i = 0; i < p->num_planes; i++)
++		vb2_set_plane_payload(vb, i, p->plane_fmt[i].sizeimage);
++	return 0;
++}
++
++static void rga1_buf_queue(struct vb2_buffer *vb)
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(vb->vb2_queue);
++
++	v4l2_m2m_buf_queue(ctx->fh.m2m_ctx, to_vb2_v4l2_buffer(vb));
++}
++
++static void rga1_return_buffers(struct vb2_queue *q,
++				enum vb2_buffer_state state)
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(q);
++	struct vb2_v4l2_buffer *buf;
++
++	while ((buf = V4L2_TYPE_IS_OUTPUT(q->type) ?
++			      v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx) :
++			      v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx)))
++		v4l2_m2m_buf_done(buf, state);
++}
++
++static u32 rga1_pre_shift(u32 src, u32 dst)
++{
++	u32 shift = 0;
++
++	/* 2.14 signed ratios must stay strictly below 2, including endpoints. */
++	while (shift < 3 && ((src >> shift) >= 2 * dst - 1))
++		shift++;
++	return shift;
++}
++
++static int rga1_prepare_streaming(struct vb2_queue *q)
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(q);
++	const struct v4l2_pix_format_mplane *src = &ctx->pix[0];
++	const struct v4l2_pix_format_mplane *dst = &ctx->pix[1];
++	const struct rga1_fmt *fmt = rga1_format(src->pixelformat);
++	u32 w = (ctx->angle == 90 || ctx->angle == 270) ? ctx->rect[1].height :
++							  ctx->rect[1].width;
++	u32 h = (ctx->angle == 90 || ctx->angle == 270) ? ctx->rect[1].width :
++							  ctx->rect[1].height;
++	struct rga1_image *mid = &ctx->intermediate;
++
++	ctx->palette_expand =
++		rga1_palette(fmt->hw) && !ctx->operation &&
++		(ctx->angle || ctx->hflip || ctx->vflip || ctx->alpha_mode || ctx->pd ||
++		 ctx->rop || ctx->fading || ctx->key || ctx->dither ||
++		 ctx->rect[0].width != w || ctx->rect[0].height != h);
++
++	ctx->mask_size = 0;
++	ctx->guard_lead = ctx->guard_gap = 16;
++	if ((ctx->gradient_wrap && ctx->operation != 1) ||
++	    (ctx->alpha_calc && !ctx->alpha_mode) ||
++	    (ctx->mix_dest &&
++	     (!ctx->alpha_mode || ctx->pd || !rga1_has_alpha(dst->pixelformat))))
++		return -EINVAL;
++
++	if (ctx->operation == 6) {
++		unsigned int i;
++
++		if (fmt->hw != rga1_format(dst->pixelformat)->hw || ctx->angle ||
++		    ctx->hflip || ctx->vflip || ctx->key || ctx->alpha_mode || ctx->pd ||
++		    ctx->rop || ctx->fading || ctx->dither || fmt->hw == RGA1_ARGB4444 ||
++		    fmt->hw == RGA1_ABGR4444 || rga1_palette(fmt->hw) || ctx->zero_key)
++			return -EINVAL;
++		for (i = 0; i < 2; i++)
++			if (ctx->rect[i].left || ctx->rect[i].top ||
++			    ctx->rect[i].width != ctx->pix[i].width ||
++			    ctx->rect[i].height != ctx->pix[i].height)
++				return -EINVAL;
++		ctx->hx = rga1_pre_shift(src->width, dst->width);
++		ctx->vy = rga1_pre_shift(src->height, dst->height);
++		if (src->width != (dst->width << ctx->hx) ||
++		    src->height != (dst->height << ctx->vy) ||
++		    src->ycbcr_enc != dst->ycbcr_enc ||
++		    rga1_quant(src) != rga1_quant(dst))
++			return -EINVAL;
++		return 0;
++	}
++	if (rga1_planar(rga1_format(dst->pixelformat)->hw))
++		return -EOPNOTSUPP;
++
++	/* A fill can compose a single pixel; switching it back to a blit must
++	 * revalidate before any endpoint-aligned ratio has a zero denominator. */
++	if (!ctx->operation && (w < 2 || h < 2))
++		return -EINVAL;
++
++	if (ctx->rotate_aa && ctx->angle % 90 && !rga1_palette(fmt->hw) &&
++	    src->pixelformat != V4L2_PIX_FMT_RGB24 &&
++	    src->pixelformat != V4L2_PIX_FMT_BGR24 &&
++	    src->pixelformat != V4L2_PIX_FMT_RGB565)
++		return -EOPNOTSUPP;
++	if (ctx->angle % 90 &&
++	    (fmt->yuv || rga1_format(dst->pixelformat)->yuv || ctx->operation ||
++	     ctx->alpha_mode || ctx->rop || ctx->key || ctx->fading || ctx->zero_key ||
++	     rga1_has_alpha(dst->pixelformat)))
++		return -EOPNOTSUPP;
++	if ((ctx->csc_alias &&
++	     (!fmt->yuv || src->ycbcr_enc != V4L2_YCBCR_ENC_601 ||
++	      rga1_quant(src) != V4L2_QUANTIZATION_LIM_RANGE)))
++		return -EINVAL;
++	if (rga1_format(dst->pixelformat)->yuv &&
++	    (ctx->operation || ctx->alpha_mode || ctx->rop || ctx->key ||
++	     ctx->fading || rga1_palette(fmt->hw) ||
++	     (dst->ycbcr_enc == V4L2_YCBCR_ENC_709 &&
++	      rga1_quant(dst) == V4L2_QUANTIZATION_FULL_RANGE)))
++		return -EINVAL;
++
++	if (ctx->operation >= 2 && ctx->operation <= 4)
++		return -EOPNOTSUPP;
++
++	/* Alpha-bearing 8888 targets use the separately verified DST_VIR fetch. */
++	if (ctx->alpha_mode && dst->pixelformat != V4L2_PIX_FMT_RGB24 &&
++	    dst->pixelformat != V4L2_PIX_FMT_BGR24 && !rga1_has_alpha(dst->pixelformat))
++		return -EOPNOTSUPP;
++	if (ctx->zero_key && ((src->pixelformat != V4L2_PIX_FMT_RGBA32 &&
++			       src->pixelformat != V4L2_PIX_FMT_ABGR32 &&
++			       src->pixelformat != V4L2_PIX_FMT_ARGB32 &&
++			       src->pixelformat != V4L2_PIX_FMT_BGRA32) ||
++			      (dst->pixelformat != V4L2_PIX_FMT_RGB24 &&
++			       dst->pixelformat != V4L2_PIX_FMT_BGR24 &&
++			       dst->pixelformat != V4L2_PIX_FMT_RGB565) ||
++			      ctx->operation || ctx->alpha_mode || ctx->rop ||
++			      ctx->key || ctx->fading))
++		return -EINVAL;
++	if ((ctx->rop_mode == 0 && ctx->rop > 16) ||
++	    (ctx->rop_mode == 1 && ctx->rop > 256))
++		return -EINVAL;
++	if (ctx->rop && ctx->rop_mode == 2) {
++		size_t size = ALIGN(DIV_ROUND_UP(src->width, 8), 4) * src->height;
++
++		if (!ctx->mask_buf || ctx->mask_buf->size < size || fmt->yuv ||
++		    rga1_palette(fmt->hw) || src->pixelformat != dst->pixelformat ||
++		    src->width != dst->width || src->height != dst->height ||
++		    ctx->rect[0].width != src->width ||
++		    ctx->rect[0].height != src->height ||
++		    ctx->rect[1].width != dst->width ||
++		    ctx->rect[1].height != dst->height || ctx->angle || ctx->hflip ||
++		    ctx->vflip || ctx->key || ctx->fading || ctx->dither ||
++		    rga1_sg_check(ctx->mask_sgt, size))
++			return -EINVAL;
++		ctx->mask_size = size;
++	}
++	if (rga1_format(dst->pixelformat)->yuv &&
++	    dst->ycbcr_enc == V4L2_YCBCR_ENC_709 &&
++	    (!fmt->yuv || src->ycbcr_enc != dst->ycbcr_enc ||
++	     rga1_quant(src) != rga1_quant(dst)))
++		return -EOPNOTSUPP;
++
++	/* Operations share registers: reject combinations before any allocation/DMA.
++	 * Only blits may scale/rotate. Fill and filters use the compose rectangle.
++	 */
++	if ((ctx->operation &&
++	     (ctx->angle || ctx->hflip || ctx->vflip || ctx->key ||
++	      (ctx->alpha_mode && ctx->operation != 1) ||
++	      (ctx->rop && !(ctx->operation == 1 && ctx->rop_mode == 0)) || ctx->fading ||
++	      (ctx->dither && ctx->operation != 1))) ||
++	    ((ctx->operation == 2 || ctx->operation == 3) &&
++	     (src->pixelformat != dst->pixelformat || fmt->yuv ||
++	      ctx->rect[0].width != w || ctx->rect[0].height != h)) ||
++	    (ctx->rop && ctx->alpha_mode) || (ctx->pd && !ctx->alpha_mode) ||
++	    (ctx->key && (ctx->key_min > ctx->key_max)) ||
++	    (ctx->dither && dst->pixelformat != V4L2_PIX_FMT_RGB565))
++		return -EINVAL;
++	if (ctx->operation == 1 && ctx->rop) {
++		unsigned int i;
++
++		if (ctx->gradient_wrap || ctx->dither)
++			return -EINVAL;
++		for (i = 0; i < ARRAY_SIZE(ctx->gradient); i++)
++			if (ctx->gradient[i])
++				return -EINVAL;
++	}
++
++	if (ctx->operation == 5 || ctx->rop) {
++		u32 pw = ctx->pattern_size & 0xffff,
++		    ph = ctx->pattern_size >> 16;
++
++		if (!pw || !ph || pw > 255 || ph > 255 || pw * ph > 255 ||
++		    (ctx->pattern_origin & 0xffff) >= pw ||
++		    (ctx->pattern_origin >> 16) >= ph)
++			return -EINVAL;
++	}
++	if (rga1_palette(fmt->hw) &&
++	    (ctx->operation ||
++	     (!ctx->palette_expand &&
++	      (ctx->angle || ctx->hflip || ctx->vflip || ctx->alpha_mode || ctx->pd ||
++	       ctx->rop || ctx->fading || ctx->key || ctx->dither ||
++	       ctx->rect[0].width != w || ctx->rect[0].height != h))))
++		return -EINVAL;
++	if (ctx->operation == 1 || ctx->operation == 5 ||
++	    (rga1_palette(fmt->hw) && !ctx->palette_expand)) {
++		ctx->hx = ctx->vy = 0;
++		return 0;
++	}
++	/* RGB passes through unchanged; the YUV CSC always produces full RGB. */
++	if (!rga1_format(dst->pixelformat)->yuv &&
++	    rga1_quant(dst) !=
++		    (fmt->yuv ? V4L2_QUANTIZATION_FULL_RANGE : rga1_quant(src)))
++		return -EINVAL;
++	ctx->hx = rga1_pre_shift(ctx->rect[0].width, w);
++	ctx->vy = rga1_pre_shift(ctx->rect[0].height, h);
++	/* A prescale destination is itself limited to 2048 on each axis. */
++	if (ctx->hx || ctx->vy || ctx->angle % 90) {
++		while ((ctx->rect[0].width >> ctx->hx) > RGA1_MAX_DST &&
++		       ctx->hx < 3)
++			ctx->hx++;
++		while ((ctx->rect[0].height >> ctx->vy) > RGA1_MAX_DST &&
++		       ctx->vy < 3)
++			ctx->vy++;
++	}
++	mid->width = ctx->rect[0].width >> ctx->hx;
++	mid->height = ctx->rect[0].height >> ctx->vy;
++	/* No silent truncation of odd prescale/chroma rows or source borders. */
++	if ((mid->width << ctx->hx) != ctx->rect[0].width ||
++	    (mid->height << ctx->vy) != ctx->rect[0].height || mid->width < 2 ||
++	    mid->height < 2 ||
++	    ((ctx->hx || ctx->vy) &&
++	     (mid->width > RGA1_MAX_DST || mid->height > RGA1_MAX_DST)) ||
++	    mid->width >= 2 * w - 1 || mid->height >= 2 * h - 1 ||
++	    w > 8 * (mid->width - 1) + 1 || h > 8 * (mid->height - 1) + 1)
++		return -EINVAL;
++	if ((ctx->hx || ctx->vy) && fmt->yuv &&
++	    ((mid->width & 1) || (rga1_420(fmt->hw) && (mid->height & 1))))
++		return -EINVAL;
++	mid->format = ctx->palette_expand ? (ctx->angle % 90 ? RGA1_RGB24 : RGA1_RGBA32)
++					  : fmt->hw;
++	if (mid->format == RGA1_ARGB4444 || mid->format == RGA1_ABGR4444)
++		mid->format = RGA1_RGBA4444;
++	if (mid->format == RGA1_NV21)
++		mid->format = RGA1_NV12;
++	if (mid->format == RGA1_NV61)
++		mid->format = RGA1_NV16;
++	mid->stride = ALIGN(mid->width * rga1_bpp(mid->format), 4);
++	if (ctx->palette_expand) {
++		struct rga1_image *expanded = &ctx->expanded_image;
++
++		expanded->width = ctx->rect[0].width;
++		expanded->height = ctx->rect[0].height;
++		expanded->format = mid->format;
++		expanded->stride = ALIGN(expanded->width * rga1_bpp(expanded->format), 4);
++		if (expanded->width > RGA1_MAX_DST || expanded->height > RGA1_MAX_DST)
++			return -EOPNOTSUPP;
++	}
++
++	if (ctx->angle % 90) {
++		struct rga1_image input = *mid;
++		struct rga1_image output = {.width = w, .height = h};
++		s64 lo, hi;
++
++		/* The worker reads RGB scratch after either expansion or prescale.
++		 * Only a direct source pass keeps the user's packed/padded stride. */
++		if (!(ctx->hx || ctx->vy || ctx->palette_expand)) {
++			input.width = ctx->rect[0].width;
++			input.height = ctx->rect[0].height;
++			input.stride = src->plane_fmt[0].bytesperline;
++		}
++		rga1_source_span(&input, &output, ctx->angle, ctx->hflip, ctx->vflip, &lo,
++				 &hi);
++		ctx->guard_lead += DIV_ROUND_UP((u64)(lo < 0 ? -lo : 0), PAGE_SIZE);
++		ctx->guard_gap += DIV_ROUND_UP((u64)(hi > 0 ? hi : 0), PAGE_SIZE);
++	}
++
++	return 0;
++}
++
++static void rga1_free_mmu(struct rga1_ctx *ctx);
++
++static int rga1_start_streaming(struct vb2_queue *q, unsigned int count)
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(q);
++	struct rga1_dev *rga = ctx->rga;
++	struct rga1_image *mid = &ctx->intermediate;
++	int ret;
++
++	if (rga->disconnected || rga->broken) {
++		ret = -EIO;
++		goto fail;
++	}
++	ret = pm_runtime_resume_and_get(rga->dev);
++	if (ret < 0)
++		goto fail;
++	dev_info_once(rga->dev, "silicon version %#x\n",
++		      readl(rga->regs + 0x28));
++	if (ctx->operation != 6 && (ctx->hx || ctx->vy || ctx->palette_expand) &&
++	    !ctx->scratch) {
++		ctx->scratch_size = mid->stride * mid->height;
++		if (rga1_yuv(mid->format))
++			ctx->scratch_size += rga1_420(mid->format) ?
++						     ctx->scratch_size / 2 :
++						     ctx->scratch_size;
++
++		ctx->scratch = dma_alloc_coherent(rga->dev, ctx->scratch_size,
++						  &ctx->scratch_dma,
++						  GFP_KERNEL);
++		if (!ctx->scratch) {
++			pm_runtime_put(rga->dev);
++			ret = -ENOMEM;
++			goto fail;
++		}
++		mid->y = ctx->scratch_dma;
++		mid->uv = mid->y + mid->stride * mid->height;
++		mid->v =
++			mid->uv + (mid->stride / 2) * (rga1_420(mid->format) ?
++							       mid->height / 2 :
++							       mid->height);
++	}
++	if (ctx->palette_expand && (ctx->hx || ctx->vy) && !ctx->expanded) {
++		struct rga1_image *expanded = &ctx->expanded_image;
++
++		ctx->expanded_size = expanded->stride * expanded->height;
++		ctx->expanded = dma_alloc_coherent(rga->dev, ctx->expanded_size,
++						   &ctx->expanded_dma, GFP_KERNEL);
++		if (!ctx->expanded) {
++			pm_runtime_put(rga->dev);
++			ret = -ENOMEM;
++			goto fail;
++		}
++		expanded->y = ctx->expanded_dma;
++	}
++
++	if (!ctx->page_table) {
++		size_t pages = rga1_pages(&ctx->pix[0]) + rga1_pages(&ctx->pix[1]) +
++			       DIV_ROUND_UP(ctx->scratch_size, PAGE_SIZE) +
++			       DIV_ROUND_UP(ctx->expanded_size, PAGE_SIZE) +
++			       DIV_ROUND_UP(ctx->mask_size, PAGE_SIZE) + ctx->guard_lead +
++			       ctx->guard_gap + 32;
++
++		if (pages > 0xffffffffU / PAGE_SIZE) {
++			pm_runtime_put(rga->dev);
++			ret = -E2BIG;
++			goto fail;
++		}
++		ctx->page_table_size = PAGE_ALIGN(pages * sizeof(u32));
++		ctx->page_table =
++			dma_alloc_coherent(rga->dev, ctx->page_table_size,
++					   &ctx->page_table_dma, GFP_KERNEL);
++		ctx->guard = dma_alloc_coherent(rga->dev, PAGE_SIZE,
++						&ctx->guard_dma, GFP_KERNEL);
++		if (!ctx->page_table || !ctx->guard) {
++			if (ctx->page_table)
++				dma_free_coherent(rga->dev,
++						  ctx->page_table_size,
++						  ctx->page_table,
++						  ctx->page_table_dma);
++			if (ctx->guard)
++				dma_free_coherent(rga->dev, PAGE_SIZE,
++						  ctx->guard, ctx->guard_dma);
++			ctx->page_table = NULL;
++			ctx->guard = NULL;
++			pm_runtime_put(rga->dev);
++			ret = -ENOMEM;
++			goto fail;
++		}
++	}
++	memset(ctx->guard, 0, PAGE_SIZE);
++	if (!ctx->aux) {
++		ctx->aux = dma_alloc_coherent(rga->dev, 1024, &ctx->aux_dma,
++					      GFP_KERNEL);
++		if (!ctx->aux) {
++			pm_runtime_put(rga->dev);
++			ret = -ENOMEM;
++			goto fail;
++		}
++	}
++	ctx->sequence[rga1_side(q->type)] = 0;
++	WRITE_ONCE(ctx->aborting, false);
++	return 0;
++fail:
++	if (!vb2_is_streaming(V4L2_TYPE_IS_OUTPUT(q->type) ?
++				      v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx) :
++				      v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx))) {
++		if (ctx->scratch) {
++			dma_free_coherent(rga->dev, ctx->scratch_size,
++					  ctx->scratch, ctx->scratch_dma);
++			ctx->scratch = NULL;
++		}
++		if (ctx->expanded) {
++			dma_free_coherent(ctx->rga->dev, ctx->expanded_size,
++					  ctx->expanded, ctx->expanded_dma);
++			ctx->expanded = NULL;
++		}
++		ctx->expanded_size = 0;
++		ctx->scratch_size = 0;
++		rga1_free_mmu(ctx);
++	}
++	rga1_return_buffers(q, VB2_BUF_STATE_QUEUED);
++	return ret;
++}
++
++static void rga1_free_mmu(struct rga1_ctx *ctx)
++{
++	if (!ctx->page_table)
++		return;
++	dma_free_coherent(ctx->rga->dev, ctx->page_table_size, ctx->page_table,
++			  ctx->page_table_dma);
++	dma_free_coherent(ctx->rga->dev, PAGE_SIZE, ctx->guard, ctx->guard_dma);
++	ctx->page_table = NULL;
++	ctx->guard = NULL;
++	if (ctx->aux) {
++		dma_free_coherent(ctx->rga->dev, 1024, ctx->aux, ctx->aux_dma);
++		ctx->aux = NULL;
++	}
++}
++
++static void rga1_stop_streaming(struct vb2_queue *q)
++{
++	struct rga1_ctx *ctx = vb2_get_drv_priv(q);
++	struct vb2_queue *other = V4L2_TYPE_IS_OUTPUT(q->type) ?
++					  v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx) :
++					  v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx);
++
++	/* m2m_cancel_job has finished the worker before vb2 calls this. */
++	rga1_return_buffers(q, VB2_BUF_STATE_ERROR);
++	if (!vb2_is_streaming(other) && ctx->scratch) {
++		dma_free_coherent(ctx->rga->dev, ctx->scratch_size,
++				  ctx->scratch, ctx->scratch_dma);
++		ctx->scratch = NULL;
++		if (ctx->expanded) {
++			dma_free_coherent(ctx->rga->dev, ctx->expanded_size,
++					  ctx->expanded, ctx->expanded_dma);
++			ctx->expanded = NULL;
++		}
++		ctx->expanded_size = 0;
++		ctx->scratch_size = 0;
++	}
++	if (!vb2_is_streaming(other))
++		rga1_free_mmu(ctx);
++	pm_runtime_put(ctx->rga->dev);
++}
++
++static const struct vb2_ops rga1_qops = {
++	.queue_setup = rga1_queue_setup,
++	.buf_prepare = rga1_buf_prepare,
++	.buf_queue = rga1_buf_queue,
++	.prepare_streaming = rga1_prepare_streaming,
++	.start_streaming = rga1_start_streaming,
++	.stop_streaming = rga1_stop_streaming,
++};
++
++static int rga1_queues(void *priv, struct vb2_queue *src, struct vb2_queue *dst)
++{
++	struct rga1_ctx *ctx = priv;
++	struct vb2_queue *q[2] = { src, dst };
++	unsigned int i;
++	int ret;
++
++	for (i = 0; i < 2; i++) {
++		q[i]->type = i ? V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE :
++				 V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
++		q[i]->io_modes = VB2_MMAP | VB2_DMABUF;
++		q[i]->buf_struct_size = sizeof(struct v4l2_m2m_buffer);
++		q[i]->drv_priv = ctx;
++		q[i]->ops = &rga1_qops;
++		q[i]->mem_ops = &vb2_dma_sg_memops;
++		q[i]->bidirectional = true;
++		q[i]->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
++		q[i]->lock = &ctx->rga->mutex;
++		q[i]->dev = ctx->rga->dev;
++		ret = vb2_queue_init(q[i]);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int rga1_reset(struct rga1_dev *rga)
++{
++	u32 val;
++	int ret;
++
++	writel(0, rga->regs + RGA1_INT);
++	writel(1, rga->regs + RGA1_SYS_CTRL);
++	ret = readl_poll_timeout(rga->regs + RGA1_SYS_CTRL, val, !(val & 1), 1,
++				 1000);
++	if (ret) {
++		/* Only RGA's own AXI/AHB resets; never VIO's shared domain. */
++		ret = reset_control_reset(rga->resets);
++		if (!ret)
++			ret = readl_poll_timeout(rga->regs + RGA1_STATUS, val,
++						 !(val & 1), 1, 1000);
++	}
++	writel(RGA1_IRQ_CLEAR, rga->regs + RGA1_INT);
++	synchronize_irq(rga->irq);
++	if (ret) {
++		dev_err(rga->dev,
++			"reset failed: holding reset and gating RGA\n");
++		WRITE_ONCE(rga->broken, true);
++		reset_control_assert(rga->resets);
++		clk_bulk_disable_unprepare(rga->num_clks, rga->clks);
++		rga->clocks_on = false;
++	}
++	return ret;
++}
++
++static irqreturn_t rga1_irq(int irq, void *priv)
++{
++	struct rga1_dev *rga = priv;
++	u32 status = readl(rga->regs + RGA1_INT) & 0xf;
++
++	if (!status)
++		return IRQ_NONE;
++	writel(RGA1_IRQ_ENABLE | (status << 4), rga->regs + RGA1_INT);
++	WRITE_ONCE(rga->irq_status, READ_ONCE(rga->irq_status) | status);
++	if (status & (BIT(0) | BIT(1) | READ_ONCE(rga->expected_irq)))
++		complete(&rga->done);
++	return IRQ_HANDLED;
++}
++
++static int rga1_execute(struct rga1_ctx *ctx, bool mmu)
++{
++	struct rga1_dev *rga = ctx->rga;
++	u32 val;
++	int ret;
++
++	if (READ_ONCE(ctx->aborting) || READ_ONCE(rga->broken))
++		return -ECANCELED;
++	ret = rga1_reset(rga);
++	if (ret)
++		return ret;
++	reinit_completion(&rga->done);
++	WRITE_ONCE(rga->irq_status, 0);
++	WRITE_ONCE(rga->expected_irq, BIT(2));
++	writel(0, rga->regs + RGA1_SYS_CTRL);
++	writel(0, rga->regs + RGA1_MMU_CTRL);
++	/* All commands use a fresh table, 4 KiB pages and all-channel TLB flush.
++	 * The command fetch itself is physical, as in the shipped vendor driver.
++	 */
++	if (mmu) {
++		rga->cmd[R1_MMU_TBL] = ctx->page_table_dma >> 2;
++		rga->cmd[R1_FADING] |= 0x2f;
++	}
++
++	dma_wmb();
++	writel(rga->cmd_dma, rga->regs + RGA1_CMD_ADDR);
++	writel(BIT(2) | BIT(3), rga->regs + RGA1_SYS_CTRL);
++	writel(RGA1_IRQ_ENABLE | RGA1_IRQ_CLEAR, rga->regs + RGA1_INT);
++	writel(1, rga->regs + RGA1_CMD_CTRL);
++
++	if (READ_ONCE(ctx->aborting))
++		complete(&rga->done);
++	if (!wait_for_completion_timeout(&rga->done,
++					 msecs_to_jiffies(RGA1_TIMEOUT_MS))) {
++		dev_err(rga->dev, "job timeout, status=%#x irq=%#x\n",
++			readl(rga->regs + RGA1_STATUS),
++			readl(rga->regs + RGA1_INT));
++		ret = -ETIMEDOUT;
++	} else if (READ_ONCE(ctx->aborting)) {
++		ret = -ECANCELED;
++	} else if (!(READ_ONCE(rga->irq_status) &
++		     READ_ONCE(rga->expected_irq)) ||
++		   (READ_ONCE(rga->irq_status) & (BIT(0) | BIT(1)))) {
++		dev_err(rga->dev, "job error irq=%#x\n", rga->irq_status);
++		ret = -EIO;
++	}
++	if (!ret) {
++		/* IRQ completion must precede an idle engine before any reset or RAM
++		 * update consumer. This is a bounded hardware completion check.
++		 */
++		ret = readl_poll_timeout(rga->regs + RGA1_STATUS, val,
++					 !(val & 1), 1, 1000);
++		if (ret)
++			dev_err(rga->dev, "completion without idle engine\n");
++	}
++
++	/* Quiesce DMA and IRQ before returning either buffer, including errors. */
++	if (rga1_reset(rga))
++		ret = -EIO;
++	return ret;
++}
++
++static struct rga1_image rga1_image(struct rga1_ctx *ctx,
++				    struct vb2_v4l2_buffer *buf,
++				    unsigned int side, u32 base)
++{
++	const struct v4l2_pix_format_mplane *p = &ctx->pix[side];
++	struct rga1_image img = {
++		.y = base,
++		.width = p->width,
++		.height = p->height,
++		.stride = p->plane_fmt[0].bytesperline,
++		.format = rga1_format(p->pixelformat)->hw,
++	};
++
++	img.uv = img.y + img.stride * img.height;
++	img.v = img.uv +
++		(img.stride / 2) *
++			(rga1_420(img.format) ? img.height / 2 : img.height);
++	if (p->num_planes == 3) {
++		img.uv = base + PAGE_ALIGN(p->plane_fmt[0].sizeimage);
++		img.v = img.uv + PAGE_ALIGN(p->plane_fmt[1].sizeimage);
++	}
++	img.vir_height = img.height;
++	img.width = ctx->rect[side].width;
++	img.height = ctx->rect[side].height;
++	img.y += ctx->rect[side].top * img.stride +
++		 rga1_line_bytes(ctx->rect[side].left, img.format);
++	if (rga1_yuv(img.format)) {
++		u32 cy = rga1_420(img.format) ? ctx->rect[side].top / 2 :
++						ctx->rect[side].top;
++		u32 cs = rga1_planar(img.format) ? img.stride / 2 : img.stride;
++		u32 cx = rga1_planar(img.format) ? ctx->rect[side].left / 2 :
++						   ctx->rect[side].left;
++		img.uv += cy * cs + cx;
++		img.v += cy * cs + cx;
++	}
++	return img;
++}
++
++/* Map the exact two images used by this pass. Extra entries all refer to
++ * this context's private guard page. The worker is serialized by the m2m core.
++ */
++static void rga1_map_sg(u32 *table, struct sg_table *sgt, size_t size)
++{
++	struct scatterlist *sg;
++	unsigned int i;
++	size_t n = 0, pages = DIV_ROUND_UP(size, PAGE_SIZE);
++
++	for_each_sg(sgt->sgl, sg, sgt->nents, i) {
++		dma_addr_t addr = sg_dma_address(sg);
++		size_t offset;
++
++		for (offset = 0; offset < sg_dma_len(sg) && n < pages;
++		     offset += PAGE_SIZE)
++			table[n++] = addr + offset;
++	}
++}
++
++static void rga1_map_buffer(u32 *table, struct vb2_v4l2_buffer *buf,
++			    const struct v4l2_pix_format_mplane *p)
++{
++	unsigned int i;
++
++	for (i = 0; i < p->num_planes; i++) {
++		size_t size = p->plane_fmt[i].sizeimage;
++
++		rga1_map_sg(table, vb2_dma_sg_plane_desc(&buf->vb2_buf, i), size);
++		table += DIV_ROUND_UP(size, PAGE_SIZE);
++	}
++}
++
++static u32 rga1_map_pass(struct rga1_ctx *ctx, struct vb2_v4l2_buffer *src,
++			 struct vb2_v4l2_buffer *dst, bool pre)
++{
++	size_t source_size = ctx->from_palette ? ctx->expanded_size : ctx->scratch_size;
++	dma_addr_t source_dma = ctx->from_palette ? ctx->expanded_dma : ctx->scratch_dma;
++	size_t target_size = ctx->palette_first ? ctx->expanded_size : ctx->scratch_size;
++	dma_addr_t target_dma = ctx->palette_first ? ctx->expanded_dma : ctx->scratch_dma;
++	size_t src_pages =
++		src ? rga1_pages(&ctx->pix[0]) : DIV_ROUND_UP(source_size, PAGE_SIZE);
++	size_t start = src_pages + ctx->guard_lead + ctx->guard_gap;
++	size_t i;
++
++	for (i = 0; i < ctx->page_table_size / sizeof(u32); i++)
++		ctx->page_table[i] = ctx->guard_dma;
++	if (src)
++		rga1_map_buffer(ctx->page_table + ctx->guard_lead, src, &ctx->pix[0]);
++	else
++		for (i = 0; i < src_pages; i++)
++			ctx->page_table[ctx->guard_lead + i] = source_dma + i * PAGE_SIZE;
++
++	if (ctx->mask_size) {
++		ctx->mask_base = start * PAGE_SIZE;
++		rga1_map_sg(ctx->page_table + start, ctx->mask_sgt, ctx->mask_size);
++		start += DIV_ROUND_UP(ctx->mask_size, PAGE_SIZE) + 16;
++	}
++
++	if (pre)
++		for (i = 0; i < DIV_ROUND_UP(target_size, PAGE_SIZE); i++)
++			ctx->page_table[start + i] = target_dma + i * PAGE_SIZE;
++	else
++		rga1_map_buffer(ctx->page_table + start, dst, &ctx->pix[1]);
++	return start * PAGE_SIZE;
++}
++
++static struct rga1_image rga1_rebase(struct rga1_image img, u32 base)
++{
++	img.uv = base + img.uv - img.y;
++	img.v = base + img.v - img.y;
++	img.y = base;
++	return img;
++}
++
++static void rga1_palette_command(struct rga1_ctx *ctx, const struct rga1_image *in,
++				 const struct rga1_image *out)
++{
++	u32 *cmd = ctx->rga->cmd;
++
++	u32 mono_bg = in->format == RGA1_PAL1 ? ctx->foreground : ctx->color;
++	u32 mono_fg = in->format == RGA1_PAL1 ? ctx->color : ctx->foreground;
++
++	memset(cmd, 0, RGA1_COMMAND_BYTES);
++	cmd[R1_MODE] = 1 | rga1_fmt_bits(in->format, 0) | rga1_fmt_bits(out->format, 1) |
++		       BIT(28);
++	rga1_src(cmd, in);
++	cmd[R1_DST] = out->y;
++	cmd[R1_DST_VIR] = out->stride / 4;
++	cmd[R1_DST_ACT] = (out->width - 1) | ((out->height - 1) << 16);
++	cmd[R1_BG] = 0xff000000 | (mono_bg & 0xff00) | ((mono_bg & 0xff) << 16) |
++		     (mono_bg >> 16);
++	cmd[R1_FG] = 0xff000000 | (mono_fg & 0xff00) | ((mono_fg & 0xff) << 16) |
++		     (mono_fg >> 16);
++	cmd[R1_YUV_OUT] = ctx->palette_alpha << 7;
++}
++
++static void rga1_effects(struct rga1_ctx *ctx, const struct rga1_image *in,
++			 const struct rga1_image *out)
++{
++	u32 *cmd = ctx->rga->cmd;
++
++	if (ctx->operation == 1 || ctx->operation == 5) {
++		memset(cmd, 0, RGA1_COMMAND_BYTES);
++		cmd[R1_MODE] =
++			2 | rga1_fmt_bits(out->format, 1) | ((ctx->operation == 5) << 22);
++		cmd[R1_DST] = out->y;
++		cmd[R1_DST_VIR] = out->stride / 4;
++		cmd[R1_DST_ACT] = (out->width - 1) | ((out->height - 1) << 16);
++		/* The internal color path is ABGR, not the V4L2 memory byte order. */
++		cmd[R1_FG] = (ctx->global_alpha << 24) | (ctx->color & 0xff00) |
++			     ((ctx->color & 0xff) << 16) | (ctx->color >> 16);
++		if (ctx->gradient_wrap)
++			cmd[R1_ALPHA] |= BIT(30);
++		if (ctx->dither)
++			cmd[R1_ALPHA] |= BIT(29);
++		cmd[R1_KEY_MIN] = rga1_pair(ctx->gradient[0], ctx->gradient[1]);
++		cmd[R1_KEY_MAX] = rga1_pair(ctx->gradient[2], ctx->gradient[3]);
++		cmd[R1_PRE_UV] = rga1_pair(ctx->gradient[4], ctx->gradient[5]);
++		cmd[R1_PRE_V] = rga1_pair(ctx->gradient[6], ctx->gradient[7]);
++		cmd[R1_PAT] = ((ctx->pattern_size & 0xffff) - 1) |
++			      (((ctx->pattern_size >> 16) - 1) << 8) |
++			      ((ctx->pattern_origin & 255) << 16) |
++			      ((ctx->pattern_origin >> 16) << 24);
++		cmd[R1_LINE] = (ctx->pattern_origin & 255) +
++			       (ctx->pattern_origin >> 16) * (ctx->pattern_size & 0xffff);
++		goto common_effects;
++	}
++	if (rga1_palette(in->format)) {
++		rga1_palette_command(ctx, in, out);
++		return;
++	}
++
++common_effects:
++	cmd[R1_MODE] = (cmd[R1_MODE] & ~(3U << 20)) | (ctx->sampling << 20);
++	if (ctx->dither)
++		cmd[R1_ALPHA] |= BIT(29);
++	if (ctx->zero_key)
++		cmd[R1_MODE] |= BIT(30);
++	/* Use the documented linear scan for untransformed, unscaled mixing.
++	 * Tile clipping flags are meaningful only in the affine path.
++	 */
++	if ((ctx->alpha_mode || ctx->rop) && !ctx->angle && !ctx->hflip &&
++	    !ctx->vflip && in->width == out->width &&
++	    in->height == out->height) {
++		cmd[R1_MODE] &= ~(3U << 18);
++		cmd[R1_DST_ACT] &= 0x0fffffff;
++	}
++	if (ctx->alpha_mode) {
++		if (rga1_has_alpha(ctx->pix[1].pixelformat))
++			cmd[R1_DST_VIR] |= BIT(28);
++		if (ctx->alpha_calc)
++			cmd[R1_ALPHA] |= BIT(28);
++		if (ctx->mix_dest)
++			cmd[R1_MODE] |= BIT(31);
++		cmd[R1_ALPHA] |= 1 | ((ctx->alpha_mode - 1) << 2) |
++				 (ctx->global_alpha << 8);
++		if (ctx->pd)
++			cmd[R1_ALPHA] |= BIT(16) | ((ctx->pd - 1) << 4);
++	}
++	if (ctx->rop) {
++		u32 code = ctx->rop - 1;
++
++		if (!ctx->rop_mode)
++			code = (code & 3) * 5 | (code & 12) * 20;
++		if (ctx->operation != 1)
++			cmd[R1_MODE] |= BIT(22);
++		cmd[R1_ALPHA] |= 3 | (ctx->rop_mode << 18);
++		cmd[R1_PRE_UV] = rga1_rop3[code & 255];
++		if (ctx->rop_mode == 2) {
++			cmd[R1_PRE_V] = rga1_rop3[code >> 8];
++			cmd[R1_SRC_UV] = ctx->mask_base;
++			cmd[R1_DST_VIR] |=
++				(ALIGN(DIV_ROUND_UP(ctx->pix[0].width, 8), 4) / 4) << 16;
++		}
++		cmd[R1_PAT] = ((ctx->pattern_size & 0xffff) - 1) |
++			      (((ctx->pattern_size >> 16) - 1) << 8) |
++			      ((ctx->pattern_origin & 255) << 16) |
++			      ((ctx->pattern_origin >> 16) << 24);
++		cmd[R1_LINE] = (ctx->pattern_origin & 255) +
++			       (ctx->pattern_origin >> 16) * (ctx->pattern_size & 0xffff);
++	}
++	if (ctx->fading) {
++		cmd[R1_ALPHA] |= BIT(17) | (ctx->global_alpha << 8);
++		cmd[R1_FADING] = ((ctx->fading >> 16) << 8) |
++				 (ctx->fading & 0xff00) << 8 |
++				 (ctx->fading & 0xff) << 24;
++	}
++	if (ctx->key) {
++		/* The stencil stage sets source alpha to zero. Consume it in the mix stage
++		 * even when ordinary blending is off, so keyed RGB pixels preserve DST.
++		 */
++		if (!ctx->alpha_mode)
++			cmd[R1_ALPHA] |= 1 | (1U << 2) | (255U << 8);
++		cmd[R1_MODE] |= 7U << 14;
++		if (ctx->key == 2)
++			cmd[R1_MODE] |= BIT(13);
++		cmd[R1_KEY_MIN] = (ctx->key_min & 0xff00) |
++				  ((ctx->key_min & 0xff) << 16) |
++				  (ctx->key_min >> 16);
++		cmd[R1_KEY_MAX] = (ctx->key_max & 0xff00) |
++				  ((ctx->key_max & 0xff) << 16) |
++				  (ctx->key_max >> 16);
++	}
++}
++
++static int rga1_load_ram(struct rga1_ctx *ctx, bool palette, enum rga1_format format)
++{
++	struct rga1_dev *rga = ctx->rga;
++
++	memcpy(ctx->aux, palette ? ctx->lut : ctx->pattern, 1024);
++	memset(rga->cmd, 0, RGA1_COMMAND_BYTES);
++	rga->cmd[R1_MODE] = (palette ? 6 | (rga1_fmt_bits(format, 0) & 0x30)
++				     : 7 | rga1_fmt_bits(format, 1)) |
++			    BIT(28);
++	rga->cmd[R1_DST] = ctx->aux_dma;
++	rga->cmd[R1_PAT] = 255;
++	return rga1_execute(ctx, false);
++}
++
++static void rga1_work(struct work_struct *work)
++{
++	struct rga1_dev *rga = container_of(work, struct rga1_dev, work);
++	struct rga1_ctx *ctx = v4l2_m2m_get_curr_priv(rga->m2m);
++	struct vb2_v4l2_buffer *src, *dst;
++	struct rga1_image in, out;
++	enum vb2_buffer_state state = VB2_BUF_STATE_ERROR;
++	u32 csc;
++	int ret = -EIO;
++
++	if (!ctx)
++		return;
++	ctx->palette_first = ctx->from_palette = false;
++	src = v4l2_m2m_next_src_buf(ctx->fh.m2m_ctx);
++	dst = v4l2_m2m_next_dst_buf(ctx->fh.m2m_ctx);
++	in = rga1_image(ctx, src, 0, ctx->guard_lead * PAGE_SIZE);
++	out = rga1_image(ctx, dst, 1, 0);
++	if (rga->disconnected)
++		goto finish;
++	if (rga1_palette(in.format) || ctx->operation == 5 || ctx->rop) {
++		bool palette = rga1_palette(in.format);
++
++		ret = rga1_load_ram(ctx, palette, palette ? in.format : out.format);
++		if (ret)
++			goto finish;
++	}
++	if (ctx->palette_expand) {
++		struct rga1_image mid;
++
++		ctx->palette_first = ctx->hx || ctx->vy;
++		mid = rga1_rebase(ctx->palette_first ? ctx->expanded_image
++						     : ctx->intermediate,
++				  rga1_map_pass(ctx, src, dst, true));
++
++		rga1_palette_command(ctx, &in, &mid);
++		ret = rga1_execute(ctx, true);
++		if (ret)
++			goto finish;
++		in = rga1_rebase(ctx->palette_first ? ctx->expanded_image
++						    : ctx->intermediate,
++				 ctx->guard_lead * PAGE_SIZE);
++		ctx->from_palette = ctx->palette_first;
++		ctx->palette_first = false;
++		if (ctx->rop) {
++			ret = rga1_load_ram(ctx, false, out.format);
++			if (ret)
++				goto finish;
++		}
++	}
++
++	if (ctx->operation == 6) {
++		out = rga1_rebase(out, out.y + rga1_map_pass(ctx, src, dst, false));
++		/* The average engine ignores output UV swap. With equal formats
++		 * and no CSC, paired chroma channels are independent: bypass both
++		 * swaps to preserve either UV or VU byte order exactly. Internal
++		 * blit prescale still canonicalizes its scratch to UV as before. */
++		if (rga1_yuv(in.format) && !rga1_planar(in.format)) {
++			in.format &= ~0x400U;
++			out.format &= ~0x400U;
++		}
++		rga1_prescale(rga->cmd, &in, &out, ctx->hx, ctx->vy);
++		goto execute;
++	}
++
++	if (ctx->hx || ctx->vy) {
++		struct rga1_image mid = rga1_rebase(
++			ctx->intermediate,
++			rga1_map_pass(ctx, ctx->palette_expand ? NULL : src, dst, true));
++
++		rga1_prescale(rga->cmd, &in, &mid, ctx->hx, ctx->vy);
++		ret = rga1_execute(ctx, true);
++		if (ret)
++			goto finish;
++		in = rga1_rebase(ctx->intermediate, ctx->guard_lead * PAGE_SIZE);
++		ctx->from_palette = false;
++	}
++	out = rga1_rebase(
++		out,
++		out.y + rga1_map_pass(ctx,
++				      (ctx->hx || ctx->vy || ctx->palette_expand) ? NULL
++										  : src,
++				      dst, false));
++	csc = ctx->pix[0].ycbcr_enc == V4L2_YCBCR_ENC_709	       ? 2 :
++	      rga1_quant(&ctx->pix[0]) == V4L2_QUANTIZATION_FULL_RANGE ? 1 :
++									 0;
++	if (ctx->angle % 90) {
++		memset(rga->cmd, 0, RGA1_COMMAND_BYTES);
++		rga->cmd[R1_MODE] = 2 | rga1_fmt_bits(out.format, 1);
++		rga->cmd[R1_DST] = out.y;
++		rga->cmd[R1_DST_VIR] = out.stride / 4;
++		rga->cmd[R1_DST_ACT] = (out.width - 1) | ((out.height - 1) << 16);
++		rga->cmd[R1_FG] = 0xff000000;
++		ret = rga1_execute(ctx, true);
++		if (ret)
++			goto finish;
++	}
++
++	/* Distinct tile/pixel step precisions can put the last bilinear sample
++	 * just before a tile's encoded origin. A fetch halo prevents cache-gap
++	 * pixels for every arbitrary angle; AA coverage is enabled separately. */
++	if (!ctx->operation && !rga1_palette(in.format))
++		rga1_blit_filter_halo(rga->cmd, &in, &out, ctx->angle, ctx->hflip,
++				    ctx->vflip, ctx->csc_alias ? 3 : csc, ctx->sampling,
++				    ctx->angle % 90);
++	rga1_effects(ctx, &in, &out);
++	if (ctx->rotate_aa && ctx->angle % 90)
++		rga->cmd[R1_ALPHA] |= BIT(31) | 1 | (1U << 2) | (255U << 8);
++	if (rga1_yuv(out.format)) {
++		u32 mode;
++		bool same = rga1_yuv(in.format) &&
++			    ctx->pix[0].ycbcr_enc == ctx->pix[1].ycbcr_enc &&
++			    rga1_quant(&ctx->pix[0]) ==
++				    rga1_quant(&ctx->pix[1]);
++
++		mode = same					   ? 0 :
++		       ctx->pix[1].ycbcr_enc == V4L2_YCBCR_ENC_709 ? 3 :
++		       rga1_quant(&ctx->pix[1]) ==
++				       V4L2_QUANTIZATION_FULL_RANGE ?
++								     1 :
++								     2;
++		rga->cmd[R1_YUV_OUT] = 1 | (rga1_420(out.format) ? 2 : 0) |
++				       (out.format & 0x400 ? 8 : 0) |
++				       (mode << 4);
++		rga->cmd[R1_DST_UV] = out.uv;
++	}
++
++execute:
++	ret = rga1_execute(ctx, true);
++	if (!ret)
++		state = VB2_BUF_STATE_DONE;
++finish:
++	/* Check even if an earlier image pass failed. execute has quiesced DMA;
++	 * these coherent mappings stay owned until job_finish releases the job. */
++	dma_rmb();
++	if (memchr_inv(ctx->guard, 0, PAGE_SIZE)) {
++		dev_err(rga->dev, "image DMA modified a guard page\n");
++		WRITE_ONCE(rga->broken, true);
++		state = VB2_BUF_STATE_ERROR;
++	}
++	src = v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
++	dst = v4l2_m2m_dst_buf_remove(ctx->fh.m2m_ctx);
++	v4l2_m2m_buf_copy_metadata(src, dst);
++	src->sequence = ctx->sequence[0]++;
++	dst->sequence = ctx->sequence[1]++;
++	v4l2_m2m_buf_done(src, state);
++	v4l2_m2m_buf_done(dst, state);
++	v4l2_m2m_job_finish(rga->m2m, ctx->fh.m2m_ctx);
++}
++
++static void rga1_device_run(void *priv)
++{
++	struct rga1_ctx *ctx = priv;
++
++	queue_work(ctx->rga->wq, &ctx->rga->work);
++}
++
++static void rga1_job_abort(void *priv)
++{
++	struct rga1_ctx *ctx = priv;
++
++	WRITE_ONCE(ctx->aborting, true);
++	complete(&ctx->rga->done);
++	/* The worker quiesces/reset DMA before job_finish wakes cancel_job. */
++}
++
++static const struct v4l2_m2m_ops rga1_m2m_ops = {
++	.device_run = rga1_device_run,
++	.job_abort = rga1_job_abort,
++};
++
++static int rga1_open(struct file *file)
++{
++	struct rga1_dev *rga = video_drvdata(file);
++	struct rga1_ctx *ctx;
++	struct v4l2_format f = { .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE };
++	int ret;
++
++	if (mutex_lock_interruptible(&rga->mutex))
++		return -ERESTARTSYS;
++	if (rga->disconnected) {
++		ret = -ENODEV;
++		goto unlock;
++	}
++	ctx = kzalloc_obj(*ctx);
++	if (!ctx) {
++		ret = -ENOMEM;
++		goto unlock;
++	}
++	ctx->rga = rga;
++	v4l2_fh_init(&ctx->fh, &rga->video);
++	file->private_data = &ctx->fh;
++	f.fmt.pix_mp.width = f.fmt.pix_mp.height = 100;
++	rga1_try_fmt(file, NULL, &f);
++	ctx->pix[0] = ctx->pix[1] = f.fmt.pix_mp;
++	ctx->rect[0] = ctx->rect[1] =
++		(struct v4l2_rect){ .width = 100, .height = 100 };
++	ctx->fh.m2m_ctx = v4l2_m2m_ctx_init(rga->m2m, ctx, rga1_queues);
++	if (IS_ERR(ctx->fh.m2m_ctx)) {
++		ret = PTR_ERR(ctx->fh.m2m_ctx);
++		goto free_fh;
++	}
++	v4l2_ctrl_handler_init(&ctx->ctrls, 24);
++	v4l2_ctrl_new_std(&ctx->ctrls, &rga1_ctrl_ops, V4L2_CID_ROTATE, 0, 359, 1, 0);
++	v4l2_ctrl_new_std(&ctx->ctrls, &rga1_ctrl_ops, V4L2_CID_HFLIP, 0, 1, 1,
++			  0);
++	v4l2_ctrl_new_std(&ctx->ctrls, &rga1_ctrl_ops, V4L2_CID_VFLIP, 0, 1, 1,
++			  0);
++	v4l2_ctrl_new_std(&ctx->ctrls, &rga1_ctrl_ops, V4L2_CID_ALPHA_COMPONENT,
++			  0, 255, 1, 255);
++	v4l2_ctrl_new_std(&ctx->ctrls, &rga1_ctrl_ops, V4L2_CID_BG_COLOR, 0,
++			  0xffffff, 1, 0);
++	for (unsigned int i = 0; i < ARRAY_SIZE(rga1_controls); i++)
++		v4l2_ctrl_new_custom(&ctx->ctrls, &rga1_controls[i], NULL);
++	ctx->sampling = 1;
++	ctx->guard_lead = ctx->guard_gap = 16;
++	ctx->rop_mode = 1;
++	ctx->global_alpha = 255;
++	ctx->foreground = 0xffffff;
++	ctx->pattern_size = 0x10001;
++	if (ctx->ctrls.error) {
++		ret = ctx->ctrls.error;
++		v4l2_ctrl_handler_free(&ctx->ctrls);
++		v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
++		goto free_fh;
++	}
++	ctx->fh.ctrl_handler = &ctx->ctrls;
++	v4l2_fh_add(&ctx->fh, file);
++	v4l2_device_get(&rga->v4l2);
++	mutex_unlock(&rga->mutex);
++	return 0;
++free_fh:
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++unlock:
++	mutex_unlock(&rga->mutex);
++	return ret;
++}
++
++static int rga1_release(struct file *file)
++{
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	struct rga1_dev *rga = ctx->rga;
++
++	mutex_lock(&rga->mutex);
++	if (!rga->disconnected) {
++		/* job_finish wakes cancel_job before its final scheduler accesses. */
++		v4l2_m2m_suspend(rga->m2m);
++		flush_workqueue(rga->wq);
++	}
++	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
++	if (ctx->scratch)
++		dma_free_coherent(rga->dev, ctx->scratch_size, ctx->scratch,
++				  ctx->scratch_dma);
++	if (ctx->expanded)
++		dma_free_coherent(rga->dev, ctx->expanded_size, ctx->expanded,
++				  ctx->expanded_dma);
++
++	rga1_free_mmu(ctx);
++	rga1_put_mask(ctx);
++	v4l2_ctrl_handler_free(&ctx->ctrls);
++	v4l2_fh_del(&ctx->fh, file);
++	v4l2_fh_exit(&ctx->fh);
++	kfree(ctx);
++	if (!rga->disconnected)
++		v4l2_m2m_resume(rga->m2m);
++	mutex_unlock(&rga->mutex);
++	v4l2_device_put(&rga->v4l2);
++	return 0;
++}
++
++/* Fixed-width resource import; not a scalar control whose arbitrary min/max
++ * values would pretend to identify valid DMA-BUFs. video_ioctl2 holds mutex. */
++static long rga1_default(struct file *file, void *fh, bool valid_prio, unsigned int cmd,
++			 void *arg)
++{
++	struct rga1_ctx *ctx = rga1_ctx(file);
++	struct rga1_mask *mask = arg;
++
++	if (cmd != VIDIOC_RGA1_SET_MASK)
++		return -ENOTTY;
++	if (mask->flags || mask->fd < -1)
++		return -EINVAL;
++	if (vb2_is_streaming(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx)) ||
++	    vb2_is_streaming(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx)))
++		return -EBUSY;
++	return rga1_set_mask(ctx, mask->fd);
++}
++
++static const struct v4l2_ioctl_ops rga1_ioctl_ops = {
++	.vidioc_default = rga1_default,
++	.vidioc_querycap = rga1_querycap,
++	.vidioc_g_selection = rga1_g_selection,
++	.vidioc_s_selection = rga1_s_selection,
++	.vidioc_enum_fmt_vid_cap = rga1_enum_fmt,
++	.vidioc_enum_fmt_vid_out = rga1_enum_fmt,
++	.vidioc_g_fmt_vid_cap_mplane = rga1_g_fmt,
++	.vidioc_g_fmt_vid_out_mplane = rga1_g_fmt,
++	.vidioc_try_fmt_vid_cap_mplane = rga1_try_fmt,
++	.vidioc_try_fmt_vid_out_mplane = rga1_try_fmt,
++	.vidioc_s_fmt_vid_cap_mplane = rga1_s_fmt,
++	.vidioc_s_fmt_vid_out_mplane = rga1_s_fmt,
++	.vidioc_reqbufs = v4l2_m2m_ioctl_reqbufs,
++	.vidioc_create_bufs = v4l2_m2m_ioctl_create_bufs,
++	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
++	.vidioc_prepare_buf = v4l2_m2m_ioctl_prepare_buf,
++	.vidioc_qbuf = v4l2_m2m_ioctl_qbuf,
++	.vidioc_dqbuf = v4l2_m2m_ioctl_dqbuf,
++	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
++	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
++	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
++	.vidioc_subscribe_event = v4l2_ctrl_subscribe_event,
++	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
++};
++
++static const struct v4l2_file_operations rga1_fops = {
++	.owner = THIS_MODULE,
++	.open = rga1_open,
++	.release = rga1_release,
++	.poll = v4l2_m2m_fop_poll,
++	.mmap = v4l2_m2m_fop_mmap,
++	.unlocked_ioctl = video_ioctl2,
++};
++
++static int rga1_runtime_resume(struct device *dev)
++{
++	struct rga1_dev *rga = dev_get_drvdata(dev);
++	int ret;
++
++	if (READ_ONCE(rga->broken))
++		return -EIO;
++	ret = clk_bulk_prepare_enable(rga->num_clks, rga->clks);
++	if (!ret)
++		rga->clocks_on = true;
++	return ret;
++}
++
++static int rga1_runtime_suspend(struct device *dev)
++{
++	struct rga1_dev *rga = dev_get_drvdata(dev);
++
++	if (rga->clocks_on) {
++		clk_bulk_disable_unprepare(rga->num_clks, rga->clks);
++		rga->clocks_on = false;
++	}
++	return 0;
++}
++
++static void rga1_v4l2_release(struct v4l2_device *v4l2)
++{
++	struct rga1_dev *rga = container_of(v4l2, struct rga1_dev, v4l2);
++
++	v4l2_m2m_release(rga->m2m);
++	v4l2_device_unregister(v4l2);
++	dma_free_coherent(rga->dev, RGA1_COMMAND_BYTES, rga->cmd, rga->cmd_dma);
++	put_device(rga->dev);
++	kfree(rga);
++}
++
++static void rga1_video_release(struct video_device *video)
++{
++	struct rga1_dev *rga = container_of(video, struct rga1_dev, video);
++
++	v4l2_device_put(&rga->v4l2);
++}
++
++static int rga1_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct rga1_dev *rga;
++	int ret;
++
++	rga = kzalloc_obj(*rga);
++	if (!rga)
++		return -ENOMEM;
++	rga->dev = get_device(dev);
++	mutex_init(&rga->mutex);
++	init_completion(&rga->done);
++	INIT_WORK(&rga->work, rga1_work);
++	platform_set_drvdata(pdev, rga);
++	rga->regs = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(rga->regs)) {
++		ret = PTR_ERR(rga->regs);
++		goto free;
++	}
++	rga->num_clks = devm_clk_bulk_get_all(dev, &rga->clks);
++	if (rga->num_clks < 0) {
++		ret = rga->num_clks;
++		goto free;
++	}
++	if (rga->num_clks != 2) {
++		ret = -EINVAL;
++		goto free;
++	}
++	rga->resets = devm_reset_control_array_get_exclusive(dev);
++	if (IS_ERR(rga->resets)) {
++		ret = PTR_ERR(rga->resets);
++		goto free;
++	}
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (ret)
++		goto free;
++	rga->cmd = dma_alloc_coherent(dev, RGA1_COMMAND_BYTES, &rga->cmd_dma,
++				      GFP_KERNEL);
++	if (!rga->cmd) {
++		ret = -ENOMEM;
++		goto free;
++	}
++	rga->irq = platform_get_irq(pdev, 0);
++	if (rga->irq < 0) {
++		ret = rga->irq;
++		goto free_cmd;
++	}
++	ret = devm_request_irq(dev, rga->irq, rga1_irq, IRQF_NO_AUTOEN,
++			       dev_name(dev), rga);
++	if (ret)
++		goto free_cmd;
++	rga->wq = alloc_ordered_workqueue(RGA1_NAME, WQ_MEM_RECLAIM);
++	if (!rga->wq) {
++		ret = -ENOMEM;
++		goto free_irq;
++	}
++	rga->v4l2.release = rga1_v4l2_release;
++	ret = v4l2_device_register(dev, &rga->v4l2);
++	if (ret)
++		goto destroy_wq;
++	rga->m2m = v4l2_m2m_init(&rga1_m2m_ops);
++	if (IS_ERR(rga->m2m)) {
++		ret = PTR_ERR(rga->m2m);
++		goto unreg_v4l2;
++	}
++	pm_runtime_enable(dev);
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		goto release_m2m;
++	ret = rga1_reset(rga);
++	if (!ret)
++		enable_irq(rga->irq);
++	pm_runtime_put(dev);
++	if (ret)
++		goto release_m2m;
++	strscpy(rga->video.name, RGA1_NAME, sizeof(rga->video.name));
++	rga->video.fops = &rga1_fops;
++	rga->video.ioctl_ops = &rga1_ioctl_ops;
++	rga->video.release = rga1_video_release;
++	rga->video.lock = &rga->mutex;
++	rga->video.v4l2_dev = &rga->v4l2;
++	rga->video.vfl_dir = VFL_DIR_M2M;
++	rga->video.device_caps = V4L2_CAP_VIDEO_M2M_MPLANE | V4L2_CAP_STREAMING;
++	video_set_drvdata(&rga->video, rga);
++	ret = video_register_device(&rga->video, VFL_TYPE_VIDEO, -1);
++	if (ret)
++		goto release_m2m;
++	dev_info(dev,
++		 "RGA1-plus registered as %s (internal MMU, RGB capture)\n",
++		 video_device_node_name(&rga->video));
++	return 0;
++release_m2m:
++	pm_runtime_disable(dev);
++	v4l2_m2m_release(rga->m2m);
++unreg_v4l2:
++	v4l2_device_unregister(&rga->v4l2);
++destroy_wq:
++	destroy_workqueue(rga->wq);
++free_irq:
++	devm_free_irq(dev, rga->irq, rga);
++free_cmd:
++	dma_free_coherent(dev, RGA1_COMMAND_BYTES, rga->cmd, rga->cmd_dma);
++free:
++	put_device(dev);
++	kfree(rga);
++	return dev_err_probe(dev, ret, "RGA1 probe failed\n");
++}
++
++static void rga1_remove(struct platform_device *pdev)
++{
++	struct rga1_dev *rga = platform_get_drvdata(pdev);
++
++	v4l2_device_get(&rga->v4l2);
++	mutex_lock(&rga->mutex);
++	v4l2_m2m_suspend(rga->m2m);
++	/* Keep close from freeing a context while job_finish still uses it. */
++	flush_workqueue(rga->wq);
++	rga->disconnected = true;
++	v4l2_device_disconnect(&rga->v4l2);
++	video_unregister_device(&rga->video);
++	mutex_unlock(&rga->mutex);
++	destroy_workqueue(rga->wq);
++	devm_free_irq(rga->dev, rga->irq, rga);
++	pm_runtime_disable(rga->dev);
++	if (!pm_runtime_status_suspended(rga->dev))
++		rga1_runtime_suspend(rga->dev);
++	pm_runtime_set_suspended(rga->dev);
++	v4l2_device_put(&rga->v4l2);
++}
++
++static const struct dev_pm_ops rga1_pm_ops = { RUNTIME_PM_OPS(
++	rga1_runtime_suspend, rga1_runtime_resume, NULL) };
++
++static const struct of_device_id rga1_match[] = {
++	{ .compatible = "rockchip,rk3128-rga" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, rga1_match);
++
++static struct platform_driver rga1_driver = {
++	.probe = rga1_probe, .remove = rga1_remove,
++	.driver = {
++		.name = RGA1_NAME,
++		.of_match_table = rga1_match,
++		.pm = pm_ptr(&rga1_pm_ops),
++	},
++};
++module_platform_driver(rga1_driver);
++
++MODULE_DESCRIPTION("Rockchip RK3128 RGA1-plus V4L2 mem2mem driver");
++MODULE_LICENSE("GPL");
++
++MODULE_IMPORT_NS("DMA_BUF");
++
++MODULE_IMPORT_NS("DMA_BUF");
+diff --git a/drivers/media/v4l2-core/v4l2-mem2mem.c b/drivers/media/v4l2-core/v4l2-mem2mem.c
+index a65cbb1..bf468b4 100644
+--- a/drivers/media/v4l2-core/v4l2-mem2mem.c
++++ b/drivers/media/v4l2-core/v4l2-mem2mem.c
+@@ -1207,6 +1207,8 @@ EXPORT_SYMBOL_GPL(v4l2_m2m_init);
+ 
+ void v4l2_m2m_release(struct v4l2_m2m_dev *m2m_dev)
+ {
++	/* job_finish may have queued the next scheduler pass before teardown. */
++	cancel_work_sync(&m2m_dev->job_work);
+ 	kfree(m2m_dev);
+ }
+ EXPORT_SYMBOL_GPL(v4l2_m2m_release);
+diff --git a/drivers/media/platform/rockchip/rga/rga1-controls.h b/drivers/media/platform/rockchip/rga/rga1-controls.h
+new file mode 100644
+index 0000000..9fa68f1 100644
+--- /dev/null
++++ b/drivers/media/platform/rockchip/rga/rga1-controls.h
+@@ -0,0 +1,96 @@
++/* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
++/* RGA1-plus driver-private V4L2 controls. No addresses or pointer-sized ABI. */
++#ifndef RGA1_CONTROLS_H
++#define RGA1_CONTROLS_H
++#include <linux/v4l2-controls.h>
++#include <linux/videodev2.h>
++#define V4L2_CID_RGA1_BASE (V4L2_CID_USER_BASE + 0x2100)
++#define V4L2_CID_RGA1_OPERATION (V4L2_CID_RGA1_BASE + 0)
++#define V4L2_CID_RGA1_SAMPLING (V4L2_CID_RGA1_BASE + 1)
++#define V4L2_CID_RGA1_DITHER (V4L2_CID_RGA1_BASE + 2)
++#define V4L2_CID_RGA1_ALPHA_MODE (V4L2_CID_RGA1_BASE + 3)
++#define V4L2_CID_RGA1_PORTER_DUFF (V4L2_CID_RGA1_BASE + 4)
++#define V4L2_CID_RGA1_COLORKEY (V4L2_CID_RGA1_BASE + 5)
++#define V4L2_CID_RGA1_KEY_MIN (V4L2_CID_RGA1_BASE + 6)
++#define V4L2_CID_RGA1_KEY_MAX (V4L2_CID_RGA1_BASE + 7)
++#define V4L2_CID_RGA1_ROP (V4L2_CID_RGA1_BASE + 8)
++#define V4L2_CID_RGA1_FADING (V4L2_CID_RGA1_BASE + 9)
++#define V4L2_CID_RGA1_LUT (V4L2_CID_RGA1_BASE + 11)
++#define V4L2_CID_RGA1_GRADIENT (V4L2_CID_RGA1_BASE + 16)
++#define V4L2_CID_RGA1_PATTERN (V4L2_CID_RGA1_BASE + 17)
++#define V4L2_CID_RGA1_PATTERN_SIZE (V4L2_CID_RGA1_BASE + 18)
++#define V4L2_CID_RGA1_CSC_ALIAS (V4L2_CID_RGA1_BASE + 19)
++#define V4L2_CID_RGA1_FG_COLOR (V4L2_CID_RGA1_BASE + 21)
++#define V4L2_CID_RGA1_PALETTE_ALPHA (V4L2_CID_RGA1_BASE + 22)
++#define V4L2_CID_RGA1_ZERO_KEY (V4L2_CID_RGA1_BASE + 25)
++#define V4L2_CID_RGA1_GRADIENT_WRAP (V4L2_CID_RGA1_BASE + 26)
++#define V4L2_CID_RGA1_ALPHA_CALC (V4L2_CID_RGA1_BASE + 27)
++#define V4L2_CID_RGA1_MIX_DEST (V4L2_CID_RGA1_BASE + 28)
++#define V4L2_CID_RGA1_ROP_MODE (V4L2_CID_RGA1_BASE + 29)
++/* +30 was diagnostic only and is intentionally not a control. */
++struct rga1_mask { __s32 fd; __u32 flags; };
++#define VIDIOC_RGA1_SET_MASK _IOW('V', BASE_VIDIOC_PRIVATE, struct rga1_mask)
++#define V4L2_CID_RGA1_PATTERN_ORIGIN (V4L2_CID_RGA1_BASE + 31)
++#define V4L2_CID_RGA1_ROTATE_AA (V4L2_CID_RGA1_BASE + 32)
++#define V4L2_PIX_FMT_RGA1_PAL1 v4l2_fourcc('R', 'G', 'P', '1')
++#define V4L2_PIX_FMT_RGA1_PAL2 v4l2_fourcc('R', 'G', 'P', '2')
++#define V4L2_PIX_FMT_RGA1_PAL4 v4l2_fourcc('R', 'G', 'P', '4')
++/* operation: 0 blit, 1 fill, 5 pattern fill, 6 standalone prescale; 2..4 are absent from RGA1-plus.
++ * Arbitrary rotations define a black compose canvas; only packed RGB is
++ * accepted, without alpha/key/ROP/fading. Rotation AA requires RGB24/BGR24/565
++ * input (or a hardware-expanded palette), since real per-pixel alpha is not
++ * supported for arbitrary rotations. Quarter turns ignore ROTATE_AA.
++ * sampling: 0 nearest, 1 bilinear, 2 bicubic.
++ * alpha mode: 0 disabled, 1 global, 2 pixel, 3 global*pixel.
++ * Blending accepts RGB24/BGR24 (opaque) and alpha-bearing 8888 CAPTURE.
++ * RGBA Porter-Duff fetches Ad. Its effective As is G (global), As (pixel),
++ * or floor(As*G/256) (combined); Ad is the stored destination alpha.
++ * Without destination-alpha fetch, hardware uses G for Ad in every mode.
++ * The usual opaque pixel-mode call therefore sets G=255, preserving #722.
++ * Colors must already be premultiplied by the caller by the effective alpha.
++ * Mixed-alpha mode interpolates RGB and passes through the stored source A.
++ * MIX_DEST selects SRC*(1-Ad)+DST*Ad in mixed mode, requiring RGBA CAPTURE.
++ * ALPHA_CALC: 0 coefficient A+(A>>7), 1 coefficient A. Complements are 256-A'.
++ * Products are summed before a single truncating >>8 and 8-bit saturation.
++ * Porter-Duff: 0 mixed alpha, 1 CLEAR, 2 SRC, 3 DST, 4 SRC_OVER,
++ * 5 DST_OVER, 6 SRC_IN, 7 DST_IN, 8 SRC_OUT, 9 DST_OUT,
++ * 10 SRC_ATOP, 11 DST_ATOP, 12 XOR.
++ * colorkey: 0 disabled, 1 normal RGB-range stencil, 2 inverted.
++ * ROP: 0 disabled; otherwise value-1 holds truth tables, indexed by operand bits.
++ * ROP_MODE: 0 ROP2 (P,D, value<=16), 1 ROP3 (P,S,D, value<=256, default),
++ * 2 ROP4 (two ROP3 bytes, value<=65536). A one mask bit chooses the low byte;
++ * zero chooses the high byte. Blits take P from negotiated-format pattern RAM;
++ * solid-fill ROP2 takes its pen from the fill color.
++ * VIDIOC_RGA1_SET_MASK: fixed-width {fd,flags}; flags must be zero.
++ * DMA-BUF fd for ROP4, -1 releases. Repeated calls reacquire the fd.
++ * The driver retains its own reference; the original fd may then be closed.
++ * The caller owns synchronization/serialization, including DMA_BUF_SYNC for CPU
++ * access. Mask rows are ALIGN(ceil(source_width/8),4) bytes, little-endian words
++ * scanned from bit31 to bit0. ROP4 requires full, equal-format/size RGB images,
++ * without transforms, alpha, key, fading or dither.
++ * fading: RGB addition offsets, 0 disables. Colors: packed 0xRRGGBB.
++ * Standard BG_COLOR is the fill color; ALPHA_COMPONENT is global alpha.
++ * CSC_ALIAS: use the second BT.601-limited selector (hardware value 3);
++ * valid only for BT.601-limited YUV. It never represents BT.709 full.
++ * FG_COLOR: 1bpp foreground RGB; BG_COLOR is its background RGB.
++ * Packed PAL1/2/4 indices are MSB first in each byte. PAL8 is not advertised.
++ * Fill uses ALPHA_COMPONENT as its initial alpha; COMPOSE can be 1x1.
++ * Native dithered fill normalizes C to 5/6 bits: q=(C*M+M+K*(M+1))>>8,
++ * M=31 or63, K=Bayer4x4>>1 or>>2. This differs from blit zero-fill quantization.
++ * PALETTE_ALPHA: LUT alpha mode, 0 eight bits, 1 bit24 (A byte bit0) expanded to 0/255.
++ * ZERO_KEY: hardware alpha-zero key mode (MODE_CTRL[30]).
++ * LUT: 1024 bytes, 256 entries in little-endian internal ABGR8888 (RGBA bytes).
++ * GRADIENT: eight signed 8.8 integers [A_x,A_y,B_x,B_y,G_x,G_y,R_x,R_y].
++ * GRADIENT_WRAP: fill-only, 0 clip (default), 1 wrap modulo 65536 before >>8.
++ * Clip first saturates the row start (C*256+y*Gy) to 0..65535, then adds x*Gx
++ * and saturates again. Wrap evaluates the full expression modulo 65536.
++ * PATTERN: 1024 bytes in negotiated CAPTURE pixel format; unused bytes zero.
++ * PATTERN_SIZE: (height << 16) | width, area <=255 pixels, each axis 1..255.
++ * PATTERN_ORIGIN: (y<<16)|x, each coordinate strictly below its pattern axis.
++ * Pattern fill uses ALPHA_COMPONENT for output alpha, ignoring pattern A.
++ * Standalone prescale requires full selections and equal hardware formats and
++ * colorimetry, with exact 1/2/4/8 factors independently per axis. Select operation
++ * 6 before negotiating planar CAPTURE formats. YVU422M uses three memory planes.
++ * RGB/YUV colors are averaged; 8888 alpha uses the block's bottom-right sample.
++ */
++#endif

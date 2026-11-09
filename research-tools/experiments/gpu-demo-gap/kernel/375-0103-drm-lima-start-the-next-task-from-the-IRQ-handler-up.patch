@@ -1,0 +1,422 @@
+From 40799f5e892397a4ce81df0fb36357a25b7a607f Mon Sep 17 00:00:00 2001
+From: mali-re-kernel spike <spike@local>
+Date: Fri, 6 Nov 2026 20:29:37 -0600
+Subject: [PATCH 3/5] drm/lima: start the next task from the IRQ handler
+ (upper-half scheduling)
+
+The reference board's Android kernel builds the vendor Utgard r6p0 driver with
+MALI_UPPER_HALF_SCHEDULING=1 (its __malidrv_build_info string): the PP
+and GP interrupt handlers (mali_group_upper_half_pp ->
+mali_executor_interrupt_pp 0xc039094c -> mali_executor_complete_group
+0xc038f998 -> mali_executor_schedule) complete the job and start the next
+queued one in the hard IRQ. Under the blob the Demo's dependent PP jobs
+follow each other with no gap measurable from the capture (< 0.05 ms).
+
+lima with drm_sched (credit_limit 1) needs a worker for that: the HW
+fence callback queues free_job, whose work queues run_job, which flushes
+the L2, switches the MMUs and starts the task, so every job-to-job step
+pays a kworker wake-up plus free_job's BO puts.
+
+Let drm_sched hand lima the next task while the current one runs
+(credit_limit 2). run_job starts it at once if the pipe is idle, else
+parks it in pipe->next_task, and lima_sched_pipe_task_done() starts it
+from the IRQ handler before signalling the finished task. Only atomic-safe
+work runs there: the GP heap-size fixup (it takes a BO mutex) moves to a
+new task_prepare hook run from run_job, and a VM swapped out in the IRQ
+is put later from free_job (or the start falls back to a work item).
+
+Known gaps of this prototype: the timeout handler drops a queued task
+and lets drm_sched resubmit it, but a task completing between its two
+signalled checks and the IRQ mask is not handled specially.
+
+Spike: RK3128 reference #375 (mali-re kernel area), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_gp.c       |  19 ++-
+ drivers/gpu/drm/lima/lima_l2_cache.c |  11 +-
+ drivers/gpu/drm/lima/lima_sched.c    | 170 ++++++++++++++++++++-------
+ drivers/gpu/drm/lima/lima_sched.h    |  12 ++
+ 4 files changed, 162 insertions(+), 50 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_gp.c b/drivers/gpu/drm/lima/lima_gp.c
+index 14da25c..d34a1fc 100644
+--- a/drivers/gpu/drm/lima/lima_gp.c
++++ b/drivers/gpu/drm/lima/lima_gp.c
+@@ -125,16 +125,14 @@ static int lima_gp_task_validate(struct lima_sched_pipe *pipe,
+ 	return 0;
+ }
+ 
+-static void lima_gp_task_run(struct lima_sched_pipe *pipe,
+-			     struct lima_sched_task *task)
++static void lima_gp_task_prepare(struct lima_sched_pipe *pipe,
++				 struct lima_sched_task *task)
+ {
+-	struct lima_ip *ip = pipe->processor[0];
+ 	struct drm_lima_gp_frame *frame = task->frame;
+ 	u32 *f = frame->frame;
+-	u32 cmd = 0;
+ 	int i;
+ 
+-	/* update real heap buffer size for GP */
++	/* update real heap buffer size for GP (lima_vm_get_va takes a mutex) */
+ 	for (i = 0; i < task->num_bos; i++) {
+ 		struct lima_bo *bo = task->bos[i];
+ 
+@@ -149,6 +147,16 @@ static void lima_gp_task_run(struct lima_sched_pipe *pipe,
+ 			break;
+ 		}
+ 	}
++}
++
++static void lima_gp_task_run(struct lima_sched_pipe *pipe,
++			     struct lima_sched_task *task)
++{
++	struct lima_ip *ip = pipe->processor[0];
++	struct drm_lima_gp_frame *frame = task->frame;
++	u32 *f = frame->frame;
++	u32 cmd = 0;
++	int i;
+ 
+ 	if (f[LIMA_GP_VSCL_START_ADDR >> 2] !=
+ 	    f[LIMA_GP_VSCL_END_ADDR >> 2])
+@@ -369,6 +377,7 @@ int lima_gp_pipe_init(struct lima_device *dev)
+ 	pipe->task_slab = lima_gp_task_slab;
+ 
+ 	pipe->task_validate = lima_gp_task_validate;
++	pipe->task_prepare = lima_gp_task_prepare;
+ 	pipe->task_run = lima_gp_task_run;
+ 	pipe->task_fini = lima_gp_task_fini;
+ 	pipe->task_error = lima_gp_task_error;
+diff --git a/drivers/gpu/drm/lima/lima_l2_cache.c b/drivers/gpu/drm/lima/lima_l2_cache.c
+index 62d8f7e..160cf7a 100644
+--- a/drivers/gpu/drm/lima/lima_l2_cache.c
++++ b/drivers/gpu/drm/lima/lima_l2_cache.c
+@@ -31,13 +31,14 @@ static int lima_l2_cache_wait_idle(struct lima_ip *ip)
+ 
+ int lima_l2_cache_flush(struct lima_ip *ip)
+ {
++	unsigned long flags;
+ 	int ret;
+ 
+-	spin_lock(&ip->data.lock);
++	spin_lock_irqsave(&ip->data.lock, flags);
+ 	ip->data.last_invalidated = atomic_inc_return(&ip->dev->cache_order);
+ 	l2_cache_write(LIMA_L2_CACHE_COMMAND, LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
+ 	ret = lima_l2_cache_wait_idle(ip);
+-	spin_unlock(&ip->data.lock);
++	spin_unlock_irqrestore(&ip->data.lock, flags);
+ 	return ret;
+ }
+ 
+@@ -50,16 +51,18 @@ int lima_l2_cache_flush(struct lima_ip *ip)
+ int lima_l2_cache_flush_conditional(struct lima_ip *ip, u32 order)
+ {
+ 	struct lima_device *dev = ip->dev;
++	unsigned long flags;
+ 	int ret = 0;
+ 
+-	spin_lock(&ip->data.lock);
++	/* irqsave: 0103 starts tasks from the GP and PP IRQ handlers */
++	spin_lock_irqsave(&ip->data.lock, flags);
+ 	if ((s32)(order - ip->data.last_invalidated) > 0) {
+ 		ip->data.last_invalidated = atomic_inc_return(&dev->cache_order);
+ 		l2_cache_write(LIMA_L2_CACHE_COMMAND,
+ 			       LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
+ 		ret = lima_l2_cache_wait_idle(ip);
+ 	}
+-	spin_unlock(&ip->data.lock);
++	spin_unlock_irqrestore(&ip->data.lock, flags);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+index 974b7f5..160eecb 100644
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -230,51 +230,22 @@ static void lima_pm_idle(struct lima_device *ldev)
+ 	pm_runtime_put_autosuspend(ldev->dev);
+ }
+ 
+-static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
++/*
++ * Start a task on the hardware. Called with pipe->hw_lock held, in process
++ * context (run_job) or in the IRQ handler of the task before it. Returns the
++ * VM it swapped out, for the caller to put outside atomic context.
++ */
++static struct lima_vm *lima_sched_hw_start(struct lima_sched_pipe *pipe,
++					   struct lima_sched_task *task)
+ {
+-	struct lima_sched_task *task = to_lima_task(job);
+-	struct lima_sched_pipe *pipe = to_lima_pipe(job->sched);
+-	struct lima_device *ldev = pipe->ldev;
+-	struct lima_fence *fence;
+-	int i, err;
+-
+-	/* after GPU reset */
+-	if (job->s_fence->finished.error < 0)
+-		return NULL;
+-
+-	fence = lima_fence_create(pipe);
+-	if (!fence)
+-		return NULL;
+-
+-	err = lima_pm_busy(ldev);
+-	if (err < 0) {
+-		dma_fence_put(&fence->base);
+-		return NULL;
+-	}
+-
+-	task->fence = &fence->base;
+-
+-	/* for caller usage of the fence, otherwise irq handler
+-	 * may consume the fence before caller use it
+-	 */
+-	dma_fence_get(task->fence);
++	struct lima_vm *old = NULL;
++	int i;
+ 
+ 	pipe->current_task = task;
+ 
+ 	/* this is needed for MMU to work correctly, otherwise GP/PP
+ 	 * will hang or page fault for unknown reason after running for
+ 	 * a while.
+-	 *
+-	 * Need to investigate:
+-	 * 1. is it related to TLB
+-	 * 2. how much performance will be affected by L2 cache flush
+-	 * 3. can we reduce the calling of this function because all
+-	 *    GP/PP use the same L2 cache on mali400
+-	 *
+-	 * TODO:
+-	 * 1. move this to task fini to save some wait time?
+-	 * 2. when GP/PP use different l2 cache, need PP wait GP l2
+-	 *    cache flush?
+ 	 */
+ 	for (i = 0; i < pipe->num_l2_cache; i++) {
+ 		if (task->flush_l2)
+@@ -296,7 +267,7 @@ static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
+ 				lima_mmu_flush_tlb(pipe->mmu[i]);
+ 		}
+ 	} else {
+-		lima_vm_put(pipe->current_vm);
++		old = pipe->current_vm;
+ 		pipe->current_vm = lima_vm_get(task->vm);
+ 
+ 		if (pipe->bcast_mmu)
+@@ -312,9 +283,77 @@ static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
+ 	pipe->error = false;
+ 	pipe->task_run(pipe, task);
+ 
++	return old;
++}
++
++static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
++{
++	struct lima_sched_task *task = to_lima_task(job);
++	struct lima_sched_pipe *pipe = to_lima_pipe(job->sched);
++	struct lima_device *ldev = pipe->ldev;
++	struct lima_vm *old = NULL;
++	struct lima_fence *fence;
++	unsigned long flags;
++	int err;
++
++	/* after GPU reset */
++	if (job->s_fence->finished.error < 0)
++		return NULL;
++
++	fence = lima_fence_create(pipe);
++	if (!fence)
++		return NULL;
++
++	err = lima_pm_busy(ldev);
++	if (err < 0) {
++		dma_fence_put(&fence->base);
++		return NULL;
++	}
++
++	task->fence = &fence->base;
++
++	/* for caller usage of the fence, otherwise irq handler
++	 * may consume the fence before caller use it
++	 */
++	dma_fence_get(task->fence);
++
++	if (pipe->task_prepare)
++		pipe->task_prepare(pipe, task);
++
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	if (!pipe->current_task) {
++		old = lima_sched_hw_start(pipe, task);
++	} else {
++		/* the IRQ handler of the running task starts it */
++		WARN_ON(pipe->next_task);
++		pipe->next_task = task;
++	}
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
++
++	lima_vm_put(old);
++
+ 	return task->fence;
+ }
+ 
++static void lima_sched_start_work(struct work_struct *work)
++{
++	struct lima_sched_pipe *pipe =
++		container_of(work, struct lima_sched_pipe, start_work);
++	struct lima_sched_task *task;
++	struct lima_vm *old = NULL;
++	unsigned long flags;
++
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	task = pipe->next_task;
++	if (task && !pipe->current_task) {
++		pipe->next_task = NULL;
++		old = lima_sched_hw_start(pipe, task);
++	}
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
++
++	lima_vm_put(old);
++}
++
+ static void lima_sched_build_error_task_list(struct lima_sched_task *task)
+ {
+ 	struct lima_sched_error_task *et;
+@@ -451,6 +490,9 @@ static enum drm_gpu_sched_stat lima_sched_timedout_job(struct drm_sched_job *job
+ 	struct lima_sched_task *task = to_lima_task(job);
+ 	struct lima_device *ldev = pipe->ldev;
+ 	struct lima_ip *ip = pipe->processor[0];
++	struct lima_sched_task *next;
++	struct lima_vm *old;
++	unsigned long flags;
+ 	int i;
+ 
+ 	/*
+@@ -505,9 +547,21 @@ static enum drm_gpu_sched_stat lima_sched_timedout_job(struct drm_sched_job *job
+ 			lima_mmu_page_fault_resume(pipe->mmu[i]);
+ 	}
+ 
++	cancel_work_sync(&pipe->start_work);
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	next = pipe->next_task;
++	pipe->next_task = NULL;
++	pipe->current_task = NULL;
++	old = pipe->put_vm;
++	pipe->put_vm = NULL;
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
++	lima_vm_put(old);
++	/* the queued task never started: balance its lima_pm_busy() */
++	if (next)
++		lima_pm_idle(ldev);
++
+ 	lima_vm_put(pipe->current_vm);
+ 	pipe->current_vm = NULL;
+-	pipe->current_task = NULL;
+ 
+ 	lima_pm_idle(ldev);
+ 
+@@ -523,8 +577,16 @@ static void lima_sched_free_job(struct drm_sched_job *job)
+ 	struct lima_sched_pipe *pipe = to_lima_pipe(job->sched);
+ 	struct lima_vm *vm = task->vm;
+ 	struct lima_bo **bos = task->bos;
++	struct lima_vm *old;
++	unsigned long flags;
+ 	int i;
+ 
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	old = pipe->put_vm;
++	pipe->put_vm = NULL;
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
++	lima_vm_put(old);
++
+ 	dma_fence_put(task->fence);
+ 
+ 	for (i = 0; i < task->num_bos; i++)
+@@ -567,7 +629,8 @@ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ 	const struct drm_sched_init_args args = {
+ 		.ops = &lima_sched_ops,
+ 		.num_rqs = DRM_SCHED_PRIORITY_COUNT,
+-		.credit_limit = 1,
++		/* one running, one waiting for the running one's IRQ */
++		.credit_limit = 2,
+ 		.hang_limit = lima_job_hang_limit,
+ 		.timeout = msecs_to_jiffies(timeout),
+ 		.name = name,
+@@ -578,6 +641,8 @@ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ 	spin_lock_init(&pipe->fence_lock);
+ 
+ 	INIT_WORK(&pipe->recover_work, lima_sched_recover_work);
++	INIT_WORK(&pipe->start_work, lima_sched_start_work);
++	spin_lock_init(&pipe->hw_lock);
+ 
+ 	return drm_sched_init(&pipe->base, &args);
+ }
+@@ -585,6 +650,7 @@ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ void lima_sched_pipe_fini(struct lima_sched_pipe *pipe)
+ {
+ 	drm_sched_fini(&pipe->base);
++	cancel_work_sync(&pipe->start_work);
+ }
+ 
+ void lima_sched_pipe_task_done(struct lima_sched_pipe *pipe)
+@@ -598,7 +664,29 @@ void lima_sched_pipe_task_done(struct lima_sched_pipe *pipe)
+ 		else
+ 			drm_sched_fault(&pipe->base);
+ 	} else {
++		struct lima_sched_task *next;
++		bool defer = false;
++
+ 		pipe->task_fini(pipe);
++
++		/* start the queued task before signalling: no idle gap */
++		spin_lock(&pipe->hw_lock);
++		pipe->current_task = NULL;
++		next = pipe->next_task;
++		if (next && (next->vm == pipe->current_vm || !pipe->put_vm)) {
++			struct lima_vm *old;
++
++			pipe->next_task = NULL;
++			old = lima_sched_hw_start(pipe, next);
++			if (old)
++				pipe->put_vm = old;
++		} else if (next) {
++			defer = true;
++		}
++		spin_unlock(&pipe->hw_lock);
++		if (defer)
++			schedule_work(&pipe->start_work);
++
+ 		dma_fence_signal(task->fence);
+ 
+ 		lima_pm_idle(ldev);
+diff --git a/drivers/gpu/drm/lima/lima_sched.h b/drivers/gpu/drm/lima/lima_sched.h
+index 920030f..ddbc199 100644
+--- a/drivers/gpu/drm/lima/lima_sched.h
++++ b/drivers/gpu/drm/lima/lima_sched.h
+@@ -60,6 +60,16 @@ struct lima_sched_pipe {
+ 	struct lima_sched_task *current_task;
+ 	struct lima_vm *current_vm;
+ 
++	/*
++	 * Upper-half scheduling (the vendor's MALI_UPPER_HALF_SCHEDULING):
++	 * drm_sched hands lima the next task while the current one runs
++	 * (credit_limit 2); the IRQ handler of the current task starts it.
++	 */
++	spinlock_t hw_lock;
++	struct lima_sched_task *next_task;
++	struct lima_vm *put_vm;		/* swapped out in IRQ context */
++	struct work_struct start_work;	/* start next_task in process context */
++
+ 	struct lima_ip *mmu[LIMA_SCHED_PIPE_MAX_MMU];
+ 	int num_mmu;
+ 
+@@ -80,6 +90,8 @@ struct lima_sched_pipe {
+ 	struct kmem_cache *task_slab;
+ 
+ 	int (*task_validate)(struct lima_sched_pipe *pipe, struct lima_sched_task *task);
++	/* process context, before task_run (which may run in the IRQ handler) */
++	void (*task_prepare)(struct lima_sched_pipe *pipe, struct lima_sched_task *task);
+ 	void (*task_run)(struct lima_sched_pipe *pipe, struct lima_sched_task *task);
+ 	void (*task_fini)(struct lima_sched_pipe *pipe);
+ 	void (*task_error)(struct lima_sched_pipe *pipe);
+-- 
+2.53.0
+

@@ -1,0 +1,58 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Power control for the RK3128 reference board Linux port (development record #311, docs/RK3128-LINUX.md
+ * "PMIC (RT5036)"). Included by scripts/linux-build.sh after the board file (#298).
+ *
+ * No PMIC on this board. The stock rk-kernel.dtb carries the Rockchip SDK's PMIC templates
+ * (rk818@1c, rt5025@35, rt5036@38, act8931@5b on i2c0), all with status = "disabled". u-boot
+ * reads that same DT, skips every one of them ("device rt5036 is disabled", then "No pmic
+ * detect.") and never sends an i2c byte to 0x38. The stock kernel has the rt5036 drivers built
+ * in but binds nothing: the board has no 0-0038 device, and /sys/class/regulator holds only the
+ * dummy regulator and the two PWM rails (vdd_arm, vdd_logic, linux/dts/rk3128-board.dtsi). The SoC,
+ * DDR and eMMC rails are fixed supplies Linux cannot change, so this file adds no regulator node.
+ *
+ * Power-off is a GPIO power latch on GPIO3_C7, active low:
+ *  - u-boot's no-PMIC path finds the gpio-poweroff node and drives the pin to its inactive
+ *    level, HIGH ("power hold: bank-3 pin-23, active level-0"), before it starts the kernel.
+ *  - The stock 3.10 kernel binds the same node to the gpio-poweroff driver ("poweroff-gpio",
+ *    probe 0xc0539ee0): it drives the pin HIGH again at probe (live: gpio-119 "out hi"). Its
+ *    pm_power_off (0xc0539e04) drives it LOW, waits 100 ms, HIGH, waits 100 ms, LOW, then waits
+ *    3000 ms and WARNs.
+ *  - Mainline drivers/power/reset/gpio-poweroff.c with GPIO_ACTIVE_LOW does exactly that: it
+ *    requests the line at logical 0 (physical HIGH, the level u-boot already set), and its
+ *    sys-off handler sets logical 1 (LOW), active-delay-ms, 0 (HIGH), inactive-delay-ms, 1 (LOW),
+ *    timeout-ms, WARN. The delays below are the vendor's, which are also mainline's defaults.
+ *
+ * SAFETY: behind RK3128_PMIC_CONTROL (default "disabled"). Disabled, the kernel never requests the
+ * pin, so it keeps u-boot's HIGH power hold. On the board's wall adapter the sequence does not cut
+ * the supply (#357 attempt 28: the CPU logs the handler's WARN 3.2 s after "Power down"), and the
+ * vendor kernel fares no better (its kernel_power_off() then restarts with "charge", which this
+ * u-boot boots as a normal boot), so the knob stays off.
+ *
+ * The power-off that works on mains is the halt below (#390, linux/patches/390-0001): a handler of
+ * last resort (SYS_OFF_PRIO_LOW, after gpio-poweroff when that is on). device_shutdown() has
+ * already turned the backlight and the display off when it runs; it stops the dw_wdt through the
+ * CRU soft reset SRST_WDT (dw_wdt has no other stop, and a `resets` on the watchdog node would
+ * also stop it on every restart through the core's stop-on-reboot), halts, and restarts the board
+ * when the power key (GPIO3_C6, gpio-keys' key-power, read non-exclusively) is released and then
+ * pressed for 100 ms. RK3128_HALT_POWEROFF (default "okay") switches it.
+ */
+
+/ {
+	gpio_poweroff: gpio-poweroff {
+		compatible = "gpio-poweroff";
+		gpios = <&gpio3 RK_PC7 GPIO_ACTIVE_LOW>;
+		active-delay-ms = <100>;
+		inactive-delay-ms = <100>;
+		timeout-ms = <3000>;
+		status = RK3128_PMIC_CONTROL;
+	};
+
+	halt_poweroff: halt-poweroff {
+		compatible = "rockchip,rk3128-halt-poweroff";
+		resets = <&cru SRST_WDT>;
+		reset-names = "watchdog";
+		power-key-gpios = <&gpio3 RK_PC6 GPIO_ACTIVE_LOW>;
+		status = RK3128_HALT_POWEROFF;
+	};
+};

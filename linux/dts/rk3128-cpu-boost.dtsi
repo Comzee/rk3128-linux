@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* #638: owner-selected CPU boost. The cpufreq-dt board policy starts OFF at1008
+ * and enforces the stock100ms busy-core ceilings even if userspace dies.
+ * See docs/research/cpu-1200-toggle.md; DDR and GPU are untouched.
+ */
+&cpu0 {
+	rockchip,busy-core-caps-khz = <1200000 1008000 912000 912000>;
+};
+&cpu_opp_table {
+	/* The stock load limiter requests912MHz. Its voltage lookup chooses the
+	 * next operating point (1008MHz/1.35V), never an interpolated voltage.
+	 */
+	opp-912000000 {
+		opp-hz = /bits/ 64 <912000000>;
+		opp-microvolt = <1350000 1350000 1425000>;
+		status = RK3128_PWM_REGULATORS;
+	};
+	opp-1200000000 {
+		opp-microvolt = <1425000 1425000 1425000>;
+		status = RK3128_PWM_REGULATORS;
+	};
+};

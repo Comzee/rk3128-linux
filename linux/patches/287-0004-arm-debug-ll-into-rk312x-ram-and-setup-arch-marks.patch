@@ -1,0 +1,268 @@
+From: RK3128 reference (development record #287)
+Subject: [PATCH] ARM: debug: DEBUG_LL into RK312x RAM, and progress marks in setup_arch
+
+The first boots of a mainline kernel on the RK3128 reference board (no serial
+console) reached the kernel's stext (the marks of RK312X_DECOMP_WDT) and
+then stopped before parse_early_param, so no earlycon ever ran. With
+DEBUG_RK312X_RAMLOG the low-level debug output (early_print, printascii,
+earlyprintk) goes into a RAM area that the board's Android kernel returns
+after the warm reset, mapped from head.S on, and setup_arch leaves a mark
+before and after each early step.
+---
+diff --git a/arch/arm/Kconfig.debug b/arch/arm/Kconfig.debug
+index 366f162..9dcb47d 100644
+--- a/arch/arm/Kconfig.debug
++++ b/arch/arm/Kconfig.debug
+@@ -1375,6 +1375,18 @@ choice
+ 		  For more details about semihosting, please see
+ 		  chapter 8 of DUI0203I_rvct_developer_guide.pdf from ARM Ltd.
+ 
++	config DEBUG_RK312X_RAMLOG
++		bool "Kernel low-level debugging into RK312x RAM (no UART)"
++		depends on ARCH_ROCKCHIP && RK312X_DECOMP_WDT
++		help
++		  For an RK3126/RK3128 board with no serial console whose
++		  boot loader keeps a RAM area across a warm reset: the
++		  low-level debug output (early_print, printascii, the
++		  earlyprintk console) is stored in RAM at
++		  DEBUG_RK312X_RAMLOG_PHYS, from head.S on, for the next boot
++		  to read back. The decompressor code of RK312X_DECOMP_WDT
++		  sets the area up; without it nothing is written.
++
+ 	config DEBUG_LL_UART_8250
+ 		bool "Kernel low-level debugging via 8250 UART"
+ 		help
+@@ -1479,6 +1491,7 @@ config DEBUG_UART_FLOW_CONTROL
+ 
+ config DEBUG_LL_INCLUDE
+ 	string
++	default "debug/rk312x-ramlog.S" if DEBUG_RK312X_RAMLOG
+ 	default "debug/sa1100.S" if DEBUG_SA1100
+ 	default "debug/palmchip.S" if DEBUG_UART_8250_PALMCHIP
+ 	default "debug/8250.S" if DEBUG_LL_UART_8250 || DEBUG_UART_8250
+@@ -1804,6 +1817,22 @@ config DEBUG_UART_8250_PALMCHIP
+ 	  except for having a different register layout.  Say Y here if
+ 	  the debug UART is of this type.
+ 
++config DEBUG_RK312X_RAMLOG_PHYS
++	hex "Physical address of the RK312x RAM debug area"
++	depends on DEBUG_RK312X_RAMLOG
++	default 0x7f128000
++	help
++	  4 KiB aligned. It is mapped at 0xfec00000 plus its offset in its
++	  1 MiB section.
++
++config DEBUG_RK312X_RAMLOG_SIZE
++	hex "Size of the RK312x RAM debug area"
++	depends on DEBUG_RK312X_RAMLOG
++	default 0x8000
++	help
++	  At most 64 KiB (debug_ll_io_init maps that much), and the area
++	  must not cross its 1 MiB section (head.S maps one section).
++
+ config DEBUG_UNCOMPRESS
+ 	bool "Enable decompressor debugging via DEBUG_LL output"
+ 	depends on !ARCH_MULTIPLATFORM
+diff --git a/arch/arm/kernel/setup.c b/arch/arm/kernel/setup.c
+index 0bfd66c..4a2adf2 100644
+--- a/arch/arm/kernel/setup.c
++++ b/arch/arm/kernel/setup.c
+@@ -1093,6 +1093,41 @@ static struct notifier_block arm_restart_nb = {
+ 	.priority = 128,
+ };
+ 
++#ifdef CONFIG_DEBUG_RK312X_RAMLOG
++/* RK312x bring-up with no UART (development record #287): progress marks into the RAM debug area */
++asmlinkage void printascii(const char *);
++asmlinkage void printhex8(unsigned long);
++#define rk312x_mark(s)	printascii(s)
++
++static void __init rk312x_dump_memblock(void)
++{
++	struct memblock_region *r;
++
++	for_each_mem_region(r) {
++		printascii("memblock memory ");
++		printhex8(r->base);
++		printascii(" size ");
++		printhex8(r->size);
++		printascii(" flags ");
++		printhex8(r->flags);
++		printascii("\n");
++	}
++	for_each_reserved_mem_region(r) {
++		printascii("memblock reserved ");
++		printhex8(r->base);
++		printascii(" size ");
++		printhex8(r->size);
++		printascii("\n");
++	}
++	printascii("memblock limit ");
++	printhex8(memblock.current_limit);
++	printascii("\n");
++}
++#else
++#define rk312x_mark(s)	do { } while (0)
++static inline void rk312x_dump_memblock(void) { }
++#endif
++
+ void __init setup_arch(char **cmdline_p)
+ {
+ 	const struct machine_desc *mdesc = NULL;
+@@ -1101,7 +1136,9 @@ void __init setup_arch(char **cmdline_p)
+ 	if (__atags_pointer)
+ 		atags_vaddr = FDT_VIRT_BASE(__atags_pointer);
+ 
++	rk312x_mark("setup_arch: entered, setup_processor next\n");
+ 	setup_processor();
++	rk312x_mark("setup_arch: setup_processor done, the DTB next\n");
+ 	if (atags_vaddr) {
+ 		mdesc = setup_machine_fdt(atags_vaddr);
+ 		if (mdesc)
+@@ -1132,10 +1169,15 @@ void __init setup_arch(char **cmdline_p)
+ 	strscpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
+ 	*cmdline_p = cmd_line;
+ 
++	rk312x_mark("setup_arch: machine found, early_fixmap_init next\n");
+ 	early_fixmap_init();
+ 	early_ioremap_init();
+ 
++	rk312x_mark("setup_arch: parse_early_param next (earlycon)\n");
+ 	parse_early_param();
++	rk312x_mark("setup_arch: parse_early_param done, the command line:\n");
++	rk312x_mark(boot_command_line);
++	rk312x_mark("\n");
+ 
+ #ifdef CONFIG_MMU
+ 	early_mm_init(mdesc);
+@@ -1154,7 +1196,10 @@ void __init setup_arch(char **cmdline_p)
+ 
+ 	early_ioremap_reset();
+ 
++	rk312x_dump_memblock();
++	rk312x_mark("setup_arch: paging_init next\n");
+ 	paging_init(mdesc);
++	rk312x_mark("setup_arch: paging_init done\n");
+ 	kasan_init();
+ 	request_standard_resources(mdesc);
+ 
+diff --git a/arch/arm/mm/mmu.c b/arch/arm/mm/mmu.c
+index 23b87b5..73517d8 100644
+--- a/arch/arm/mm/mmu.c
++++ b/arch/arm/mm/mmu.c
+@@ -1127,6 +1127,14 @@ static void __init pci_reserve_io(void)
+ #define pci_reserve_io() do { } while (0)
+ #endif
+ 
++#ifdef CONFIG_DEBUG_RK312X_RAMLOG
++/* RK312x bring-up with no UART (development record #287): progress marks into the RAM debug area */
++asmlinkage void printascii(const char *);
++#define rk312x_mark(s)	printascii(s)
++#else
++#define rk312x_mark(s)	do { } while (0)
++#endif
++
+ #ifdef CONFIG_DEBUG_LL
+ void __init debug_ll_io_init(void)
+ {
+@@ -1138,6 +1146,9 @@ void __init debug_ll_io_init(void)
+ 	map.pfn = __phys_to_pfn(map.pfn);
+ 	map.virtual &= PAGE_MASK;
+ 	map.length = PAGE_SIZE;
++#ifdef CONFIG_DEBUG_RK312X_RAMLOG
++	map.length = PAGE_ALIGN(CONFIG_DEBUG_RK312X_RAMLOG_SIZE);
++#endif
+ 	map.type = MT_DEVICE;
+ 	iotable_init(&map, 1);
+ }
+@@ -1756,7 +1767,9 @@ void __init paging_init(const struct machine_desc *mdesc)
+ 		 kernel_sec_start, kernel_sec_end);
+ 
+ 	prepare_page_table();
++	rk312x_mark("paging_init: prepare_page_table done\n");
+ 	map_lowmem();
++	rk312x_mark("paging_init: map_lowmem done\n");
+ 	memblock_set_current_limit(arm_lowmem_limit);
+ 	pr_debug("lowmem limit is %08llx\n", (long long)arm_lowmem_limit);
+ 	/*
+@@ -1764,15 +1777,21 @@ void __init paging_init(const struct machine_desc *mdesc)
+ 	 * be used
+ 	 */
+ 	map_kernel();
++	rk312x_mark("paging_init: map_kernel done\n");
+ 	dma_contiguous_remap();
++	rk312x_mark("paging_init: dma_contiguous_remap done\n");
+ 	early_fixmap_shutdown();
++	rk312x_mark("paging_init: early_fixmap_shutdown done\n");
+ 	devicemaps_init(mdesc);
++	rk312x_mark("paging_init: devicemaps_init done\n");
+ 	kmap_init();
+ 	tcm_init();
++	rk312x_mark("paging_init: kmap_init, tcm_init done\n");
+ 
+ 	top_pmd = pmd_off_k(0xffff0000);
+ 
+ 	bootmem_init();
++	rk312x_mark("paging_init: bootmem_init done\n");
+ }
+ 
+ void __init early_mm_init(const struct machine_desc *mdesc)
+diff --git a/arch/arm/include/debug/rk312x-ramlog.S b/arch/arm/include/debug/rk312x-ramlog.S
+new file mode 100644
+index 0000000..87039ec
+--- /dev/null
++++ b/arch/arm/include/debug/rk312x-ramlog.S
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * DEBUG_LL into RAM for RK312x boards with no serial console
++ * (development record #287): printascii/printch, early_print and the
++ * earlyprintk console store their text in the RAM area at
++ * CONFIG_DEBUG_RK312X_RAMLOG_PHYS, which the board's boot loader keeps
++ * across a warm reset. Area layout: u32 magic "RLOG", u32 write offset
++ * (from the start of the area; text begins at 16), then the text, until
++ * CONFIG_DEBUG_RK312X_RAMLOG_SIZE. RK312X_DECOMP_WDT's decompressor code
++ * writes the header on entry. The area is mapped as device memory (one
++ * section by head.S, the whole area by debug_ll_io_init), so every store
++ * is in DRAM at once.
++ *
++ * senduart uses r2 as its scratch register: both callers (printascii and
++ * printch in arch/arm/kernel/debug.S, rd = r1, rx = r3) use r2 only as
++ * the scratch of waituarttxrdy/busyuart around it.
++ */
++#define RAMLOG_PHYS	CONFIG_DEBUG_RK312X_RAMLOG_PHYS
++#define RAMLOG_VIRT	(0xfec00000 + (CONFIG_DEBUG_RK312X_RAMLOG_PHYS & 0x000fffff))
++
++		.macro	addruart, rp, rv, tmp
++		movw	\rp, #:lower16:RAMLOG_PHYS
++		movt	\rp, #:upper16:RAMLOG_PHYS
++		movw	\rv, #:lower16:RAMLOG_VIRT
++		movt	\rv, #:upper16:RAMLOG_VIRT
++		.endm
++
++		.macro	senduart, rd, rx
++		.ifc	\rd, r2
++		.error	"rk312x-ramlog: senduart needs r2 as scratch"
++		.endif
++		.ifc	\rx, r2
++		.error	"rk312x-ramlog: senduart needs r2 as scratch"
++		.endif
++		ldr	r2, [\rx, #4]
++		cmp	r2, #16
++		blo	.Lrl_skip\@
++		cmp	r2, #CONFIG_DEBUG_RK312X_RAMLOG_SIZE
++		bhs	.Lrl_skip\@
++		strb	\rd, [\rx, r2]
++		add	r2, r2, #1
++		str	r2, [\rx, #4]
++.Lrl_skip\@:
++		.endm
++
++		.macro	waituarttxrdy, rd, rx
++		.endm
++
++		.macro	waituartcts, rd, rx
++		.endm
++
++		.macro	busyuart, rd, rx
++		.endm

@@ -1,0 +1,107 @@
+From cd3d02e30e6c4d814f6b51f5500fd1d9258dcd9c Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 09:35:30 -0600
+Subject: [PATCH 1/5] dt-bindings: media: rockchip,vdec: Add RK3128 compatible
+
+RK3128 has the same first-generation HEVC decoder as RK3288 (hardware id
+0x6867, 68 registers, IOMMU at offset 0x440 with two banks), but it is
+integrated as half of a "VPU combo": it has no bus clocks of its own, it
+shares ACLK_VDPU/HCLK_VDPU with the Hantro VPU, GRF_SOC_CON1 bit 15
+selects which of the two decoders is connected to the shared bus
+interface, and there is no separate CABAC clock.
+
+Document the compatible and its clock list: the shared AXI/AHB clocks,
+the core clock, and the VPU encoder AXI clock, which the GRF selects as
+the VPU main clock by default (GRF_SOC_CON1 bit 10) and which is kept
+running during HEVC jobs so the decoder does not depend on that select.
+The GRF switch itself needs no property: the arbiter finds the SoC's GRF
+by compatible.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+ .../bindings/media/rockchip,vdec.yaml         | 55 +++++++++++++++----
+ 1 file changed, 43 insertions(+), 12 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/media/rockchip,vdec.yaml b/Documentation/devicetree/bindings/media/rockchip,vdec.yaml
+index 4f38a0ef2..54e7105a7 100644
+--- a/Documentation/devicetree/bindings/media/rockchip,vdec.yaml
++++ b/Documentation/devicetree/bindings/media/rockchip,vdec.yaml
+@@ -16,6 +16,7 @@ description: |-
+ properties:
+   compatible:
+     oneOf:
++      - const: rockchip,rk3128-vdec
+       - const: rockchip,rk3288-vdec
+       - const: rockchip,rk3399-vdec
+       - const: rockchip,rk3576-vdec
+@@ -48,21 +49,11 @@ properties:
+ 
+   clocks:
+     minItems: 4
+-    items:
+-      - description: The Video Decoder AXI interface clock
+-      - description: The Video Decoder AHB interface clock
+-      - description: The Video Decoded CABAC clock
+-      - description: The Video Decoder core clock
+-      - description: The Video decoder HEVC CABAC clock
++    maxItems: 5
+ 
+   clock-names:
+     minItems: 4
+-    items:
+-      - const: axi
+-      - const: ahb
+-      - const: cabac
+-      - const: core
+-      - const: hevc_cabac
++    maxItems: 5
+ 
+   assigned-clocks: true
+ 
+@@ -105,6 +96,46 @@ required:
+   - power-domains
+ 
+ allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: rockchip,rk3128-vdec
++    then:
++      properties:
++        clocks:
++          items:
++            - description: The AXI interface clock, shared with the VPU decoder
++            - description: The AHB interface clock, shared with the VPU decoder
++            - description: The Video Decoder core clock (no separate CABAC clock)
++            - description:
++                The VPU encoder AXI clock, which the GRF selects as the VPU
++                main clock by default (GRF_SOC_CON1 bit 10)
++        clock-names:
++          items:
++            - const: axi
++            - const: ahb
++            - const: core
++            - const: vpu
++    else:
++      properties:
++        clocks:
++          minItems: 4
++          items:
++            - description: The Video Decoder AXI interface clock
++            - description: The Video Decoder AHB interface clock
++            - description: The Video Decoded CABAC clock
++            - description: The Video Decoder core clock
++            - description: The Video decoder HEVC CABAC clock
++        clock-names:
++          minItems: 4
++          items:
++            - const: axi
++            - const: ahb
++            - const: cabac
++            - const: core
++            - const: hevc_cabac
++
+   - if:
+       properties:
+         compatible:

@@ -1,0 +1,248 @@
+From: w478 <w478@local>
+Subject: [PATCH] drm/lima: quiesce deferred starts before timeout reset
+
+With two credits a timeout can belong to the deferred next_task while
+current_task is NULL. Dropping an unconditional PM reference for the
+"running" timeout and then next_task underflows runtime PM and devfreq.
+Cancelling start_work after task_error also lets it start after reset.
+
+Stop submissions, block starts under hw_lock and drain workers and IRQs
+before touching the hardware. Keep completion callbacks from releasing
+ownership during reset. Drop the fence and PM references of the actual
+running and parked tasks once each, then reopen the pipe for resubmission.
+Drain recover_work too: GP heap recovery can restart hardware.
+
+CONFIG_FAULT_INJECTION test kernels expose a root-only one-shot
+timeout_test bit mask (1 GP, 2 PP). It parks an idle pipe's next task and
+faults the scheduler, exercising exactly the deferred-only timeout case.
+Normal kernels do not have this parameter; the test defaults to off.
+
+No change to normal job programming, shaders or Android build output.
+
+Signed-off-by: w478 <w478@local>
+---
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -7,6 +7,7 @@
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ #include <linux/pm_runtime.h>
++#include <linux/module.h>
+ 
+ #include <drm/drm_print.h>
+ 
+@@ -19,6 +20,13 @@
+ #include "lima_gem.h"
+ #include "lima_trace.h"
+ 
++/* Test kernels only: force one deferred-job timeout per selected pipe. */
++#ifdef CONFIG_FAULT_INJECTION
++static unsigned long lima_timeout_test;
++module_param_named(timeout_test, lima_timeout_test, ulong, 0600);
++MODULE_PARM_DESC(timeout_test, "one-shot deferred timeout injection: bit 0 GP, bit 1 PP (test kernels only)");
++#endif
++
+ struct lima_fence {
+ 	struct dma_fence base;
+ 	struct lima_sched_pipe *pipe;
+@@ -352,7 +360,7 @@
+ 
+ 	spin_lock_irqsave(&pipe->hw_lock, flags);
+ 	task = pipe->next_task;
+-	if (task && !pipe->current_task) {
++	if (task && !pipe->current_task && !pipe->recovering) {
+ 		pipe->next_task = NULL;
+ 		old = lima_sched_hw_start(pipe, task);
+ 	}
+@@ -369,6 +377,7 @@
+ 	struct lima_vm *old = NULL;
+ 	struct lima_fence *fence;
+ 	unsigned long flags;
++	bool force_timeout = false;
+ 	int err;
+ 
+ 	/* after GPU reset */
+@@ -406,6 +415,15 @@
+ 		pipe->task_prepare(pipe, task);
+ 
+ 	spin_lock_irqsave(&pipe->hw_lock, flags);
++#ifdef CONFIG_FAULT_INJECTION
++	if (!pipe->current_task && !pipe->next_task &&
++	    test_and_clear_bit(pipe->processor[0]->id == lima_ip_gp ? 0 : 1,
++			       &lima_timeout_test)) {
++		/* run_job owns PM/fence, but no task has reached the hardware. */
++		pipe->next_task = task;
++		force_timeout = true;
++	} else
++#endif
+ 	if (!pipe->current_task && pipe->next_task) {
+ 		/*
+ 		 * The IRQ handler deferred the parked task to start_work
+@@ -431,6 +449,8 @@
+ 	spin_unlock_irqrestore(&pipe->hw_lock, flags);
+ 
+ 	lima_vm_put(old);
++	if (force_timeout)
++		drm_sched_fault(&pipe->base);
+ 
+ 	return task->fence;
+ }
+@@ -571,7 +591,7 @@
+ 	struct lima_sched_task *task = to_lima_task(job);
+ 	struct lima_device *ldev = pipe->ldev;
+ 	struct lima_ip *ip = pipe->processor[0];
+-	struct lima_sched_task *next;
++	struct lima_sched_task *running, *next;
+ 	unsigned long flags;
+ 	int i;
+ 
+@@ -601,47 +621,79 @@
+ 		return DRM_GPU_SCHED_STAT_RESET;
+ 	}
+ 
++	/* Stop run_job/free_job before taking ownership of either task. */
++	drm_sched_stop(&pipe->base, &task->base);
++
+ 	/*
+-	 * The task might still finish while this timeout handler runs.
+-	 * To prevent a race condition on its completion, mask all irqs
+-	 * on the running core until the next hard reset completes.
++	 * A timeout can belong to next_task with current_task == NULL: the
++	 * IRQ completed its predecessor but start_work has not run yet.
++	 * Block both IRQ and worker starts before masking IRQs or resetting;
++	 * a worker which already passed the check finished under hw_lock.
+ 	 */
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	pipe->recovering = true;
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
++	cancel_work_sync(&pipe->start_work);
++
++	pipe->task_mask_irq(pipe);
++	for (i = 0; i < pipe->num_processor; i++)
++		synchronize_irq(pipe->processor[i]->irq);
++	if (pipe->bcast_processor)
++		synchronize_irq(pipe->bcast_processor->irq);
++	for (i = 0; i < pipe->num_mmu; i++)
++		synchronize_irq(pipe->mmu[i]->irq);
++	if (pipe->bcast_mmu)
++		synchronize_irq(pipe->bcast_mmu->irq);
++
++	/* An IRQ already in flight could have queued either work item. */
++	cancel_work_sync(&pipe->start_work);
++	cancel_work_sync(&pipe->recover_work);
+ 	pipe->task_mask_irq(pipe);
+ 
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	running = pipe->current_task;
++	next = pipe->next_task;
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
++
+ 	if (!pipe->error)
+ 		DRM_ERROR("%s job timeout\n", lima_ip_name(ip));
+ 
+-	drm_sched_stop(&pipe->base, &task->base);
+-
+ 	drm_sched_increase_karma(&task->base);
+ 
+ 	if (lima_max_error_tasks)
+ 		lima_sched_build_error_task_list(task);
+ 
+-	pipe->task_error(pipe);
++	DRM_INFO("%s timeout reset: running=%d queued=%d timedout_queued=%d\n",
++		 lima_ip_name(ip), !!running, !!next, task == next);
+ 
+-	if (pipe->bcast_mmu)
+-		lima_mmu_page_fault_resume(pipe->bcast_mmu);
+-	else {
+-		for (i = 0; i < pipe->num_mmu; i++)
+-			lima_mmu_page_fault_resume(pipe->mmu[i]);
++	/* No reset if all work completed while stopping. */
++	if (running || next) {
++		pipe->task_error(pipe);
++
++		if (pipe->bcast_mmu)
++			lima_mmu_page_fault_resume(pipe->bcast_mmu);
++		else {
++			for (i = 0; i < pipe->num_mmu; i++)
++				lima_mmu_page_fault_resume(pipe->mmu[i]);
++		}
+ 	}
+ 
+-	/*
+-	 * A task drm_sched handed us while this one was running never reached
+-	 * the hardware. drm_sched_stop() has already removed its hardware
+-	 * fence callback and dropped the scheduler's reference, so drop
+-	 * lima's own and let drm_sched_resubmit_jobs() give it a new fence and
+-	 * a new attempt, and balance the lima_pm_busy() run_job did for it.
+-	 */
+-	cancel_work_sync(&pipe->start_work);
+-
+ 	spin_lock_irqsave(&pipe->hw_lock, flags);
+-	next = pipe->next_task;
+ 	pipe->next_task = NULL;
+ 	pipe->current_task = NULL;
+ 	spin_unlock_irqrestore(&pipe->hw_lock, flags);
+ 
++	/*
++	 * Each outstanding task owns one fence reference and one PM/devfreq
++	 * busy reference from run_job, whether running or deferred. Release
++	 * those exact owners, not the timed-out job plus next_task (which
++	 * can be the SAME job). A completed task already balanced PM in IRQ.
++	 */
++	if (running) {
++		dma_fence_put(running->fence);
++		running->fence = NULL;
++		lima_pm_idle(ldev);
++	}
+ 	if (next) {
+ 		dma_fence_put(next->fence);
+ 		next->fence = NULL;
+@@ -651,7 +703,9 @@
+ 	lima_vm_put(pipe->current_vm);
+ 	pipe->current_vm = NULL;
+ 
+-	lima_pm_idle(ldev);
++	spin_lock_irqsave(&pipe->hw_lock, flags);
++	pipe->recovering = false;
++	spin_unlock_irqrestore(&pipe->hw_lock, flags);
+ 
+ 	drm_sched_resubmit_jobs(&pipe->base);
+ 	drm_sched_start(&pipe->base, 0);
+@@ -761,6 +815,10 @@
+ 	struct lima_sched_task *task = pipe->current_task;
+ 	struct lima_device *ldev = pipe->ldev;
+ 
++	/* Reset recovery owns both tasks until resubmission. */
++	if (READ_ONCE(pipe->recovering))
++		return;
++
+ 	if (pipe->error) {
+ 		if (task && task->recoverable)
+ 			schedule_work(&pipe->recover_work);
+@@ -789,11 +847,11 @@
+ 		spin_lock(&pipe->hw_lock);
+ 		pipe->current_task = NULL;
+ 		next = pipe->next_task;
+-		if (next && READ_ONCE(lima_irq_start) &&
++		if (next && !pipe->recovering && READ_ONCE(lima_irq_start) &&
+ 		    lima_sched_vm_is_loaded(pipe, next->vm)) {
+ 			pipe->next_task = NULL;
+ 			lima_sched_hw_start(pipe, next);
+-		} else if (next) {
++		} else if (next && !pipe->recovering) {
+ 			defer = true;
+ 		}
+ 		spin_unlock(&pipe->hw_lock);
+diff --git a/drivers/gpu/drm/lima/lima_sched.h b/drivers/gpu/drm/lima/lima_sched.h
+--- a/drivers/gpu/drm/lima/lima_sched.h
++++ b/drivers/gpu/drm/lima/lima_sched.h
+@@ -71,6 +71,8 @@
+ 	spinlock_t hw_lock;
+ 	struct lima_sched_task *next_task;
+ 	struct work_struct start_work;
++	/* hw_lock: no IRQ/worker starts while timeout recovery owns tasks. */
++	bool recovering;
+ 
+ 	/* drm_sched's run_job/free_job work, on the high-priority pool */
+ 	struct workqueue_struct *submit_wq;

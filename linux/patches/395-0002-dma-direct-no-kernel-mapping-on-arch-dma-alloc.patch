@@ -1,0 +1,89 @@
+From e30babd65e3d78430dd8596efc373555883c0fcb Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 22:00:00 -0600
+Subject: [PATCH] dma-direct: leave no-kernel-mapping allocations to
+ ARCH_HAS_DMA_ALLOC
+
+dma_direct_alloc() hands every DMA_ATTR_NO_KERNEL_MAPPING allocation to
+dma_direct_alloc_no_mapping(), which neither zeroes the pages nor cleans
+them from the caches: arch_dma_prep_coherent() is called only for
+lowmem, and the architectures that select ARCH_HAS_DMA_ALLOC (ARM with
+an MMU, PA-RISC 1.1) do not implement it at all. So a non-coherent
+device gets pages that still have the dirty cache lines of their last
+user. Freed process memory is the common case: a store through the
+user mapping leaves a dirty line, and nothing cleans it when the page
+is freed. Those lines are written back after the device has filled the
+buffer and corrupt its data, a little more with every eviction.
+
+Seen on RK3128 (Cortex-A7, 1 GiB, the CMA pool in highmem) with the
+Hantro and rkvdec decoders, which allocate their buffers with
+DMA_ATTR_NO_KERNEL_MAPPING: a JPEG decoded into a buffer that had grown
+into pages a process had just freed came out with wrong chroma in the
+new part only, and the damage kept growing for 500 ms after the job
+(8 of 10 decodes in a test that alternates a 4:2:0 and a 4:2:2 photo);
+video frames went wrong while a process churned memory beside them.
+
+Before ARM moved to dma-direct, its own allocator cleared and cleaned
+every such buffer (__alloc_from_contiguous() calls __dma_clear_buffer()
+whether or not a kernel mapping is wanted, and returns the page as the
+cookie when it is not). Keep using that path for non-coherent devices
+on these architectures; dma_direct_free() makes the same choice.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+ kernel/dma/direct.c | 25 +++++++++++++++++++++----
+ 1 file changed, 21 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/dma/direct.c b/kernel/dma/direct.c
+index da665ca..3abde51 100644
+--- a/kernel/dma/direct.c
++++ b/kernel/dma/direct.c
+@@ -179,6 +179,25 @@ static struct page *dma_direct_alloc_from_pool(struct device *dev, size_t size,
+ 	return page;
+ }
+ 
++/*
++ * A DMA_ATTR_NO_KERNEL_MAPPING allocation skips the kernel mapping and with it
++ * the cache maintenance: arch_dma_prep_coherent() runs only for lowmem, and it
++ * is an empty stub on the architectures that allocate for non-coherent devices
++ * themselves (ARCH_HAS_DMA_ALLOC). The pages would keep the dirty cache lines
++ * their previous user left (a process's freed memory, say), and those are
++ * written back over the device's data later. On those architectures the
++ * allocation of a non-coherent device is left to arch_dma_alloc(), which
++ * cleans the pages (on ARM __dma_clear_buffer(), highmem included) and
++ * returns a page cookie when there is no kernel mapping, as dma-direct does.
++ */
++static bool dma_direct_use_no_mapping(struct device *dev, unsigned long attrs)
++{
++	if ((attrs & (DMA_ATTR_NO_KERNEL_MAPPING | __DMA_ATTR_ALLOC_CC_SHARED)) !=
++	    DMA_ATTR_NO_KERNEL_MAPPING || is_swiotlb_for_alloc(dev))
++		return false;
++	return !IS_ENABLED(CONFIG_ARCH_HAS_DMA_ALLOC) || dev_is_dma_coherent(dev);
++}
++
+ static void *dma_direct_alloc_no_mapping(struct device *dev, size_t size,
+ 		dma_addr_t *dma_handle, gfp_t gfp)
+ {
+@@ -226,8 +245,7 @@ void *dma_direct_alloc(struct device *dev, size_t size,
+ 	if (attrs & DMA_ATTR_NO_WARN)
+ 		gfp |= __GFP_NOWARN;
+ 
+-	if (((attrs & (DMA_ATTR_NO_KERNEL_MAPPING | __DMA_ATTR_ALLOC_CC_SHARED)) ==
+-	     DMA_ATTR_NO_KERNEL_MAPPING) && !is_swiotlb_for_alloc(dev))
++	if (dma_direct_use_no_mapping(dev, attrs))
+ 		return dma_direct_alloc_no_mapping(dev, size, dma_handle, gfp);
+ 
+ 	if (!dev_is_dma_coherent(dev)) {
+@@ -374,8 +392,7 @@ void dma_direct_free(struct device *dev, size_t size,
+ 	if (attrs & __DMA_ATTR_ALLOC_CC_SHARED)
+ 		mark_mem_encrypted = true;
+ 
+-	if (((attrs & (DMA_ATTR_NO_KERNEL_MAPPING | __DMA_ATTR_ALLOC_CC_SHARED)) ==
+-	     DMA_ATTR_NO_KERNEL_MAPPING) && !is_swiotlb_for_alloc(dev)) {
++	if (dma_direct_use_no_mapping(dev, attrs)) {
+ 		/* cpu_addr is a struct page cookie, not a kernel address */
+ 		dma_free_contiguous(dev, cpu_addr, size);
+ 		return;
+-- 
+2.53.0
+

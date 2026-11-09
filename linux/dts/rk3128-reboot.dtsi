@@ -1,0 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Reboot modes through the PMU's SYS_REG0 (development record #351, docs/RK3128-LINUX.md "Rescue path").
+ * Included by scripts/linux-build.sh after the board file (#298 fragment convention).
+ *
+ * u-boot reads SYS_REG0 (PMU 0x100a0038) at every boot and acts on a value whose high bytes are 0x5242c3
+ * (low byte 03 = recovery; docs/RK3128-LINUX.md "Test slot and ramoops"). The vendor 3.10 kernel wrote it
+ * from its restart handler; rk3128.dtsi has no such node. syscon-reboot-mode writes the magic of
+ * `reboot <arg>` (the reboot(2) RESTART2 argument) to offset 0x38 of the PMU syscon just before the restart:
+ * `reboot recovery` boots the recovery slot once, and a plain reboot writes mode-normal (0x5242c300), which
+ * u-boot treats as a normal boot (and which disarms the rescue flag, RK3128-LINUX.md "Rescue path").
+ * `reboot loader` and `reboot bootloader` write the vendor's 0x5242c301: u-boot enters Rockusb
+ * (2207:310c) without an exit timer. An owner power cycle is needed to return to Linux; do not use
+ * this mode without that way back. Board reboot-mode register behavior is documented in the topic reference.
+ * Resets that skip the notifier chain (the watchdog, a panic's emergency restart) leave whatever is there.
+ */
+&pmu {
+	reboot-mode {
+		compatible = "syscon-reboot-mode";
+		offset = <0x38>;
+		mode-normal = <0x5242c300>;
+		mode-loader = <0x5242c301>;
+		mode-bootloader = <0x5242c301>;
+		mode-recovery = <0x5242c303>;
+	};
+};

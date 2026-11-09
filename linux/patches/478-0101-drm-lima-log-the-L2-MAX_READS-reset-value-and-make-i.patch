@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:43:06 -0600
+Subject: [PATCH] drm/lima: log the L2 MAX_READS reset value and make it a
+ parameter
+
+The vendor Utgard r6p0 driver built into the reference board's 3.10 Android kernel
+runs with mali_l2_max_reads = -1: mali_l2_cache_reset (0xc0394864) writes
+COMMAND=CLEAR_ALL and ENABLE=3, and writes MAX_READS (0x18) only when the
+parameter is not -1 (the test is at 0xc0394890 against the global at
+0xc0c39004, which holds -1 on the board). The hardware therefore runs with
+the MAX_READS reset value. lima forces 0x1c.
+
+Log the reset value at probe and add lima.l2_max_reads (default 0x1c, as
+before; -1 keeps the reset value like the vendor) so the two can be
+compared on the board.
+
+Rebased from the #375 prototype (375-0101), unchanged.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_drv.c      |  4 ++++
+ drivers/gpu/drm/lima/lima_drv.h      |  1 +
+ drivers/gpu/drm/lima/lima_l2_cache.c | 14 +++++++++++++-
+ 3 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index 9a0eb10..6a3d5e2 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -21,6 +21,7 @@ int lima_sched_timeout_ms;
+ uint lima_heap_init_nr_pages = 8;
+ uint lima_max_error_tasks;
+ uint lima_job_hang_limit;
++int lima_l2_max_reads = 0x1c;
+ 
+ MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+@@ -34,6 +35,9 @@ module_param_named(max_error_tasks, lima_max_error_tasks, uint, 0644);
+ MODULE_PARM_DESC(job_hang_limit, "number of times to allow a job to hang before dropping it (default 0)");
+ module_param_named(job_hang_limit, lima_job_hang_limit, uint, 0444);
+ 
++MODULE_PARM_DESC(l2_max_reads, "L2 cache MAX_READS (outstanding reads); -1 keeps the hardware reset value like the vendor driver (default 0x1c)");
++module_param_named(l2_max_reads, lima_l2_max_reads, int, 0444);
++
+ static int lima_ioctl_get_param(struct drm_device *dev, void *data, struct drm_file *file)
+ {
+ 	struct drm_lima_get_param *args = data;
+diff --git a/drivers/gpu/drm/lima/lima_drv.h b/drivers/gpu/drm/lima/lima_drv.h
+index 6706c19..81697c6 100644
+--- a/drivers/gpu/drm/lima/lima_drv.h
++++ b/drivers/gpu/drm/lima/lima_drv.h
+@@ -11,6 +11,7 @@
+ 
+ extern int lima_sched_timeout_ms;
+ extern uint lima_heap_init_nr_pages;
++extern int lima_l2_max_reads;
+ extern uint lima_max_error_tasks;
+ extern uint lima_job_hang_limit;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_l2_cache.c b/drivers/gpu/drm/lima/lima_l2_cache.c
+index 184106c..7418837 100644
+--- a/drivers/gpu/drm/lima/lima_l2_cache.c
++++ b/drivers/gpu/drm/lima/lima_l2_cache.c
+@@ -5,6 +5,7 @@
+ #include <linux/device.h>
+ 
+ #include "lima_device.h"
++#include "lima_drv.h"
+ #include "lima_l2_cache.h"
+ #include "lima_regs.h"
+ 
+@@ -50,7 +51,13 @@ static int lima_l2_cache_hw_init(struct lima_ip *ip)
+ 	l2_cache_write(LIMA_L2_CACHE_ENABLE,
+ 		       LIMA_L2_CACHE_ENABLE_ACCESS |
+ 		       LIMA_L2_CACHE_ENABLE_READ_ALLOCATE);
+-	l2_cache_write(LIMA_L2_CACHE_MAX_READS, 0x1c);
++	/*
++	 * The vendor Utgard driver (r4p0..r6p0, mali_l2_max_reads = -1) never
++	 * writes MAX_READS and runs with the reset value; lima used to force
++	 * 0x1c. lima.l2_max_reads picks either (-1 = reset value).
++	 */
++	if (lima_l2_max_reads >= 0)
++		l2_cache_write(LIMA_L2_CACHE_MAX_READS, lima_l2_max_reads);
+ 
+ 	return 0;
+ }
+@@ -84,6 +91,11 @@ int lima_l2_cache_init(struct lima_ip *ip)
+ 	spin_lock_init(&ip->data.lock);
+ 
+ 	size = l2_cache_read(LIMA_L2_CACHE_SIZE);
++	dev_info(dev->dev, "%s MAX_READS reset value 0x%x, %s 0x%x\n",
++		 lima_ip_name(ip), l2_cache_read(LIMA_L2_CACHE_MAX_READS),
++		 lima_l2_max_reads >= 0 ? "set to" : "kept at",
++		 lima_l2_max_reads >= 0 ? lima_l2_max_reads :
++		 l2_cache_read(LIMA_L2_CACHE_MAX_READS));
+ 	dev_info(dev->dev, "%s %uK, %u-way, %ubyte cache line, %ubit external bus\n",
+ 		 lima_ip_name(ip),
+ 		 1 << (((size >> 16) & 0xff) - 10),

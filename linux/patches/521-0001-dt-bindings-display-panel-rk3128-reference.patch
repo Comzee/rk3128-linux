@@ -1,0 +1,68 @@
+From: Comzee <117947104+Comzee@users.noreply.github.com>
+Subject: [PATCH] dt-bindings: display: panel: describe the RK3128 reference board assembly
+
+The shipped Rockchip 3.10 kernel drives GPIO0_A2 high, delays 10 ms,
+drives GPIO0_B4 low and delays 10 ms. Disable inverts the two outputs in
+the same order without delays. Both lines are active low in gpiod terms.
+Request ASIS so the bootloader's lit picture survives probe; prepare sets
+output directions and the active levels without a reset pulse. A dedicated
+panel driver keeps the generic panel-lvds behaviour unchanged.
+
+Reference: rk_disp_pwr_enable (0xc02fe508) and rk_disp_pwr_disable
+(0xc02fe630), shipped Image sha256
+01a2967904b975307884092778f313213a6de2ef2ecc841233ae5c4fe2a24729.
+Readable BSP: rockchip-linux/kernel
+89a3df543d5d6936eaf2b193316a38fecc94a1e4,
+drivers/video/rockchip/rk_fb.c. Board wiring/order: vendor DT power_ctr.
+
+Signed-off-by: Comzee <117947104+Comzee@users.noreply.github.com>
+---
+
+--- /dev/null
++++ b/Documentation/devicetree/bindings/display/panel/rockchip,rk3128-reference-panel.yaml
+@@ -0,0 +1,45 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/display/panel/rockchip,rk3128-reference-panel.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: RK3128 reference board LVDS panel assembly
++
++maintainers:
++  - Comzee <reference@example.invalid>
++
++description: |
++  The RK3128 reference board board drives a 1920x1080 LVDS panel assembly, including its bridge.
++  Reset and enable are active low. The vendor sequence deasserts reset, waits
++  10 ms, asserts enable, then waits 10 ms. Disable asserts reset before
++  deasserting enable, without delays. Acquiring the lines must preserve their
++  state for the already-lit bootloader handover; enable never pulses reset.
++
++allOf:
++  - $ref: panel-common.yaml#
++  - $ref: /schemas/display/lvds.yaml#
++
++properties:
++  compatible:
++    const: rockchip,rk3128-reference-panel
++  reset-gpios:
++    maxItems: 1
++  enable-gpios:
++    maxItems: 1
++  data-mapping:
++    const: vesa-24
++
++required:
++  - compatible
++  - reset-gpios
++  - enable-gpios
++  - backlight
++  - data-mapping
++  - width-mm
++  - height-mm
++  - panel-timing
++  - port
++
++unevaluatedProperties: false
++...

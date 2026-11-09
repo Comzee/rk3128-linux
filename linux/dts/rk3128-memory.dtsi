@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * #536: the loader's 32 MiB logo allocation is temporary on the DRM path.
+ * Keep it reserved against both normal allocation and CMA placement until
+ * the VOP has completed its takeover. Without no-map, highmem struct pages
+ * are initialized and can be returned with free_reserved_page(). This is
+ * NOT a reusable pool: nothing may allocate here before the DRM handover.
+ * The simplefb path continues to use and reserve the entire original range.
+ */
+#if RK3128_DISPLAY_LVDS
+&uboot_fb {
+	/delete-property/ no-map;
+};
+
+&vop {
+	memory-region = <&uboot_fb>;
+	memory-region-names = "boot-logo";
+};
+#endif

@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 08:53:11 -0600
+Subject: [PATCH 2/4] phy: rockchip: inno-dsidphy: Program the RK3128 LVDS
+ analog block like the BSP
+
+The common LVDS sequence of this driver comes from the PX30 BSP. The
+RK3128 BSP (Rockchip's 3.10 rk31xx LVDS transmitter, the one that
+drives the panel of existing RK3128 products) does three more things
+in the LVDS path before it powers the lanes:
+
+ - set the output common-mode voltage to 900 mV and the differential
+   swing to 350 mV (LVDS reg04),
+ - clear the analog power-down and sync-reset bits of the LDO and the
+   PLL (analog reg01), which this driver only clears for MIPI,
+ - select D7 as the MSB of each pixel component in the PHY (LVDS
+   reg00) in addition to the same choice in the GRF.
+
+Do the same for the RK3128 only, with a flag in its platform data, so
+the PX30, RK3368 and later SoCs keep their sequence untouched. The PLL
+dividers (prediv 2, fbdiv 28), the lane enables and the mode selection
+are identical to the BSP's and are left as they are.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c b/drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c
+index 30d5e5ddf..275d61be9 100644
+--- a/drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c
++++ b/drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c
+@@ -183,6 +183,8 @@
+ #define LVDS_DIGITAL_INTERNAL_RESET_MASK	BIT(2)
+ #define LVDS_DIGITAL_INTERNAL_RESET_DISABLE	BIT(2)
+ #define LVDS_DIGITAL_INTERNAL_RESET_ENABLE	0
++#define LVDS_MSB_SEL_MASK			BIT(0)
++#define LVDS_MSB_SEL_D7				BIT(0)
+ /* LVDS Register Part: reg01 */
+ #define LVDS_DIGITAL_INTERNAL_ENABLE_MASK	BIT(7)
+ #define LVDS_DIGITAL_INTERNAL_ENABLE		BIT(7)
+@@ -192,6 +194,11 @@
+ #define TTL_MODE_ENABLE				BIT(2)
+ #define LVDS_MODE_ENABLE			BIT(1)
+ #define MIPI_MODE_ENABLE			BIT(0)
++/* LVDS Register Part: reg04 */
++#define LVDS_VOCM_MASK				GENMASK(5, 4)
++#define LVDS_VOCM(x)				UPDATE(x, 5, 4)
++#define LVDS_DIFF_V_MASK			GENMASK(7, 6)
++#define LVDS_DIFF_V(x)				UPDATE(x, 7, 6)
+ /* LVDS Register Part: reg0b */
+ #define LVDS_LANE_EN_MASK			GENMASK(7, 3)
+ #define LVDS_DATA_LANE0_EN			BIT(7)
+@@ -222,6 +229,7 @@ struct inno_video_phy_plat_data {
+ 	const unsigned int num_timings;
+ 	enum phy_max_rate max_rate;
+ 	unsigned int max_lanes;
++	bool lvds_analog_init;
+ };
+ 
+ struct inno_dsidphy {
+@@ -602,6 +610,16 @@ static void inno_dsidphy_lvds_mode_enable(struct inno_dsidphy *inno)
+ 	u8 prediv = 2;
+ 	u16 fbdiv = 28;
+ 
++	if (inno->pdata->lvds_analog_init) {
++		/* Common-mode voltage 900 mV, differential swing 350 mV */
++		phy_update_bits(inno, REGISTER_PART_LVDS, 0x04,
++				LVDS_VOCM_MASK | LVDS_DIFF_V_MASK,
++				LVDS_VOCM(0) | LVDS_DIFF_V(2));
++		/* The MSB of each pixel component is on D7 */
++		phy_update_bits(inno, REGISTER_PART_LVDS, 0x00,
++				LVDS_MSB_SEL_MASK, LVDS_MSB_SEL_D7);
++	}
++
+ 	/* Sample clock reverse direction */
+ 	phy_update_bits(inno, REGISTER_PART_ANALOG, 0x08,
+ 			SAMPLE_CLOCK_DIRECTION_MASK | LOWFRE_EN_MASK,
+@@ -619,6 +637,13 @@ static void inno_dsidphy_lvds_mode_enable(struct inno_dsidphy *inno)
+ 	phy_update_bits(inno, REGISTER_PART_ANALOG, 0x04,
+ 			REG_FBDIV_LO_MASK, REG_FBDIV_LO(fbdiv));
+ 	phy_update_bits(inno, REGISTER_PART_LVDS, 0x08, 0xff, 0xfc);
++	if (inno->pdata->lvds_analog_init)
++		/* Release the analog reset, power on the LDO and the PLL */
++		phy_update_bits(inno, REGISTER_PART_ANALOG, 0x01,
++				REG_SYNCRST_MASK | REG_LDOPD_MASK |
++				REG_PLLPD_MASK,
++				REG_SYNCRST_NORMAL | REG_LDOPD_POWER_ON |
++				REG_PLLPD_POWER_ON);
+ 	/* Enable PLL and Bandgap */
+ 	phy_update_bits(inno, REGISTER_PART_LVDS, 0x0b,
+ 			LVDS_PLL_POWER_MASK | LVDS_BANDGAP_POWER_MASK,
+@@ -763,6 +788,13 @@ static const struct inno_video_phy_plat_data max_1_5ghz_video_phy_plat_data = {
+ 	.max_lanes = 2,
+ };
+ 
++static const struct inno_video_phy_plat_data rk3128_video_phy_plat_data = {
++	.inno_mipi_dphy_timing_table = inno_mipi_dphy_timing_table_max_1ghz,
++	.num_timings = ARRAY_SIZE(inno_mipi_dphy_timing_table_max_1ghz),
++	.max_rate = MAX_1GHZ,
++	.lvds_analog_init = true,
++};
++
+ static const struct inno_video_phy_plat_data max_2_5ghz_video_phy_plat_data = {
+ 	.inno_mipi_dphy_timing_table = inno_mipi_dphy_timing_table_max_2_5ghz,
+ 	.num_timings = ARRAY_SIZE(inno_mipi_dphy_timing_table_max_2_5ghz),
+@@ -845,7 +877,7 @@ static const struct of_device_id inno_dsidphy_of_match[] = {
+ 		.data = &max_1ghz_video_phy_plat_data,
+ 	}, {
+ 		.compatible = "rockchip,rk3128-dsi-dphy",
+-		.data = &max_1ghz_video_phy_plat_data,
++		.data = &rk3128_video_phy_plat_data,
+ 	}, {
+ 		.compatible = "rockchip,rk3368-dsi-dphy",
+ 		.data = &max_1ghz_video_phy_plat_data,

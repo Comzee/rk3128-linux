@@ -1,0 +1,57 @@
+From 1762e262efa62e29429ef712c11926e0b2b8dcb9 Mon Sep 17 00:00:00 2001
+From: beat-state <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 07:55:11 -0600
+Subject: [PATCH] lima: align the varying stride to the widest varying, not
+ always to 16
+
+lima_update_varying() rounded the PP's varying stride up to a multiple of 16 ("does component_size == 2 need to be
+16 aligned?" in the comment the upstream FP16 series replaced). The Mali blob answers that question: both the RSW
+field and the GP varying descriptor hold the stride in units of 8 bytes, and in the #478 capture of the Demo the
+blob uses the odd multiples - varying stride 8 on every galaxy draw (one Vec4 FP16) and 24 on the horizon, chrome
+and finale draws (two Vec4 FP16 and one Vec2 FP32) - where lima rounds the same layouts up to 16 and 48, writing
+and reading twice the bytes it needs.
+
+Only a varying wider than 8 bytes needs the stride to keep it aligned, and the blob agrees: every stride it uses
+with a Vec4 FP32 varying is a multiple of 16 (the Demo's blur passes, 48 for 16 + 16 + 8). So align to the widest
+varying, with 8 as the floor.
+
+Bit-exact: this moves varyings in memory and changes no value. With the FP16 patch before it, lima's varying
+stride matches the blob's on 52 of the 54 matched Demo draws of the capture (the other two are 16 where the blob
+uses 24, lima's being the smaller), and its varying bytes per frame go from 1.46-1.96x the blob's to 0.75-1.00x
+(/var/tmp/mali-re/beat-state/data/bw.json).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/gallium/drivers/lima/lima_draw.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+index 95447c1..a14e86e 100644
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -1043,6 +1043,7 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+ 
+    int offset = 0;
+    int index = 0;
++   int max_size = 8;
+ 
+    for (int i = 0; i < vs->state.num_outputs; i++) {
+       struct lima_varying_info *v = vs->state.varying + i;
+@@ -1057,9 +1058,16 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+ 
+       v->offset = offset;
+       offset += size;
++      max_size = MAX2(max_size, size);
+    }
+ 
+-   vs->state.varying_stride = align(offset, 16);
++   /* The RSW and the GP varying descriptor both hold the stride in units of 8 bytes, and the Mali blob uses the
++    * odd multiples: in the #478 capture of the Demo its galaxy draws have varying stride 8 (one Vec4 FP16) and
++    * its horizon, chrome and finale draws 24 (two Vec4 FP16 and one Vec2 FP32), where lima rounds both up to the
++    * next multiple of 16. Only a varying wider than 8 bytes (Vec4 FP32) needs the stride to keep it aligned from
++    * vertex to vertex, and the blob agrees: every stride it uses with a Vec4 FP32 varying is a multiple of 16
++    * (the Demo's blur passes, stride 48 for 16 + 16 + 8). Align to the widest varying instead of always to 16. */
++   vs->state.varying_stride = align(offset, max_size);
+ 
+    /* gl_Position is always present, allocate space for it */
+    gp_output_size = align(4 * 4 * num, 0x40);

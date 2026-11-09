@@ -1,0 +1,289 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * RK3128 reference board (RK3128, 1 GB, 1920x1080 panel), test board DT for the Linux port
+ * (development record #286, docs/RK3128-LINUX.md "Build pipeline").
+ *
+ * Translated by hand from the stock rk-kernel.dtb (3.10 Rockchip bindings, in the `second` stage
+ * of /data/local/stock-backup/boot.img.orig; `tools/dtb_patch.py show`). Every number that
+ * has a mainline home keeps the vendor value. What has none is a comment, not a guess.
+ *
+ * Built by scripts/linux-build.sh through a generated wrapper that #defines the RK3128_* knobs
+ * below before including this file. Nothing here is flashed by the build.
+ */
+
+/dts-v1/;
+
+#include "rk3128.dtsi"
+#include <dt-bindings/pwm/pwm.h>
+
+/* ---- build knobs (the wrapper sets them; these are the defaults) ------------------------- */
+
+/*
+ * Ramoops range: the vendor kernel's own RAM log region, measured by the test-slot ticket
+ * (development record #284, docs/RK3128-LINUX.md "Test slot and ramoops"): 512 KiB at 0x7f100000.
+ * A /dev/kmsg line there survived a recovery boot and a plain warm reboot, at the same address;
+ * it overlaps neither CMA nor u-boot's logo buffer.
+ */
+#ifndef RK3128_RAMOOPS_ADDR
+#define RK3128_RAMOOPS_ADDR	0x7f100000
+#endif
+#ifndef RK3128_RAMOOPS_SIZE
+#define RK3128_RAMOOPS_SIZE	0x00080000
+#endif
+
+/* u-boot's logo framebuffer: `uboot_logo=0x02000000@0x9dc00000:0x01000000` on the stock cmdline */
+#define RK3128_UBOOT_FB_ADDR	0x9dc00000
+#define RK3128_UBOOT_FB_REGION	0x02000000
+
+/* Pixel format of that framebuffer is NOT known (the stock tree does not say). a8r8g8b8 is
+ * u-boot's usual 32 bpp; override with RK3128_FB_FORMAT/RK3128_FB_BPP when the board shows noise. */
+#ifndef RK3128_FB_FORMAT
+#define RK3128_FB_FORMAT		"a8r8g8b8"
+#endif
+#ifndef RK3128_FB_BPP
+#define RK3128_FB_BPP		4
+#endif
+
+/*
+ * Display path (scripts/linux-build.sh RK3128_DISPLAY, development record #292): 0 = the default, u-boot's
+ * framebuffer through simplefb; 1 = the RK3128 LVDS DRM driver (linux/patches/) drives the panel.
+ * RK3128_SIMPLEFB_STATUS is the simple-framebuffer node's status ("okay" for 0, "disabled" for 1: a probing
+ * Rockchip DRM driver resets the VOP, so u-boot's scan-out and the simplefb that follows it end there).
+ */
+#ifndef RK3128_DISPLAY_LVDS
+#define RK3128_DISPLAY_LVDS	0
+#endif
+#ifndef RK3128_SIMPLEFB_STATUS
+#define RK3128_SIMPLEFB_STATUS	"okay"
+#endif
+
+/* The PWM voltage regulators are off in the first test image: see the comment at their nodes. */
+#ifndef RK3128_PWM_REGULATORS
+#define RK3128_PWM_REGULATORS	"disabled"
+#endif
+
+/ {
+	model = "RK3128 reference board (RK3128)";
+	compatible = "rockchip,rk3128-reference", "rockchip,rk3128";
+
+	aliases {
+		mmc0 = &emmc;
+	};
+
+	chosen {
+		/*
+		 * u-boot rewrites bootargs (header cmdline + its own additions) and the initrd range.
+		 * No stdout-path: no UART cable is attached (owner, 2026-11-06), so the log goes to the
+		 * ramoops console (CONFIG_PSTORE_CONSOLE) and to the panel (fbcon).
+		 */
+	};
+
+	/*
+	 * u-boot's bootrk finds this node by its path `/memory` (the stock tree has it too) and
+	 * overwrites reg with the DRAM size it detected. 0x60000000 + 1 GB is the stock value.
+	 */
+	memory {
+		device_type = "memory";
+		reg = <0x60000000 0x40000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* u-boot's logo framebuffer and its kernel-logo area; keep Linux out of it */
+		uboot_fb: framebuffer@9dc00000 {
+			reg = <RK3128_UBOOT_FB_ADDR RK3128_UBOOT_FB_REGION>;
+			no-map;
+		};
+
+		/*
+		 * pstore/ramoops, read back from Android after a warm reboot. The 512 KiB split: console
+		 * 256 KiB (a whole early boot with ignore_loglevel is well under that), pmsg 64 KiB (the
+		 * initramfs log), and 3 oops/panic records of 64 KiB in the rest.
+		 */
+		ramoops: ramoops@7f100000 {
+			compatible = "ramoops";
+			reg = <RK3128_RAMOOPS_ADDR RK3128_RAMOOPS_SIZE>;
+			no-map;
+			record-size = <0x10000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x10000>;
+		};
+	};
+
+	/*
+	 * u-boot lit the panel and keeps scanning this buffer out (the vendor tree's
+	 * `rockchip,uboot-logo-on`). This is the default display path (RK3128_DISPLAY=simplefb):
+	 * fbcon draws on it, and the VOP, LVDS PHY and bridge are left exactly as u-boot set
+	 * them, so the kernel must not gate their clocks or power the domain down
+	 * (`clk_ignore_unused pd_ignore_unused` on the cmdline, and the clocks/power-domain
+	 * listed here). With RK3128_DISPLAY=lvds the node is disabled and the RK3128 LVDS DRM
+	 * driver takes the VOP over with normal unused-clock/domain shutdown (#523; see
+	 * `&rk3128_panel` and linux/dts/rk3128-display-lvds.dtsi).
+	 */
+	framebuffer@9dc00000 {
+		compatible = "simple-framebuffer";
+		reg = <RK3128_UBOOT_FB_ADDR (1920 * 1080 * RK3128_FB_BPP)>;
+		width = <1920>;
+		height = <1080>;
+		stride = <(1920 * RK3128_FB_BPP)>;
+		format = RK3128_FB_FORMAT;
+		clocks = <&cru ACLK_LCDC0>, <&cru DCLK_VOP>, <&cru HCLK_LCDC0>,
+			 <&cru PCLK_MIPIPHY>, <&cru HCLK_VIO_H2P>;
+		power-domains = <&power RK3128_PD_VIO>;
+		status = RK3128_SIMPLEFB_STATUS;
+	};
+
+	/*
+	 * The panel with the vendor timing (stock `display-timings/timing0`, screen-type 2 = LVDS,
+	 * lvds-format 0, out-face 0). 120 MHz is what the vendor asks for; its clock tree gets
+	 * 118.8 MHz (51 Hz, HARDWARE.md "Why 51 Hz"): the totals are 2080 x 1120.
+	 *
+	 * Disabled unless RK3128_DISPLAY=lvds (linux/dts/rk3128-display-lvds.dtsi). Mainline 6.18 has no
+	 * RK3128 LVDS output; linux/patches/ adds it (rockchip_lvds.c variant, binding, `lvds` node
+	 * in rk3128.dtsi: docs/RK3128-LINUX.md "LVDS port"). The vendor drives the panel through the
+	 * MIPI PHY (`lvds@20038000`, regs `mipi_lvds_phy` 0x20038000 and `mipi_lvds_ctl`
+	 * 0x101100b0, the latter being the DSI host's PHY status register: not needed). No
+	 * LT8911EX node: it has no OS driver and configures itself from the incoming LVDS.
+	 */
+	rk3128_panel: panel {
+		compatible = "panel-lvds";
+		/* about 244 x 137 mm: HARDWARE.md says density 200 dpi; the vendor tree has no size */
+		width-mm = <244>;
+		height-mm = <137>;
+		data-mapping = "vesa-24";
+		backlight = <&backlight>;
+		status = "disabled";
+
+		panel-timing {
+			clock-frequency = <120000000>;
+			hactive = <1920>;
+			vactive = <1080>;
+			hback-porch = <80>;
+			hfront-porch = <48>;
+			hsync-len = <32>;
+			vback-porch = <31>;
+			vfront-porch = <3>;
+			vsync-len = <6>;
+			hsync-active = <0>;
+			vsync-active = <0>;
+			de-active = <0>;
+			pixelclk-active = <0>;
+		};
+	};
+
+	/*
+	 * Backlight: vendor `backlight` node (pwm-backlight on pwm@20050000 = pwm0, period 25000 ns,
+	 * levels 0..255, default 0x80, enable gpio0 pin 30 = GPIO0_D6 active high).
+	 */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm0 0 25000 0>;
+		brightness-levels = <0 255>;
+		num-interpolated-steps = <255>;
+		default-brightness-level = <128>;
+		enable-gpios = <&gpio0 RK_PD6 GPIO_ACTIVE_HIGH>;
+	};
+
+	/*
+	 * CPU and logic rails: vendor `pwm-regulator1` (pwm1, vdd_arm) and `pwm-regulator2` (pwm2,
+	 * vdd_logic), period 25000 ns, 950..1450 mV in 25 mV steps, boot values 1.25 V and 1.20 V.
+	 * The vendor driver's `pwm_coefficient` 550 is the microvolts per 0.1 % of duty; the table
+	 * below is voltage = 1450000 - 550 * duty (duty in 0.1 %, integer division like the vendor
+	 * driver), i.e. a higher duty gives a LOWER voltage. That reading of the vendor
+	 * driver (not in the repo) is inferred, not measured: so the nodes are off in the first test
+	 * image, where u-boot's boot voltages keep the rails and no cpufreq or devfreq is built.
+	 * Turn them on with RK3128_PWM_REGULATORS=okay once the readback is checked against the
+	 * frame (docs/RK3128-LINUX.md "Open items").
+	 */
+	vdd_arm: regulator-vdd-arm {
+		compatible = "pwm-regulator";
+		pwms = <&pwm1 0 25000 0>;
+		pwm-dutycycle-unit = <1000>;
+		pwm-dutycycle-range = <909 0>;
+		voltage-table = <950000 909>, <975000 863>, <1000000 818>, <1025000 772>,
+				<1050000 727>, <1075000 681>, <1100000 636>, <1125000 590>,
+				<1150000 545>, <1175000 500>, <1200000 454>, <1225000 409>,
+				<1250000 363>, <1275000 318>, <1300000 272>, <1325000 227>,
+				<1350000 181>, <1375000 136>, <1400000 90>, <1425000 45>,
+				<1450000 0>;
+		regulator-name = "vdd_arm";
+		regulator-min-microvolt = <950000>;
+		regulator-max-microvolt = <1450000>;
+		regulator-always-on;
+		regulator-boot-on;
+		status = RK3128_PWM_REGULATORS;
+	};
+
+	vdd_logic: regulator-vdd-logic {
+		compatible = "pwm-regulator";
+		pwms = <&pwm2 0 25000 0>;
+		pwm-dutycycle-unit = <1000>;
+		pwm-dutycycle-range = <909 0>;
+		voltage-table = <950000 909>, <975000 863>, <1000000 818>, <1025000 772>,
+				<1050000 727>, <1075000 681>, <1100000 636>, <1125000 590>,
+				<1150000 545>, <1175000 500>, <1200000 454>, <1225000 409>,
+				<1250000 363>, <1275000 318>, <1300000 272>, <1325000 227>,
+				<1350000 181>, <1375000 136>, <1400000 90>, <1425000 45>,
+				<1450000 0>;
+		regulator-name = "vdd_logic";
+		regulator-min-microvolt = <950000>;
+		regulator-max-microvolt = <1450000>;
+		regulator-always-on;
+		regulator-boot-on;
+		status = RK3128_PWM_REGULATORS;
+	};
+};
+
+/*
+ * eMMC (FORESEE 16 GB, vendor `rksdmmc@1021c000`): 8-bit, high speed, the normal clk/cmd/bus8 pins. The transfer mode
+ * (PIO or the PL330 DMA), the clock and DDR are linux/dts/rk3128-emmc.dtsi's, set by RK3128_EMMC (#425).
+ */
+&emmc {
+	bus-width = <8>;
+	non-removable;
+	disable-wp;
+	cap-mmc-highspeed;
+	pinctrl-names = "default";
+	pinctrl-0 = <&emmc_clk &emmc_cmd &emmc_bus8>;
+	status = "okay";
+};
+
+/* The vendor tree's fiq-debugger is uart2; no cable is attached (owner decision 2026-11-06), nothing reads it. */
+&uart2 {
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+	status = "okay";
+};
+
+/* i2c0 (vendor `i2c@20072000`): touch gslX680 @0x40, sensors @0x18/@0x4c, hym8563 RTC @0x51 */
+&i2c0 {
+	status = "okay";
+
+	rtc@51 {
+		compatible = "haoyu,hym8563";
+		reg = <0x51>;
+		#clock-cells = <0>;
+		clock-output-names = "xin32k";
+	};
+};
+
+&pwm0 {
+	status = "okay";
+};
+
+/* pwm1/pwm2 drive the CPU and logic rails (u-boot started them): untouched until the regulators are on */
+&pwm1 {
+	status = RK3128_PWM_REGULATORS;
+};
+
+&pwm2 {
+	status = RK3128_PWM_REGULATORS;
+};
+
+/* The SoC watchdog (vendor `wdt@2004c000` is disabled there); the initramfs starts it. */
+&watchdog {
+	status = "okay";
+};

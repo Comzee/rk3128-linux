@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * eMMC transfer mode (development record #425, docs/RK3128-LINUX.md "eMMC speed"), set by RK3128_EMMC in
+ * scripts/linux-build.sh. Included after the board file, which gives &emmc its bus, pins and cap-mmc-highspeed.
+ *
+ * Android drives this eMMC (vendor `rksdmmc@1021c000`, `tools/dtb_patch.py show boot.img.orig /rksdmmc@1021c000`) with
+ * `dmas = <&pdma 12>` (the PL330, channel 12), `clock-freq-min-max = <400000 50000000>`, 8-bit, `supports-highspeed` and
+ * `supports-DDR_MODE`. The RK3128's dw_mmc 2.70a has no internal DMA (its HCON transfer mode is not IDMAC: with no dmas the
+ * driver says "Using PIO mode"), so DMA here is the external PL330, as on Android and in rk3128.dtsi.
+ *
+ *   pio25   no dmas (PIO), 25 MHz: the first boots' safe mode (#286)
+ *   dma25   PL330 DMA, 25 MHz
+ *   dma50   PL330 DMA, high speed at 50 MHz (the vendor's clock-freq max; the card's own HS limit is 52 MHz)
+ *   ddr52   PL330 DMA, DDR52 timing at the same 50 MHz: `mmc-ddr-3_3v`, the vendor's DDR with no I/O voltage switch
+ *           (its 3.10 core keeps vccq for a DDR_1_8V card, and the board has no vqmmc regulator; `mmc-ddr-1_8v` would set
+ *           the controller's UHS_REG 1.8 V bit, which nothing on Android ever does)
+ * The clock never goes above the vendor's 50 MHz (owner rule: vendor operating points).
+ */
+
+&emmc {
+	/* #522: match the vendor's CACHE_CTRL=0 on a mains-powered board.
+	 * This is the device cache, not Linux's page cache. See docs/research/emmc-cache-policy.md.
+	 */
+	no-mmc-cache;
+#if RK3128_EMMC_DMA
+	dmas = <&pdma 12>;
+	dma-names = "rx-tx";
+#else
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+#endif
+	max-frequency = <RK3128_EMMC_HZ>;
+#if RK3128_EMMC_DDR
+	mmc-ddr-3_3v;
+#endif
+};

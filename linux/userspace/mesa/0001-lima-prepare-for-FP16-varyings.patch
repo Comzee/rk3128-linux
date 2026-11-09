@@ -1,0 +1,219 @@
+From 187950c3c4303dff9a8c3ac7d2caaff3ae042a38 Mon Sep 17 00:00:00 2001
+From: sarbes <sarbes@kodi.tv>
+Date: Thu, 27 Nov 2025 01:31:19 +0100
+Subject: [PATCH] lima: prepare for FP16 varyings (Mesa MR !37449; fixes issue #12702)
+
+Simplifies the varying setup, while also fixing vec2 FP32 varyings. FP16 varyings are prepared.
+
+Reviewed-by: Vasily Khoruzhick anarsoul@gmail.com
+---
+ src/gallium/drivers/lima/ir/gp/nir.c       | 44 +++++++++-------
+ src/gallium/drivers/lima/lima_context.h    |  4 +-
+ src/gallium/drivers/lima/lima_draw.c       | 60 ++++++++++++++++------
+ 3 files changed, 71 insertions(+), 37 deletions(-)
+
+diff --git a/src/gallium/drivers/lima/ir/gp/nir.c b/src/gallium/drivers/lima/ir/gp/nir.c
+index 3915ffd4a077..3b00a62f379e 100644
+--- a/src/gallium/drivers/lima/ir/gp/nir.c
++++ b/src/gallium/drivers/lima/ir/gp/nir.c
+@@ -29,6 +29,7 @@
+ 
+ #include "gpir.h"
+ #include "lima_context.h"
++#include "lima_pack.h"
+ 
+ gpir_reg *gpir_create_reg(gpir_compiler *comp)
+ {
+@@ -438,6 +439,26 @@ static void gpir_print_shader_db(struct nir_shader *nir, gpir_compiler *comp,
+    util_debug_message(debug, SHADER_INFO, "%s", shaderdb);
+    free(shaderdb);
+ }
++static enum lima_varying_type gpir_varying_type(const glsl_type* type)
++{
++   enum glsl_base_type base_type = glsl_get_base_type(type);
++   unsigned int components = glsl_get_components(type);
++
++   switch (base_type) {
++   case (GLSL_TYPE_FLOAT16):
++      if (components <= 2)
++         return LIMA_VARYING_TYPE_VEC2_FP16;
++      else
++         return LIMA_VARYING_TYPE_VEC4_FP16;
++   case (GLSL_TYPE_FLOAT):
++   default:
++      if (components <= 2)
++         return LIMA_VARYING_TYPE_VEC2_FP32;
++      else
++         return LIMA_VARYING_TYPE_VEC4_FP32;
++   }
++}
++
+ 
+ bool gpir_compile_nir(struct lima_vs_compiled_shader *prog, struct nir_shader *nir,
+                       struct util_debug_callback *debug)
+@@ -479,34 +500,21 @@ bool gpir_compile_nir(struct lima_vs_compiled_shader *prog, struct nir_shader *n
+    if (!gpir_codegen_prog(comp))
+       goto err_out0;
+ 
+-   /* initialize to support accumulating below */
+    nir_foreach_shader_out_variable(var, nir) {
+-      struct lima_varying_info *v = prog->state.varying + var->data.driver_location;
+-      v->components = 0;
+-   }
++      prog->state.num_outputs++;
+ 
+-   nir_foreach_shader_out_variable(var, nir) {
+-      bool varying = true;
+       switch (var->data.location) {
+       case VARYING_SLOT_POS:
+          prog->state.gl_pos_idx = var->data.driver_location;
+-         varying = false;
+          break;
+       case VARYING_SLOT_PSIZ:
+          prog->state.point_size_idx = var->data.driver_location;
+-         varying = false;
+          break;
++      default:
++         prog->state.num_varyings++;
++         struct lima_varying_info *v = prog->state.varying + var->data.driver_location;
++         v->type = gpir_varying_type(var->type);
+       }
+-
+-      struct lima_varying_info *v = prog->state.varying + var->data.driver_location;
+-      if (!v->components) {
+-         v->component_size = gpir_glsl_type_size(glsl_get_base_type(var->type));
+-         prog->state.num_outputs++;
+-         if (varying)
+-            prog->state.num_varyings++;
+-      }
+-
+-      v->components += glsl_get_components(var->type);
+    }
+ 
+    gpir_print_shader_db(nir, comp, debug);
+diff --git a/src/gallium/drivers/lima/lima_context.h b/src/gallium/drivers/lima/lima_context.h
+index 05e75f9f1806..d054f05d18f2 100644
+--- a/src/gallium/drivers/lima/lima_context.h
++++ b/src/gallium/drivers/lima/lima_context.h
+@@ -32,6 +32,7 @@
+ #include "pipe/p_context.h"
+ #include "pipe/p_state.h"
+ #include "util/u_framebuffer.h"
++#include "lima_pack.h"
+ 
+ struct lima_context_framebuffer {
+    struct pipe_framebuffer_state base;
+@@ -69,8 +70,7 @@ struct lima_fs_key {
+ #define LIMA_MAX_VARYING_NUM 13
+ 
+ struct lima_varying_info {
+-   int components;
+-   int component_size;
++   enum lima_varying_type type;
+    int offset;
+ };
+ 
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+index 61031e38a359..2646d75c23f8 100644
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -789,25 +789,18 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
+                                  &state.varying_type_8, &state.varying_type_9};
+ 
+          for (int i = 0, index = 0; i < ctx->vs->state.num_outputs; i++) {
+-            uint32_t val;
+-
+             if (i == ctx->vs->state.gl_pos_idx || i == ctx->vs->state.point_size_idx)
+                continue;
+ 
+             struct lima_varying_info* v = ctx->vs->state.varying + i;
+-            if (v->component_size == 4)
+-               val = v->components > 2 ? LIMA_VARYING_TYPE_VEC4_FP32 : LIMA_VARYING_TYPE_VEC2_FP32;
+-            else
+-               val = v->components > 2 ? LIMA_VARYING_TYPE_VEC4_FP16 : LIMA_VARYING_TYPE_VEC2_FP16;
+-
+             if (index < 10)
+-               *varyings[index] = val;
++               *varyings[index] = v->type;
+             else if (index == 10) {
+-               state.varying_type_10_low = val & 0x3;
+-               state.varying_type_10_high = val >> 2;
++               state.varying_type_10_low = v->type & 0x3;
++               state.varying_type_10_high = v->type >> 2;
+             }
+             else if (index == 11)
+-               state.varying_type_11 = val;
++               state.varying_type_11 = v->type;
+ 
+             index++;
+          }
+@@ -942,6 +935,42 @@ lima_update_pp_uniform(struct lima_context *ctx)
+       lima_ctx_buff_va(ctx, lima_ctx_buff_pp_uniform_array));
+ }
+ 
++static unsigned int
++lima_varying_size(enum lima_varying_type type)
++{
++   switch (type) {
++   case LIMA_VARYING_TYPE_VEC4_FP32:
++      return 16;
++   case LIMA_VARYING_TYPE_VEC2_FP32:
++   case LIMA_VARYING_TYPE_VEC4_FP16:
++      return 8;
++   default:
++      return 4;
++   }
++}
++
++static unsigned int
++lima_gp_vertex_format_out(enum lima_varying_type type)
++{
++   // there are no "native" unorm/snorm outputs of the GP, but those types
++   // could be emulated when passing byte/short attributes through the VS.
++   switch (type) {
++   case LIMA_VARYING_TYPE_VEC2_FP32:
++      return 1;
++   case LIMA_VARYING_TYPE_VEC4_FP32:
++      return 3;
++   case LIMA_VARYING_TYPE_VEC2_FP16:
++      return 13;
++   case LIMA_VARYING_TYPE_VEC4_FP16:
++      return 15;
++   case LIMA_VARYING_TYPE_VEC2_SNORM16:
++   case LIMA_VARYING_TYPE_VEC2_UNORM16:
++   case LIMA_VARYING_TYPE_VEC4_UNORM8:
++   default:
++      assert(0);
++   }
++}
++
+ static void
+ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+                     const struct pipe_draw_start_count_bias *draw)
+@@ -966,11 +995,9 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+           i == vs->state.point_size_idx)
+          continue;
+ 
+-      int size = v->component_size * 4;
++      int size = lima_varying_size(v->type);
+ 
+-      /* does component_size == 2 need to be 16 aligned? */
+-      if (v->component_size == 4)
+-         offset = align(offset, 16);
++      offset = align(offset, size);
+ 
+       v->offset = offset;
+       offset += size;
+@@ -1016,8 +1043,7 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+          /* Varying */
+          varying[n++] = ctx->gp_output->va + ctx->gp_output_varyings_offt +
+                         v->offset;
+-         varying[n++] = (vs->state.varying_stride << 11) | (v->components - 1) |
+-            (v->component_size == 2 ? 0x0C : 0);
++         varying[n++] = (vs->state.varying_stride << 11) | lima_gp_vertex_format_out(v->type);
+       }
+    }
+ 
+-- 
+GitLab
+

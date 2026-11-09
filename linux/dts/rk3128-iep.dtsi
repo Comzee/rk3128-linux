@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* RK3128 IEP v1 (#721). Verified interface enabled, idle without queued jobs;
+ * RK3128_IEP=disabled opts out. VIO is independent of the HEVC/VPU bus (#301).
+ * The v1 MMU maps imported scatter-gather buffers. MMAP allocations stay
+ * physically contiguous for VOP export; no parent rate or bus mux changes.
+ */
+#ifndef RK3128_IEP
+#define RK3128_IEP "okay"
+#endif
+
+/ {
+	iep: iep@10108000 {
+		compatible = "rockchip,rk3128-iep";
+		reg = <0x10108000 0x800>;
+		interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru ACLK_IEP>, <&cru HCLK_IEP>;
+		clock-names = "axi", "ahb";
+		resets = <&cru SRST_IEP_A>, <&cru SRST_IEP_H>;
+		reset-names = "axi", "ahb";
+		power-domains = <&power RK3128_PD_VIO>;
+		iommus = <&iep_mmu>;
+		status = RK3128_IEP;
+	};
+
+	/* The shipped v1 MMU uses the mainline rockchip,iommu register ABI,
+	 * shares IRQ 48 and follows the IEP opt-in status.
+	 */
+	iep_mmu: iommu@10108800 {
+		compatible = "rockchip,iommu";
+		reg = <0x10108800 0x100>;
+		interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru ACLK_IEP>, <&cru HCLK_IEP>;
+		clock-names = "aclk", "iface";
+		power-domains = <&power RK3128_PD_VIO>;
+		#iommu-cells = <0>;
+		status = RK3128_IEP;
+	};
+};

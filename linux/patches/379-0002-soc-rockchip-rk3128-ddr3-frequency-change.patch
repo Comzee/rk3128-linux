@@ -1,0 +1,1962 @@
+Linux-port HEVC speed (development record #379): soc: rockchip: RK3128 DDR3 frequency change.
+
+The loader trains the DDR3 at 300 MHz and mainline has no driver that changes it, while the
+Rockchip 3.10 kernel raises it to 396 MHz at boot (ddrfreq "normal 396MHz", vdd_logic
+1.25 V); the HEVC decoder is DDR-bound, so mainline decodes slower than Android. This ports
+the vendor's arch/arm/mach-rockchip/ddr_rk3126.c (GPL-2.0, rockchip-linux/kernel
+release-3.10, "version 1.02 20140828" plus its later PHY de-reset and clock-gate fixes),
+DDR3 only: the same timings (speed bin DDR3_DEFAULT) and the same self-refresh, DPLL and
+uPCTL sequence, run from the internal SRAM with the other CPUs parked there and the NoC
+ports idled. At probe it goes to the node's rockchip,boot-mhz (rk3128_dmc.boot_mhz
+overrides it; 0 or absent leaves the loader's rate); a write to
+/sys/kernel/debug/rk3128-dmc/mhz raises it at run time. Only up, to 301-400 MHz: the
+vendor's settings for 300 MHz and below are its DRAM-DLL-off mode, and a switch back down
+to them decoded with errors on the board (attempt 379-7). The logic rail is required and
+goes to 1.25 V first; without it nothing changes. It acts only on the DDR3 controller
+state it knows.
+
+Hardened in development record #387: the SRAM functions are built without tracing,
+sanitizers, coverage or loop-to-memcpy conversion (and scripts/linux-build.sh fails the build
+on any relocation or indirect call in them); the NoC idle handshake gives up after 10 ms,
+releases the requests and changes nothing (the vendor waits forever); debugfs rk3128-dmc/regs
+dumps the registers the switch writes; rk3128_dmc.pd_idle and rk3128_dmc.trfc_ns are test
+knobs (the vendor's 0x40 and its die-size tRFC by default; tRFC only longer).
+
+Reworked in development record #456 after a boot hung at the switch (attempt 428-1: the
+last line "300 -> 396 MHz", CPU 3 deaf to the backtrace IPI, the RCU GP kthread starved on
+CPU 3, a watchdog reset): every switch runs on CPU 0 in a kworker bound there, as the
+vendor's ddrfreqd (bound to CPU 0) does, so the rail's ramp and settle sleeps never wake on
+another CPU's run queue. The other CPUs are stopped as stop_machine() does, through a work
+on each CPU's stopper thread (a scheduling point: no spinlock held, no driver mid-sequence),
+which reports in with interrupts on, then on "go" turns them off, cleans its L1 and spins
+in SRAM; instead of the #379 asynchronous IPI that froze each CPU wherever it was. Every
+phase has a deadline (report in 100 ms, park 10 ms, back out 100 ms) and a miss names the
+CPUs and changes nothing, or reports the switch failed; the release wait is no longer
+ignored, and a NoC de-idle timeout is reported. One line ("vdd_logic ... switching on CPU
+0") marks the step before the CPUs stop. debugfs rk3128-dmc/test is the hardware test kit:
+"park N", "relock N" (the whole sequence at the current rate, 1 MiB read back) and
+"ipipark N" (the #379 park, for the A/B), built only with CONFIG_ROCKCHIP_RK3128_DMC_TEST
+(the hevc test image): a product build has neither the kit nor the #379 park.
+
+The kit's first frame runs (attempts 456-1, 456-2) missed about one park in 400 and one relock
+in 90, always on CPUs that, by their own stamps, parked within 10 us: CPU 0 waited for the park
+with its interrupts on and read the clock after scanning the flags, and every device interrupt
+of this board lands on CPU 0 (the eMMC's PIO data moves in its interrupt handler), so an
+interrupt between a scan and the clock read that kept CPU 0 away past the 10 ms deadline
+called a miss on CPUs long parked. Now CPU 0 turns its interrupts off at "go" (as
+multi_cpu_stop() does on every CPU in one step), every deadline reads the clock before it
+scans, and each CPU stamps its phases (reported in, saw "go", interrupts off, parked, released,
+its longest time away while waiting) into its SRAM slot; a miss logs all of them, with CPU 0's
+interrupts in test builds. The kit gains "irqpark N" (the 15db184 park, for this A/B) and goes
+on past a park miss, which changes nothing. The stamps read the physical count (CNTPCT): the
+virtual one carries a per-CPU offset nothing programs here. Attempts 456-3 and 456-4: 0 misses
+in 6000 parks and 600 relocks, against 9 and 5 in 3000 for the 15db184 park in the same boots.
+
+diff -ruN a/drivers/soc/rockchip/Kconfig b/drivers/soc/rockchip/Kconfig
+--- a/drivers/soc/rockchip/Kconfig	2026-11-06 16:02:49.467697282 -0600
++++ b/drivers/soc/rockchip/Kconfig	2026-11-06 17:41:49.256923574 -0600
+@@ -34,6 +34,27 @@
+ 	  the bus points at the other one. It is selected by the Rockchip
+ 	  IOMMU and decoder drivers.
+ 
++config ROCKCHIP_RK3128_DMC
++	bool "RK3128 DDR3 frequency change"
++	depends on ARM && SMP && OF && KALLSYMS && ARM_ARCH_TIMER
++	help
++	  Raises the DDR3 clock of an RK3128 from the loader's rate (300 MHz)
++	  to at most 400 MHz (the Rockchip kernel's 396 MHz) with the Rockchip
++	  kernel's self-refresh, DPLL and controller sequence, run from the
++	  internal SRAM: at probe to the node's rockchip,boot-mhz (or
++	  rk3128_dmc.boot_mhz; 0 leaves the loader's rate), and on a write
++	  to the debugfs file rk3128-dmc/mhz. It needs the node's
++	  logic-supply, raised to 1.25 V before the clock.
++
++config ROCKCHIP_RK3128_DMC_TEST
++	bool "RK3128 DDR3 frequency change: hardware test kit"
++	depends on ROCKCHIP_RK3128_DMC && DEBUG_FS
++	help
++	  The debugfs file rk3128-dmc/test, which repeats the CPU park, the
++	  whole switch sequence at the current rate and the old parks (#379,
++	  15db184) many times in one boot. Only for the hevc test image
++	  (linux/tests/hevc/kernel.config); a product build leaves it off.
++
+ config ROCKCHIP_DTPM
+ 	tristate "Rockchip DTPM hierarchy"
+ 	depends on DTPM && m
+diff -ruN a/drivers/soc/rockchip/Makefile b/drivers/soc/rockchip/Makefile
+--- a/drivers/soc/rockchip/Makefile	2026-11-06 16:02:49.467840807 -0600
++++ b/drivers/soc/rockchip/Makefile	2026-11-06 16:05:49.508742961 -0600
+@@ -6,3 +6,14 @@
+ obj-$(CONFIG_ROCKCHIP_IODOMAIN) += io-domain.o
+ obj-$(CONFIG_ROCKCHIP_DTPM) += dtpm.o
+ obj-$(CONFIG_ROCKCHIP_VCODEC_COMBO) += vcodec-combo.o
++obj-$(CONFIG_ROCKCHIP_RK3128_DMC) += rk3128-dmc.o
++# the SRAM code must be position independent and self-contained: no jump tables, no stack
++# protector, tracing, sanitizer or coverage calls, no loops turned into memcpy/memset calls
++# (scripts/linux-build.sh checks the object for relocations in it, #387)
++CFLAGS_rk3128-dmc.o += -fno-jump-tables -fno-stack-protector $(call cc-option,-fno-tree-loop-distribute-patterns)
++CFLAGS_REMOVE_rk3128-dmc.o += $(CC_FLAGS_FTRACE)
++KASAN_SANITIZE_rk3128-dmc.o := n
++UBSAN_SANITIZE_rk3128-dmc.o := n
++KCSAN_SANITIZE_rk3128-dmc.o := n
++KCOV_INSTRUMENT_rk3128-dmc.o := n
++GCOV_PROFILE_rk3128-dmc.o := n
+diff -ruN a/drivers/soc/rockchip/rk3128-dmc.c b/drivers/soc/rockchip/rk3128-dmc.c
+--- a/drivers/soc/rockchip/rk3128-dmc.c	1969-12-31 18:00:00.000000000 -0600
++++ b/drivers/soc/rockchip/rk3128-dmc.c	2026-11-07 04:00:00.000000000 -0600
+@@ -0,0 +1,1855 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * RK3128 DDR3 frequency change (development record #379).
++ *
++ * The loader trains the DDR at 300 MHz and mainline has no driver that changes it; the
++ * Rockchip 3.10 kernel moves it to 396 MHz at boot (ddrfreq "normal 396MHz", vdd_logic
++ * 1.25 V) and the HEVC decoder is DDR-bound. This is a port of that kernel's
++ * arch/arm/mach-rockchip/ddr_rk3126.c (rockchip-linux/kernel release-3.10, GPL-2.0,
++ * "version 1.02 20140828" with the later PHY de-reset and clock-gate fixes), DDR3 only:
++ * the same timing computation (speed bin DDR3_DEFAULT, as the vendor uses on RK3128) and
++ * the same self-refresh / DPLL / uPCTL sequence, run from the internal SRAM while the
++ * other CPUs spin in SRAM and the bus masters are idled.
++ *
++ * At probe it raises the clock to the node's rockchip,boot-mhz (0 or absent: leave the
++ * loader's rate); rk3128_dmc.boot_mhz=N overrides that, and a write of N to
++ * /sys/kernel/debug/rk3128-dmc/mhz raises it at run time. Only up, to 301-400 MHz, and only
++ * with the logic rail (logic-supply) set to the vendor's 1.25 V first. Before it touches
++ * anything it checks that the controller is the loader's DDR3 uPCTL in Access state at the
++ * rate the DPLL gives.
++ *
++ * The code that runs from SRAM is two functions (rk3128_dmc_sram_run, _park): every helper
++ * is inlined, they use no global data and call nothing, and the file is built without
++ * jump tables, tracing, sanitizers or loop-to-memcpy conversion, so they are position
++ * independent and are copied there whole; scripts/linux-build.sh fails the build if either
++ * has a relocation (development record #387). The NoC idle handshake is bounded: if the
++ * ports do not idle within 10 ms, the requests are released and nothing is changed.
++ *
++ * Every switch runs on CPU 0, in a kworker bound there, as the vendor's ddrfreqd (bound to
++ * CPU 0) does, so the rail raise, its settle and the switch never wait on another CPU's run
++ * queue (development record #456). The other CPUs are stopped the way stop_machine() stops
++ * them, but with deadlines: a work on each CPU's stopper thread (it runs at that CPU's next
++ * scheduling point, so the CPU holds no spinlock and is in no driver's register sequence)
++ * reports in and waits with interrupts on until every CPU has, then on "go" each turns
++ * interrupts off, cleans its L1 data cache and spins in SRAM; CPU 0 turns its own off at "go"
++ * too, as multi_cpu_stop() does on every CPU in one step. A CPU that does not report in within
++ * 100 ms, park within 10 ms, or come back out within 100 ms of the release is named in the log,
++ * with every CPU's phase stamps, and the switch is not made (or is reported failed); nothing
++ * waits forever. Each deadline reads the clock before it scans the CPUs, so time CPU 0 spends
++ * in an interrupt can not turn into a miss: with CPU 0's interrupts on after "go" and the clock
++ * read after the scan, the eMMC's PIO interrupts (all device interrupts land on CPU 0) made
++ * about one park in 400 miss on CPUs that had parked in 10 us (attempts 456-1..456-4). The #379
++ * driver parked the CPUs from an asynchronous IPI instead, wherever each CPU was, and ignored
++ * the release deadline. debugfs rk3128-dmc/test is the hardware test kit: it repeats the park
++ * and release alone, the whole switch sequence at the current rate, the #379 IPI park or the
++ * 15db184 park (interrupts on after "go"), many times in one boot. It and the old parks are
++ * built only with CONFIG_ROCKCHIP_RK3128_DMC_TEST (the hevc test image's kernel.config); a
++ * product build has none of them.
++ */
++#include <linux/cpu.h>
++#include <linux/debugfs.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/kallsyms.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/consumer.h>
++#include <linux/seq_file.h>
++#include <linux/slab.h>
++#include <linux/smp.h>
++#include <linux/stop_machine.h>
++#include <linux/vmalloc.h>
++#include <linux/workqueue.h>
++#include <asm/cacheflush.h>
++#include <asm/tlbflush.h>
++#include <clocksource/arm_arch_timer.h>
++
++extern void call_with_stack(void (*fn)(void *), void *arg, void *sp);
++
++/* uPCTL */
++#define PCTL_SCTL		0x004
++#define PCTL_STAT		0x008
++#define PCTL_MCMD		0x040
++#define PCTL_MCFG1		0x07c
++#define PCTL_MCFG		0x080
++#define PCTL_TOGCNT1U		0x0c0
++#define PCTL_TOGCNT100N		0x0cc
++#define PCTL_TREFI		0x0d0
++#define PCTL_TAL		0x0e4
++#define PCTL_TCL		0x0e8
++#define PCTL_TCWL		0x0ec
++#define PCTL_TZQCSI		0x11c
++#define PCTL_DFITPHYWRLAT	0x254
++#define PCTL_DFITRDDATAEN	0x260
++#define PCTL_IPVR		0x3f8
++#define PCTL_IPTR		0x3fc
++
++#define SCTL_CFG		1
++#define SCTL_GO			2
++#define SCTL_SLEEP		3
++#define SCTL_WAKEUP		4
++
++#define ST_INIT_MEM		0
++#define ST_CONFIG		1
++#define ST_ACCESS		3
++#define ST_LOW_POWER		5
++
++#define MCMD_PREA		1
++#define MCMD_REF		2
++#define MCMD_MRS		3
++#define MCMD_START		BIT(31)
++#define MCMD_BANK(n)		((n) << 17)
++#define MCMD_ADDR(n)		((n) << 4)
++
++/* DDR PHY: PHY_REGxx (hex) at xx * 4 */
++#define PHY_REG(n)		((n) * 4)
++#define PHY_REGDLL		0x290
++
++/* CRU */
++#define CRU_DPLL_CON0		0x010
++#define CRU_DPLL_CON1		0x014
++#define CRU_MODE_CON		0x040
++#define CRU_CLKSEL26		0x0ac
++#define CRU_CLKGATE(n)		(0x0d0 + (n) * 4)
++#define CRU_NGATES		11
++#define DPLL_LOCK		BIT(10)
++
++/* GRF */
++#define GRF_SOC_CON2		0x148
++#define GRF_SOC_STATUS0		0x14c
++#define GRF_OS_REG1		0x1cc
++#define GRF_DDR_LP_EN		BIT(18)
++#define GRF_DDR_LP_DIS		(BIT(18) | BIT(2))
++
++/* PMU */
++#define PMU_PWRDN_ST		0x008
++
++/* NoC service bus */
++#define NOC_DDRTIMING		0x00c
++
++#define DDR3_DLL_RESET		BIT(8)
++#define DDR3_DLL_DISABLE	1
++#define DDR3_DLL_ENABLE		0
++#define PD_IDLE			0x40	/* the vendor's auto power-down after 64 idle cycles */
++#define IDLE_TIMEOUT_US		10000	/* the NoC idle handshake; the vendor waits forever */
++#define STEP_IDLE_TIMEOUT	0x81	/* the ports did not idle: nothing was changed */
++#define ARRIVE_TIMEOUT_US	100000	/* the other CPUs' stopper works report in (the #379 wait's 0.1 s) */
++#define PARK_TIMEOUT_US		10000	/* from "go" to every CPU spinning in SRAM (microseconds in practice) */
++#define UNPARK_TIMEOUT_US	100000	/* from the release to every CPU back out of its stopper work */
++#define DLL_DISABLE_FREQ	300
++#define ODT_DISABLE_FREQ	333
++#define PHY_ODT_DISABLE_FREQ	333
++#define PHY_DLL_DISABLE_FREQ	266
++#define PHY_RON_44OHM		11
++#define PHY_RTT_216OHM		4
++
++/* the 34 uPCTL timing registers TOGCNT1U..TDPD, in register order */
++enum { T_TOGCNT1U, T_TINIT, T_TRSTH, T_TOGCNT100N, T_TREFI, T_TMRD, T_TRFC, T_TRP, T_TRTW,
++	T_TAL, T_TCL, T_TCWL, T_TRAS, T_TRC, T_TRCD, T_TRRD, T_TRTP, T_TWR, T_TWTR, T_TEXSR,
++	T_TXP, T_TXPDLL, T_TZQCS, T_TZQCSI, T_TDQS, T_TCKSRE, T_TCKSRX, T_TCKE, T_TMOD, T_TRSTL,
++	T_TZQCL, T_TMRR, T_TCKESR, T_TDPD, T_NUM };
++
++/* SRAM: the top 4 KiB page (the bottom one holds the SMP trampoline) */
++#define SRAM_PHYS		0x10081000
++#define SRAM_SIZE		0x1000
++#define SRAM_CODE_MAX		0x0b00
++#define SRAM_PARAM		0x0b00
++#define SRAM_PARK_STACK(cpu)	(0x0d40 + (cpu) * 0x40)	/* top of a parked CPU's 64-byte stack */
++#define SRAM_STACK_TOP		0x1000			/* the switching CPU: 0xe00..0xfff */
++
++/*
++ * One CPU's park flag and where it is in the park, in SRAM (uncached). The t_* stamps are the
++ * physical count's low word (CNTPCT, 24 MHz, the same on every CPU); the log prints them
++ * after a miss (#456).
++ */
++struct dmc_park {
++	u32 parked;
++	u32 release_off;	/* the release flag, as an offset from this struct's page */
++	u32 t_in;		/* its stopper work reported in */
++	u32 t_go;		/* it saw "go" */
++	u32 t_off;		/* interrupts off and its L1 cleaned: the jump to SRAM */
++	u32 t_park;		/* spinning in SRAM (written by the SRAM code) */
++	u32 t_unpark;		/* released (written by the SRAM code) */
++	u32 gap;		/* its longest time away between two polls while waiting for "go" */
++	u32 gap_irqs;		/* the interrupts it took in that time */
++	u32 pad;
++};
++
++/* everything the SRAM code reads or writes: it lives in SRAM */
++struct dmc_sram {
++	void __iomem *pctl, *phy, *cru, *grf, *pmu, *noc;
++	u32 freq;
++	u32 slew_up;
++	u32 ticks_per_us;
++	u32 fbdiv, postdiv1, postdiv2;
++	u32 timing[T_NUM];
++	u32 noc_timing;
++	u32 mr[4];
++	u32 dll_status;
++	u32 sr_idle;
++	u32 pd_idle;
++	u32 idle_status;	/* GRF_SOC_STATUS0 when the idle handshake timed out */
++	u32 deidle_fail;	/* the ports did not leave idle within 10 ms after the switch */
++	u32 clk_gate[CRU_NGATES];
++	u32 step;
++	u32 release;
++	struct dmc_park park[NR_CPUS];
++};
++
++/* the stopper works' protocol state (in DRAM: all of it is used before the DRAM goes away) */
++enum { PARK_WAIT, PARK_GO, PARK_ABORT };
++
++/* what one park (and switch) did: for the log and the test kit */
++struct dmc_cycle {
++	const char *phase;	/* where it failed: "report in", "park", "release", "busy" */
++	struct cpumask others;	/* the CPUs that were to park */
++	struct cpumask late;	/* the ones that missed the phase's deadline */
++	u32 arrive_us, park_us, window_us, release_us;
++	u32 true_in_us;		/* the last CPU's report-in time by its own stamp (arrive_us is CPU 0's view) */
++	/* CPU 0's side, CNTPCT ticks (#456) */
++	u32 tpu;		/* ticks per microsecond */
++	u32 t0, t_go;		/* the works queued, "go" */
++	u32 t_scan, t_miss;	/* its last scan of the flags, and when it called the miss */
++	u32 gap_in, gap_park;	/* its longest time away between two polls, per phase */
++	u32 gap_in_irqs, gap_park_irqs;	/* the interrupts it took in that time */
++	struct dmc_park park[NR_CPUS];	/* the SRAM stamps, copied after a miss */
++};
++
++#ifdef CONFIG_ROCKCHIP_RK3128_DMC_TEST
++enum { KIT_PARK, KIT_RELOCK, KIT_IPI, KIT_IRQPARK, KIT_N };
++
++/* the test kit's counts, one set per kind of cycle */
++struct dmc_kit {
++	u32 runs, ok, busy, late_arrive, late_park, late_release, bad;
++	u32 false_park;		/* park misses where every late CPU had parked before CPU 0 called it */
++	u32 max_arrive_us, max_true_in_us, max_park_us, max_window_us, max_release_us;
++	u32 max_gap0_us;	/* CPU 0's longest time away between two polls in the park phase */
++	char last[96];		/* the last failure */
++};
++
++#define KIT_NIRQ	96	/* CPU 0's interrupt counts kept per cycle, for the log after a miss */
++#endif
++
++struct rk3128_dmc {
++	struct device *dev;
++	void __iomem *pctl, *phy, *cru, *grf, *pmu, *noc, *sram;
++	struct regulator *logic;
++	void (*sram_run)(void *arg);
++	void (*sram_park)(void *arg);
++	u32 cap_per_die;
++	u32 dll_status;
++	struct mutex lock;	/* one switch (or kit run) at a time */
++	struct dentry *dbg;
++	/* the park protocol (#456); the works must outlive a CPU that never runs its own */
++	struct cpu_stop_work stop_work[NR_CPUS];
++	int stop_seen[NR_CPUS];	/* SEEN_*: where each CPU's work is */
++	int stop_state;		/* PARK_*, read by the works */
++	bool ipi_stale;		/* a kit IPI park timed out: its IPI may still come, nothing more runs */
++#ifdef CONFIG_ROCKCHIP_RK3128_DMC_TEST
++	struct dmc_kit kit[KIT_N];
++	u32 kirq[KIT_NIRQ];	/* CPU 0's count per interrupt at the start of the cycle */
++	u32 ksirq[NR_SOFTIRQS];	/* and per softirq */
++#endif
++};
++
++static int boot_mhz = -1;
++module_param(boot_mhz, int, 0444);
++MODULE_PARM_DESC(boot_mhz,
++		 "DDR rate to switch to at probe (MHz; 0 = leave the loader's; -1 = the node's rockchip,boot-mhz)");
++
++/* test knobs (#387): the vendor's values by default; the loader runs pd_idle 0 and tRFC 350 ns */
++static uint pd_idle = PD_IDLE;
++module_param(pd_idle, uint, 0444);
++MODULE_PARM_DESC(pd_idle, "MCFG pd_idle after a switch (DDR cycles, 0 = no auto power-down; default the vendor's 0x40)");
++static uint trfc_ns;
++module_param(trfc_ns, uint, 0444);
++MODULE_PARM_DESC(trfc_ns, "tRFC in ns (0 = the vendor's table by die size; never below it)");
++
++/* ---- runs from SRAM: no globals, no calls, everything inline --------------------------- */
++
++#define R(b, o)		readl_relaxed((b) + (o))
++#define W(v, b, o)	writel_relaxed((v), (b) + (o))
++
++static __always_inline u64 sram_cnt(void)
++{
++	u64 v;
++
++	isb();
++	asm volatile("mrrc p15, 1, %Q0, %R0, c14" : "=r" (v));
++	return v;
++}
++
++/*
++ * The physical count (CNTPCT), the one the kernel's clock reads here (the timer node has
++ * arm,cpu-registers-not-fw-configured: the secure physical timer). The virtual count above
++ * is CNTPCT minus a per-CPU CNTVOFF that nothing programs on this board (the kernel starts
++ * in secure SVC), so it differs between CPUs by seconds: fine for one CPU's delays, useless
++ * to compare CPUs. The park stamps use this one (#456).
++ */
++static __always_inline u64 sram_pcnt(void)
++{
++	u64 v;
++
++	isb();
++	asm volatile("mrrc p15, 0, %Q0, %R0, c14" : "=r" (v));
++	return v;
++}
++
++static __always_inline void sram_udelay(struct dmc_sram *s, u32 us)
++{
++	u64 end = sram_cnt() + (u64)us * s->ticks_per_us;
++
++	while (sram_cnt() < end)
++		;
++}
++
++static __always_inline u32 sram_stat(struct dmc_sram *s)
++{
++	return R(s->pctl, PCTL_STAT) & 7;
++}
++
++static __always_inline void sram_sctl(struct dmc_sram *s, u32 v)
++{
++	W(v, s->pctl, PCTL_SCTL);
++	dsb();
++}
++
++static __always_inline void sram_to_lowpower(struct dmc_sram *s)
++{
++	u32 v;
++
++	for (;;) {
++		v = sram_stat(s);
++		if (v == ST_LOW_POWER)
++			break;
++		if (v == ST_INIT_MEM) {
++			sram_sctl(s, SCTL_CFG);
++			while (sram_stat(s) != ST_CONFIG)
++				;
++			v = ST_CONFIG;
++		}
++		if (v == ST_CONFIG) {
++			sram_sctl(s, SCTL_GO);
++			while (sram_stat(s) != ST_ACCESS)
++				;
++			v = ST_ACCESS;
++		}
++		if (v == ST_ACCESS) {
++			sram_sctl(s, SCTL_SLEEP);
++			while (sram_stat(s) != ST_LOW_POWER)
++				;
++		}
++	}
++}
++
++static __always_inline int sram_access_or_lp(struct dmc_sram *s)
++{
++	u32 st = R(s->pctl, PCTL_STAT);
++
++	return (st & 7) == ST_ACCESS || (((st >> 4) & 7) == 1 && (st & 7) == ST_LOW_POWER);
++}
++
++static __always_inline void sram_to_access(struct dmc_sram *s)
++{
++	u32 v;
++
++	W((R(s->pctl, PCTL_MCFG1) & 0xffffff00) | s->sr_idle | BIT(31), s->pctl, PCTL_MCFG1);
++	W((R(s->pctl, PCTL_MCFG) & 0xffff00ff) | ((s->pd_idle & 0xff) << 8), s->pctl, PCTL_MCFG);
++	for (;;) {
++		if (sram_access_or_lp(s))
++			break;
++		v = sram_stat(s);
++		if (v == ST_LOW_POWER) {
++			sram_sctl(s, SCTL_WAKEUP);
++			while (sram_stat(s) != ST_ACCESS)
++				;
++			continue;
++		}
++		if (v == ST_INIT_MEM) {
++			sram_sctl(s, SCTL_CFG);
++			while (sram_stat(s) != ST_CONFIG)
++				;
++			v = ST_CONFIG;
++		}
++		if (v == ST_CONFIG) {
++			sram_sctl(s, SCTL_GO);
++			while (!sram_access_or_lp(s))
++				;
++		}
++	}
++	/* hardware wakeup on: auto self-refresh if sr_idle */
++	W(BIT(16) | 0, s->grf, GRF_SOC_CON2);
++}
++
++static __always_inline void sram_to_config(struct dmc_sram *s)
++{
++	u32 v;
++
++	W(BIT(16) | 1, s->grf, GRF_SOC_CON2);	/* hardware wakeup off: no auto self-refresh */
++	for (;;) {
++		v = sram_stat(s);
++		if (v == ST_CONFIG)
++			break;
++		if (v == ST_LOW_POWER)
++			sram_sctl(s, SCTL_WAKEUP);
++		if (v == ST_LOW_POWER || v == ST_ACCESS || v == ST_INIT_MEM)
++			sram_sctl(s, SCTL_CFG);
++	}
++}
++
++static __always_inline void sram_cmd(struct dmc_sram *s, u32 cmd, u32 arg)
++{
++	W(MCMD_START | (3 << 20) | arg | cmd, s->pctl, PCTL_MCMD);
++	dsb();
++	while (R(s->pctl, PCTL_MCMD) & MCMD_START)
++		;
++}
++
++static __always_inline void sram_data_training(struct dmc_sram *s)
++{
++	u32 trefi = R(s->pctl, PCTL_TREFI);
++	u32 bw;
++
++	W(0, s->pctl, PCTL_TREFI);
++	bw = (R(s->phy, PHY_REG(0x0)) >> 4) & 0xf;
++	W(R(s->phy, PHY_REG(0x2)) | 1, s->phy, PHY_REG(0x2));	/* auto calibration */
++	dsb();
++	sram_udelay(s, 1);
++	while ((R(s->phy, PHY_REG(0xff)) & 0xf) != bw)
++		;
++	W(R(s->phy, PHY_REG(0x2)) & ~1, s->phy, PHY_REG(0x2));
++	sram_cmd(s, MCMD_PREA, 0);
++	sram_cmd(s, MCMD_REF, 0);
++	sram_cmd(s, MCMD_REF, 0);
++	W(trefi, s->pctl, PCTL_TREFI);
++}
++
++static __always_inline void sram_set_dll_bypass(struct dmc_sram *s)
++{
++	u32 phase = s->freq < 350 ? 3 : (s->freq < 600 ? 2 : 1);
++
++	W(phase, s->phy, PHY_REG(0x28));	/* RX DLL phase */
++	W(phase, s->phy, PHY_REG(0x38));
++	W(phase, s->phy, PHY_REG(0x48));
++	W(phase, s->phy, PHY_REG(0x58));
++	if (s->freq <= PHY_DLL_DISABLE_FREQ)
++		W(R(s->phy, PHY_REGDLL) | 0x1f, s->phy, PHY_REGDLL);	/* TX DLL bypass */
++	else
++		W(R(s->phy, PHY_REGDLL) & ~0x1f, s->phy, PHY_REGDLL);
++	dsb();
++}
++
++static __always_inline void sram_update_timing(struct dmc_sram *s)
++{
++	int i;
++
++	for (i = 0; i < T_NUM; i++)
++		W(s->timing[i], s->pctl, PCTL_TOGCNT1U + i * 4);
++	W((s->timing[T_TCL] << 4) | s->timing[T_TAL], s->phy, PHY_REG(0xb));
++	W(s->timing[T_TCWL], s->phy, PHY_REG(0xc));
++	W(s->noc_timing, s->noc, NOC_DDRTIMING);
++	/* DDR3: BL8, tFAW 5 x tRRD, slow power-down exit, power-down type 1 */
++	W((R(s->pctl, PCTL_MCFG) & ~(BIT(0) | (3 << 18) | BIT(17) | BIT(16))) |
++	  BIT(0) | ((5 - 4) << 18) | BIT(16), s->pctl, PCTL_MCFG);
++	W(R(s->pctl, PCTL_TAL) + R(s->pctl, PCTL_TCL) - 3, s->pctl, PCTL_DFITRDDATAEN);
++	W(R(s->pctl, PCTL_TCWL) - 1, s->pctl, PCTL_DFITPHYWRLAT);
++}
++
++static __always_inline void sram_update_mr(struct dmc_sram *s)
++{
++	if (s->freq > DLL_DISABLE_FREQ) {
++		if (s->dll_status == DDR3_DLL_DISABLE) {	/* DRAM DLL off -> on */
++			sram_cmd(s, MCMD_MRS, MCMD_BANK(1) | MCMD_ADDR(s->mr[1]));
++			sram_cmd(s, MCMD_MRS, MCMD_BANK(0) | MCMD_ADDR(s->mr[0] | DDR3_DLL_RESET));
++			sram_udelay(s, 2);
++			sram_cmd(s, MCMD_MRS, MCMD_BANK(0) | MCMD_ADDR(s->mr[0]));
++			s->dll_status = DDR3_DLL_ENABLE;
++		} else {
++			sram_cmd(s, MCMD_MRS, MCMD_BANK(1) | MCMD_ADDR(s->mr[1]));
++			sram_cmd(s, MCMD_MRS, MCMD_BANK(0) | MCMD_ADDR(s->mr[0]));
++		}
++	} else {
++		sram_cmd(s, MCMD_MRS, MCMD_BANK(1) | MCMD_ADDR(s->mr[1] | DDR3_DLL_DISABLE));
++		sram_cmd(s, MCMD_MRS, MCMD_BANK(0) | MCMD_ADDR(s->mr[0]));
++		s->dll_status = DDR3_DLL_DISABLE;
++	}
++	sram_cmd(s, MCMD_MRS, MCMD_BANK(2) | MCMD_ADDR(s->mr[2]));
++}
++
++static __always_inline void sram_update_odt(struct dmc_sram *s)
++{
++	u32 odt = s->freq <= PHY_ODT_DISABLE_FREQ ? 0 : PHY_RTT_216OHM;
++	u32 ron = (PHY_RON_44OHM << 4) | PHY_RON_44OHM;
++
++	odt |= odt << 4;
++	W(odt, s->phy, PHY_REG(0x21));		/* DQS0..3 ODT */
++	W(odt, s->phy, PHY_REG(0x31));
++	W(odt, s->phy, PHY_REG(0x41));
++	W(odt, s->phy, PHY_REG(0x51));
++	W(ron, s->phy, PHY_REG(0x11));		/* command drive */
++	W(ron, s->phy, PHY_REG(0x16));		/* clock drive */
++	W(ron, s->phy, PHY_REG(0x20));		/* DQS0..3 drive */
++	W(ron, s->phy, PHY_REG(0x30));
++	W(ron, s->phy, PHY_REG(0x40));
++	W(ron, s->phy, PHY_REG(0x50));
++	dsb();
++}
++
++/*
++ * idle (on) or release (off) the NoC ports of the powered domains: peri, vio, vpu, gpu.
++ * Bounded (the vendor waits forever): on a timeout the requests are released again and it
++ * returns nonzero with GRF_SOC_STATUS0 in idle_status.
++ */
++static __always_inline int sram_idle_ports(struct dmc_sram *s, int on)
++{
++	u32 pd = R(s->pmu, PMU_PWRDN_ST);
++	u32 req = BIT(12), ack = BIT(23);
++	u64 end;
++	int i, timeout = 0;
++
++	for (i = 0; i < CRU_NGATES; i++)
++		s->clk_gate[i] = R(s->cru, CRU_CLKGATE(i));
++	for (i = 0; i < CRU_NGATES; i++)	/* every clock on, or the handshake cannot finish */
++		W(0xffff0000, s->cru, CRU_CLKGATE(i));
++	if (!(pd & BIT(3))) {
++		req |= BIT(11);
++		ack |= BIT(24);
++	}
++	if (!(pd & BIT(2))) {
++		req |= BIT(10);
++		ack |= BIT(25);
++	}
++	if (!(pd & BIT(1))) {
++		req |= BIT(9);
++		ack |= BIT(26);
++	}
++	W((req << 16) | (on ? req : 0), s->grf, GRF_SOC_CON2);
++	dsb();
++	end = sram_cnt() + (u64)IDLE_TIMEOUT_US * s->ticks_per_us;
++	while ((R(s->grf, GRF_SOC_STATUS0) & ack) != (on ? ack : 0)) {
++		if (sram_cnt() > end) {
++			timeout = 1;
++			s->idle_status = R(s->grf, GRF_SOC_STATUS0);
++			break;
++		}
++	}
++	if (timeout && on) {
++		/* give the ports back and wait (bounded) for them to leave idle */
++		W(req << 16, s->grf, GRF_SOC_CON2);
++		dsb();
++		end = sram_cnt() + (u64)IDLE_TIMEOUT_US * s->ticks_per_us;
++		while ((R(s->grf, GRF_SOC_STATUS0) & ack) && sram_cnt() < end)
++			;
++	}
++	for (i = 0; i < CRU_NGATES; i++)
++		W(s->clk_gate[i] | 0xffff0000, s->cru, CRU_CLKGATE(i));
++	return timeout;
++}
++
++static __always_inline void sram_set_pll(struct dmc_sram *s)
++{
++	int n;
++
++	W(BIT(4 + 16) | 0, s->cru, CRU_MODE_CON);			/* DPLL slow mode */
++	W((0xfff << 16) | s->fbdiv | (0x7 << 28) | (s->postdiv1 << 12), s->cru, CRU_DPLL_CON0);
++	W((0x3f << 16) | 1 | (0x7 << 22) | (s->postdiv2 << 6) | (0x10001 << 12),
++	  s->cru, CRU_DPLL_CON1);					/* refdiv 1, integer */
++	sram_udelay(s, 1);
++	for (n = 1000; n > 0; n--) {
++		sram_udelay(s, 1);
++		if (R(s->cru, CRU_DPLL_CON1) & DPLL_LOCK)
++			break;
++	}
++	W((0x3 << 16) | 0, s->cru, CRU_CLKSEL26);		/* clk_ddr_src = clk_ddrphy */
++	W(BIT(4 + 16) | BIT(4), s->cru, CRU_MODE_CON);		/* DPLL normal mode */
++}
++
++static noinline notrace __used __aligned(8) void rk3128_dmc_sram_run(void *arg)
++{
++	struct dmc_sram *s = arg;
++	u32 new1u, new100n;
++
++	s->step = 1;
++	if (sram_idle_ports(s, 1)) {
++		s->step = STEP_IDLE_TIMEOUT;	/* nothing touched yet: give up */
++		return;
++	}
++	s->step = 2;
++	sram_to_config(s);
++	if (s->slew_up) {
++		/* up: the new timings and mode registers at the old clock (old toggle counts) */
++		new1u = s->timing[T_TOGCNT1U];
++		new100n = s->timing[T_TOGCNT100N];
++		s->timing[T_TOGCNT1U] = R(s->pctl, PCTL_TOGCNT1U);
++		s->timing[T_TOGCNT100N] = R(s->pctl, PCTL_TOGCNT100N);
++		sram_update_timing(s);
++		sram_update_mr(s);
++		s->timing[T_TOGCNT1U] = new1u;
++		s->timing[T_TOGCNT100N] = new100n;
++	} else {
++		W(s->timing[T_TOGCNT100N], s->pctl, PCTL_TOGCNT100N);
++		W(s->timing[T_TOGCNT1U], s->pctl, PCTL_TOGCNT1U);
++	}
++	W(0, s->pctl, PCTL_TZQCSI);
++	s->step = 3;
++	sram_to_lowpower(s);					/* self-refresh */
++	W(GRF_DDR_LP_EN, s->grf, GRF_SOC_CON2);
++	W(R(s->phy, PHY_REG(0x0)) & ~(3 << 2), s->phy, PHY_REG(0x0));	/* PHY soft reset */
++	dsb();
++	s->step = 4;
++	sram_set_pll(s);
++	sram_set_dll_bypass(s);
++	/* analogue (DLL) out of reset */
++	W(R(s->phy, PHY_REG(0x0)) | BIT(2), s->phy, PHY_REG(0x0));
++	sram_udelay(s, 5);
++	W(R(s->phy, PHY_REG(0x0)) | BIT(3), s->phy, PHY_REG(0x0));	/* then digital */
++	W(GRF_DDR_LP_DIS, s->grf, GRF_SOC_CON2);
++	dsb();
++	s->step = 5;
++	sram_update_odt(s);
++	sram_to_config(s);
++	if (s->slew_up) {
++		W(s->timing[T_TOGCNT100N], s->pctl, PCTL_TOGCNT100N);
++		W(s->timing[T_TOGCNT1U], s->pctl, PCTL_TOGCNT1U);
++		W(s->timing[T_TZQCSI], s->pctl, PCTL_TZQCSI);
++	} else {
++		sram_update_timing(s);
++		sram_update_mr(s);
++	}
++	s->step = 6;
++	sram_data_training(s);
++	s->step = 7;
++	sram_to_access(s);
++	s->deidle_fail = sram_idle_ports(s, 0);	/* the vendor waits forever here; reported, not ignored */
++	s->step = 8;
++}
++
++/* a parked CPU: spins in SRAM until CPU 0 is done (no stack use beyond its own frame) */
++static noinline notrace __used __aligned(8) void rk3128_dmc_sram_park(void *arg)
++{
++	struct dmc_park *k = arg;
++	volatile u32 *release = (void *)((unsigned long)k & ~(SRAM_SIZE - 1UL)) + k->release_off;
++
++	WRITE_ONCE(k->t_park, (u32)sram_pcnt());
++	WRITE_ONCE(k->parked, 1);
++	dsb();
++	while (!*release)
++		;
++	WRITE_ONCE(k->t_unpark, (u32)sram_pcnt());
++	WRITE_ONCE(k->parked, 0);
++	dsb();
++}
++
++/* ---- the kernel side ----------------------------------------------------------------- */
++
++/* DDR3_DEFAULT row: tCK buckets <=330, <=400, <=533, more */
++static const u32 ddr3_default_cl_cwl[4] = {
++	(6 << 16) | 5, (6 << 16) | 5, (8 << 16) | 6, (10 << 16) | 7
++};
++
++#define DDR3_DEFAULT_TRC	53	/* ns */
++
++static u32 dmc_pll(u32 mhz, u32 *fb, u32 *pd1, u32 *pd2)
++{
++	*pd1 = mhz <= 150 ? 6 : mhz <= 200 ? 4 : mhz <= 300 ? 3 : mhz <= 450 ? 2 : 1;
++	*pd2 = 1;
++	*fb = mhz * 2 * *pd1 * *pd2 / 24;	/* refdiv 1; the DDR clock is the PLL output / 2 */
++	return 24 * *fb / (2 * *pd1 * *pd2);
++}
++
++static u32 dmc_cur_mhz(struct rk3128_dmc *dmc)
++{
++	u32 c0 = readl(dmc->cru + CRU_DPLL_CON0), c1 = readl(dmc->cru + CRU_DPLL_CON1);
++	u32 fb = c0 & 0xfff, pd1 = (c0 >> 12) & 7, ref = c1 & 0x3f, pd2 = (c1 >> 6) & 7;
++
++	if (!(readl(dmc->cru + CRU_MODE_CON) & BIT(4)) || !fb || !pd1 || !ref || !pd2)
++		return 0;
++	return 24 * fb / (ref * pd1 * pd2 * 2);
++}
++
++#define NS(ns, mhz)	(((ns) * (mhz) + 999) / 1000)
++#define NS5(ns, mhz)	(((ns) * (mhz) + ((mhz) >> 1) + 999) / 1000)	/* (ns + 0.5) */
++
++/* ddr_get_parameter() of the vendor, DDR3 */
++static void dmc_timing(struct rk3128_dmc *dmc, u32 mhz, struct dmc_sram *s)
++{
++	u32 *t = s->timing;
++	u32 cl, cwl, tmp, trfc, twtr, trtp;
++	u32 bucket = mhz <= 330 ? 0 : mhz <= 400 ? 1 : mhz <= 533 ? 2 : 3;
++	u32 act2act, rd2miss, wr2miss, rd2wr, wr2rd;
++
++	memset(t, 0, sizeof(s->timing));
++	t[T_TOGCNT1U] = mhz;
++	t[T_TOGCNT100N] = mhz / 10;
++	t[T_TINIT] = 200;
++	t[T_TRSTH] = 500;
++	if (mhz <= DLL_DISABLE_FREQ) {
++		cl = 6;
++		cwl = 6;
++	} else {
++		cl = ddr3_default_cl_cwl[bucket] >> 16;
++		cwl = ddr3_default_cl_cwl[bucket] & 0xff;
++	}
++	/* DS 40 ohm; Rtt_Nom 120 ohm above 333 */
++	s->mr[1] = mhz <= ODT_DISABLE_FREQ ? 0 : BIT(6);
++	s->mr[2] = ((cwl - 5) & 7) << 3;
++	s->mr[3] = 0;
++	t[T_TREFI] = 78;			/* 7.8 us in 100 ns */
++	t[T_TMRD] = 4;
++	tmp = dmc->cap_per_die;
++	trfc = tmp <= 0x4000000 ? 90 : tmp <= 0x8000000 ? 110 : tmp <= 0x10000000 ? 160 :
++	       tmp <= 0x20000000 ? 300 : 350;
++	if (trfc_ns > trfc)
++		trfc = trfc_ns;	/* test knob: longer only */
++	t[T_TRFC] = NS(trfc, mhz);
++	t[T_TEXSR] = 512;			/* tDLLK */
++	t[T_TRP] = cl;
++	wr2miss = (cwl + NS(15, mhz) + cl + cl) & 0x3f;
++	t[T_TRC] = NS(DDR3_DEFAULT_TRC, mhz) & 0x3f;
++	act2act = t[T_TRC];
++	t[T_TRTW] = cl + 2 - cwl;
++	rd2wr = (cl + 2 - cwl) & 0x1f;
++	t[T_TAL] = 0;
++	t[T_TCL] = cl;
++	t[T_TCWL] = cwl;
++	t[T_TRAS] = NS5(37, mhz) & 0x3f;
++	t[T_TRCD] = cl;
++	t[T_TRRD] = max_t(u32, NS(10, mhz), 4) & 0xf;
++	trtp = max_t(u32, NS5(7, mhz), 4);
++	t[T_TRTP] = trtp & 0xf;
++	rd2miss = (trtp + cl + cl - 4) & 0x3f;	/* BL8 / 2 */
++	tmp = NS(15, mhz);
++	t[T_TWR] = tmp & 0x1f;
++	tmp = tmp < 9 ? tmp - 4 : tmp >> 1;
++	s->mr[0] = (((cl - 4) & 7) << 4) | (((cl - 4) & 8) >> 1) | ((tmp & 7) << 9);	/* BL8 */
++	twtr = max_t(u32, NS5(7, mhz), 4);
++	t[T_TWTR] = twtr & 0xf;
++	wr2rd = (twtr + cwl) & 0x1f;
++	t[T_TXP] = max_t(u32, NS5(7, mhz), 3) & 0x7;
++	t[T_TXPDLL] = max_t(u32, NS(24, mhz), 10) & 0x3f;
++	t[T_TZQCS] = max_t(u32, NS(80, mhz), 64) & 0x7f;
++	t[T_TZQCSI] = 10000;
++	t[T_TDQS] = 1;
++	tmp = max_t(u32, NS(10, mhz), 5) & 0x1f;
++	t[T_TCKSRE] = tmp;
++	t[T_TCKSRX] = tmp;
++	tmp = max_t(u32, mhz >= 533 ? NS(6, mhz) : NS5(7, mhz), 3);
++	t[T_TCKE] = tmp & 0x7;
++	t[T_TCKESR] = (tmp + 1) & 0xf;
++	t[T_TMOD] = max_t(u32, NS(15, mhz), 12) & 0x1f;
++	t[T_TRSTL] = NS(100, mhz) & 0x7f;
++	t[T_TZQCL] = max_t(u32, NS(320, mhz), 256) & 0x3ff;
++	t[T_TMRR] = 0;
++	t[T_TDPD] = 0;
++	/*
++	 * NoC DdrTiming: ActToAct 5:0, RdToMiss 11:6, WrToMiss 17:12, BurstLen 20:18,
++	 * RdToWr 25:21, WrToRd 30:26
++	 */
++	s->noc_timing = act2act | (rd2miss << 6) | (wr2miss << 12) | (4 << 18) | (rd2wr << 21) |
++			(wr2rd << 26);
++}
++
++/* ---- stopping the other CPUs (#456) ---------------------------------------------------- */
++
++/* a CPU's stopper work: none queued, queued and not running yet, running (reported in) */
++enum { SEEN_IDLE, SEEN_QUEUED, SEEN_IN };
++
++/* what dmc_poll() waits for */
++enum { SCAN_IN, SCAN_PARKED, SCAN_UNPARKED, SCAN_OUT };
++
++/* the physical count's low word, the same on every CPU: the stamps and deadlines (< 178 s) */
++static __always_inline u32 dmc_now(void)
++{
++	return (u32)sram_pcnt();
++}
++
++/* one of CPU 0's clock reads in a poll: the longest time between two, and its interrupts */
++static __always_inline void dmc_away(u32 t, u32 *prev, unsigned long irqs,
++				     unsigned long *prev_irqs, u32 *gap, u32 *gap_irqs)
++{
++	if (t - *prev > *gap) {
++		*gap = t - *prev;
++		*gap_irqs = irqs - *prev_irqs;
++	}
++	*prev = t;
++	*prev_irqs = irqs;
++}
++
++/* the CPUs of @in whose stopper work is not in state @want, into @out */
++static void dmc_seen_not(struct rk3128_dmc *dmc, const struct cpumask *in, int want,
++			 struct cpumask *out)
++{
++	unsigned int cpu;
++
++	cpumask_clear(out);
++	for_each_cpu(cpu, in)
++		/* pairs with the work's release: what it did before is visible */
++		if (smp_load_acquire(&dmc->stop_seen[cpu]) != want)
++			cpumask_set_cpu(cpu, out);
++}
++
++/* the CPUs of c->others not in state @what yet, into c->late */
++static void dmc_scan(struct rk3128_dmc *dmc, struct dmc_cycle *c, int what)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	unsigned int cpu;
++
++	if (what == SCAN_IN || what == SCAN_OUT) {
++		dmc_seen_not(dmc, &c->others, what == SCAN_IN ? SEEN_IN : SEEN_IDLE, &c->late);
++		return;
++	}
++	cpumask_clear(&c->late);
++	for_each_cpu(cpu, &c->others)
++		if (readl(&s->park[cpu].parked) != (what == SCAN_PARKED))
++			cpumask_set_cpu(cpu, &c->late);
++}
++
++/*
++ * Poll until no CPU of c->others is late for @what, or @timeout_us after @t0. The clock is read
++ * BEFORE each scan, so a miss means a scan made after the deadline still found a CPU late. The
++ * 15db184 loop read it after the scan: CPU 0 scanned (a CPU still on its way, 20 us after
++ * "go"), took an interrupt that kept it away for more than 10 ms, read the clock and called the
++ * miss on a CPU that had parked long before (#456, attempts 456-1/456-2). @legacy keeps that
++ * order for the test kit's "irqpark" A/B. Records CPU 0's longest time away between two polls
++ * and the interrupts it took in that time; c->t_scan is the last scan, c->t_miss the miss.
++ */
++static int dmc_poll(struct rk3128_dmc *dmc, struct dmc_cycle *c, int what, u32 t0,
++		    u32 timeout_us, bool legacy, u32 *gap, u32 *gap_irqs)
++{
++	unsigned int self = smp_processor_id();
++	u32 limit = timeout_us * c->tpu, t, prev = t0;
++	unsigned long prev_irqs = kstat_cpu_irqs_sum(self);
++	bool expired;
++
++	for (;;) {
++		t = dmc_now();
++		dmc_away(t, &prev, kstat_cpu_irqs_sum(self), &prev_irqs, gap, gap_irqs);
++		expired = t - t0 > limit;
++		dmc_scan(dmc, c, what);
++		c->t_scan = dmc_now();
++		/* an interrupt taken in the scan shows here (the flags were read before it) */
++		dmc_away(c->t_scan, &prev, kstat_cpu_irqs_sum(self), &prev_irqs, gap, gap_irqs);
++		if (cpumask_empty(&c->late))
++			return 0;
++		if (legacy)
++			expired = dmc_now() - t0 > limit;	/* the clock after the scan */
++		if (expired) {
++			c->t_miss = dmc_now();
++			dmc_away(c->t_miss, &prev, kstat_cpu_irqs_sum(self), &prev_irqs, gap,
++				 gap_irqs);
++			return -ETIMEDOUT;
++		}
++		cpu_relax();
++	}
++}
++
++/*
++ * Each other CPU's stopper work: it runs at the CPU's next scheduling point (so the CPU holds
++ * no spinlock and is in no driver's register sequence), reports in and waits with interrupts
++ * on (cross-calls still get answered) until every CPU has. Then it parks in SRAM with
++ * interrupts off and its L1 data cache cleaned, or returns at once if the attempt was given up.
++ * It stamps each step into its SRAM slot (dmc_miss_log() prints them after a miss).
++ */
++static int dmc_stop_fn(void *arg)
++{
++	struct rk3128_dmc *dmc = arg;
++	unsigned int cpu = smp_processor_id();
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	struct dmc_park *k = &s->park[cpu];
++	unsigned long flags, irqs, prev_irqs = kstat_cpu_irqs_sum(cpu);
++	u32 t, prev, gap = 0, gap_irqs = 0;
++	int st;
++
++	prev = dmc_now();
++	writel_relaxed(prev, &k->t_in);
++	smp_store_release(&dmc->stop_seen[cpu], SEEN_IN);	/* read by dmc_seen_not() */
++	while ((st = smp_load_acquire(&dmc->stop_state)) == PARK_WAIT) {	/* CPU 0's release */
++		t = dmc_now();
++		irqs = kstat_cpu_irqs_sum(cpu);
++		if (t - prev > gap) {
++			gap = t - prev;
++			gap_irqs = irqs - prev_irqs;
++		}
++		prev = t;
++		prev_irqs = irqs;
++		cpu_relax();
++	}
++	writel_relaxed(dmc_now(), &k->t_go);
++	writel_relaxed(gap, &k->gap);
++	writel_relaxed(gap_irqs, &k->gap_irqs);
++	if (st == PARK_GO) {
++		local_irq_save(flags);
++		/* nothing of this CPU's may be written back to the DRAM while it is in self-refresh */
++		flush_cache_louis();
++		writel_relaxed(dmc_now(), &k->t_off);
++		call_with_stack(dmc->sram_park, k, dmc->sram + SRAM_PARK_STACK(cpu));
++		local_irq_restore(flags);
++	}
++	smp_store_release(&dmc->stop_seen[cpu], SEEN_IDLE);	/* last access to dmc's protocol state */
++	return 0;
++}
++
++/*
++ * Reset the SRAM park slots and the protocol state for a new attempt, and fill c->others with
++ * every other online CPU. -EBUSY (c->late: who) while a work of an earlier attempt has still
++ * not returned, or after a kit IPI park timed out: a late one would park on the new flags.
++ */
++static int dmc_park_prepare(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	unsigned int self = smp_processor_id(), cpu;
++
++	memset(c, 0, sizeof(*c));
++	c->tpu = DIV_ROUND_UP(arch_timer_get_rate(), 1000000);
++	dmc_seen_not(dmc, cpu_possible_mask, SEEN_IDLE, &c->late);
++	if (!cpumask_empty(&c->late) || dmc->ipi_stale) {
++		c->phase = "busy";
++		return -EBUSY;
++	}
++	for (cpu = 0; cpu < NR_CPUS; cpu++) {
++		memset_io(&s->park[cpu], 0, sizeof(s->park[cpu]));
++		writel((unsigned long)&s->release & (SRAM_SIZE - 1), &s->park[cpu].release_off);
++	}
++	writel(0, &s->release);
++	WRITE_ONCE(dmc->stop_state, PARK_WAIT);
++	for_each_online_cpu(cpu)
++		if (cpu != self)
++			cpumask_set_cpu(cpu, &c->others);
++	return 0;
++}
++
++/*
++ * Queue every other online CPU's stopper work and wait (interrupts on, 100 ms) until each has
++ * reported in. Called on CPU 0 with preemption off. 0: they all wait for "go" with interrupts
++ * on. Otherwise none parks, and c->phase and c->late say what failed and who.
++ */
++static int dmc_park_arrive(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	unsigned int cpu;
++	int ret;
++
++	ret = dmc_park_prepare(dmc, c);
++	if (ret)
++		return ret;
++	for_each_cpu(cpu, &c->others)
++		WRITE_ONCE(dmc->stop_seen[cpu], SEEN_QUEUED);
++	smp_wmb();	/* the flags before any work can run */
++	c->t0 = dmc_now();
++	for_each_cpu(cpu, &c->others)
++		stop_one_cpu_nowait(cpu, dmc_stop_fn, dmc, &dmc->stop_work[cpu]);
++	ret = dmc_poll(dmc, c, SCAN_IN, c->t0, ARRIVE_TIMEOUT_US, false, &c->gap_in,
++		       &c->gap_in_irqs);
++	if (ret) {
++		/* the ones in return at once; the late ones return when they come */
++		c->phase = "report in";
++		smp_store_release(&dmc->stop_state, PARK_ABORT);	/* read by dmc_stop_fn() */
++		return ret;
++	}
++	c->arrive_us = (c->t_scan - c->t0) / c->tpu;
++	for_each_cpu(cpu, &c->others)
++		c->true_in_us = max(c->true_in_us, (readl(&s->park[cpu].t_in) - c->t0) / c->tpu);
++	return 0;
++}
++
++/*
++ * Go: each other CPU turns interrupts off, cleans its L1 and spins in SRAM (10 ms). Called on
++ * CPU 0 with interrupts OFF, as multi_cpu_stop() turns them off on the CPU that runs the work
++ * in the same step as on the others: nothing takes CPU 0 away between "go" and its scans.
++ * The test kit's "irqpark" calls it with them on and @legacy, as 15db184 did. 0: they all spin
++ * in SRAM. Otherwise the release is set (a late one comes straight back) and c->late names them.
++ */
++static int dmc_park_go(struct rk3128_dmc *dmc, struct dmc_cycle *c, bool legacy)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	int ret;
++
++	c->t_go = dmc_now();
++	smp_store_release(&dmc->stop_state, PARK_GO);	/* read by dmc_stop_fn() */
++	ret = dmc_poll(dmc, c, SCAN_PARKED, c->t_go, PARK_TIMEOUT_US, legacy, &c->gap_park,
++		       &c->gap_park_irqs);
++	if (ret) {
++		c->phase = "park";
++		writel(1, &s->release);
++		return ret;
++	}
++	c->park_us = (c->t_scan - c->t_go) / c->tpu;
++	return 0;
++}
++
++/*
++ * Let the parked CPUs go and wait (bounded) until every one is back out of its stopper work,
++ * as the vendor's closing smp_call_function(wait_cpu, NULL, true) makes sure (without its
++ * forever). -ETIMEDOUT names the CPUs that did not come back in c->late.
++ */
++static int dmc_release_others(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	u32 t0 = dmc_now(), gap = 0, gap_irqs = 0;
++
++	writel(1, &s->release);
++	if (dmc_poll(dmc, c, SCAN_OUT, t0, UNPARK_TIMEOUT_US, false, &gap, &gap_irqs)) {
++		c->phase = "release";
++		return -ETIMEDOUT;
++	}
++	c->release_us = (c->t_scan - t0) / c->tpu;
++	return 0;
++}
++
++/*
++ * After a missed deadline: wait (bounded, 100 ms) for the late CPUs' works to come back, then
++ * copy every CPU's SRAM stamps, so the log shows when (or whether) the late ones parked. In the
++ * work on CPU 0, interrupts and preemption on.
++ */
++static void dmc_miss_stamps(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	struct cpumask out;
++	int i;
++
++	for (i = 0; i < 100; i++) {
++		dmc_seen_not(dmc, &c->others, SEEN_IDLE, &out);
++		if (cpumask_empty(&out))
++			break;
++		usleep_range(1000, 2000);
++	}
++	memcpy_fromio(c->park, s->park, sizeof(c->park));
++}
++
++/* a park miss where every late CPU had parked before CPU 0 called the miss */
++static bool dmc_miss_false(struct dmc_cycle *c)
++{
++	unsigned int cpu;
++
++	if (!c->phase || strcmp(c->phase, "park") || cpumask_empty(&c->late))
++		return false;
++	for_each_cpu(cpu, &c->late)
++		if (!c->park[cpu].t_park || c->park[cpu].t_park - c->t_go > c->t_miss - c->t_go)
++			return false;
++	return true;
++}
++
++/* " +N" or " -N" microseconds from @base, or " never" for a stamp not written */
++static char *dmc_rel(char *b, u32 t, u32 base, u32 tpu)
++{
++	if (!t)
++		strscpy(b, " never", 16);
++	else
++		snprintf(b, 16, " %+d", (s32)(t - base) / (s32)tpu);
++	return b;
++}
++
++/*
++ * The stamps of a missed deadline, one line for CPU 0 and one per other CPU: microseconds from
++ * "go" (from the works' queueing for a report-in miss), and each CPU's longest time away
++ * between two polls while it waited, with the interrupts it took in that time.
++ */
++static void dmc_miss_log(struct rk3128_dmc *dmc, struct dmc_cycle *c, const char *what)
++{
++	bool in = !strcmp(c->phase, "report in");
++	u32 base = in ? c->t0 : c->t_go, tpu = c->tpu ?: 1;
++	char a[16], b[16], d[16], e[16], f[16];
++	unsigned int cpu;
++
++	dev_info(dmc->dev, "%s: stamps (us from %s): CPU 0 queued%s, go%s, last scan%s, miss%s; away at most %u us (%u irqs) waiting for the report-in, %u us (%u irqs) in the park%s\n",
++		 what, in ? "the queueing" : "go", dmc_rel(a, c->t0, base, tpu),
++		 dmc_rel(b, c->t_go, base, tpu), dmc_rel(d, c->t_scan, base, tpu),
++		 dmc_rel(e, c->t_miss, base, tpu), c->gap_in / tpu, c->gap_in_irqs,
++		 c->gap_park / tpu, c->gap_park_irqs,
++		 dmc_miss_false(c) ? "; every late CPU had parked before the miss" : "");
++	for_each_cpu(cpu, &c->others) {
++		struct dmc_park *k = &c->park[cpu];
++
++		dev_info(dmc->dev, "%s: stamps: CPU %u%s in%s, go%s, irqs off%s, parked%s, out%s; away at most %u us (%u irqs) waiting for go\n",
++			 what, cpu, cpumask_test_cpu(cpu, &c->late) ? " (late)" : "",
++			 dmc_rel(a, k->t_in, base, tpu), dmc_rel(b, k->t_go, base, tpu),
++			 dmc_rel(d, k->t_off, base, tpu), dmc_rel(e, k->t_park, base, tpu),
++			 dmc_rel(f, k->t_unpark, base, tpu), k->gap / tpu, k->gap_irqs);
++	}
++}
++
++#ifdef CONFIG_ROCKCHIP_RK3128_DMC_TEST
++/* CPU 0's count per interrupt and softirq at the start of a cycle (test builds) */
++static void dmc_irq_snap(struct rk3128_dmc *dmc)
++{
++	unsigned int i, nr = irq_get_nr_irqs();
++
++	for (i = 0; i < KIT_NIRQ && i < nr; i++)
++		dmc->kirq[i] = kstat_irqs_cpu(i, 0);
++	for (i = 0; i < NR_SOFTIRQS; i++)
++		dmc->ksirq[i] = kstat_softirqs_cpu(i, 0);
++}
++
++/* at a miss, before anything else runs: the counts become what ran since dmc_irq_snap() */
++static void dmc_irq_mark(struct rk3128_dmc *dmc)
++{
++	unsigned int i, nr = irq_get_nr_irqs();
++
++	for (i = 0; i < KIT_NIRQ && i < nr; i++)
++		dmc->kirq[i] = kstat_irqs_cpu(i, 0) - dmc->kirq[i];
++	for (i = 0; i < NR_SOFTIRQS; i++)
++		dmc->ksirq[i] = kstat_softirqs_cpu(i, 0) - dmc->ksirq[i];
++}
++
++/* which of CPU 0's interrupts and softirqs ran from the cycle's start to the miss (test builds) */
++static void dmc_irq_log(struct rk3128_dmc *dmc, const char *what)
++{
++	unsigned int i;
++	char buf[200];
++	int n = 0;
++
++	for (i = 0; i < KIT_NIRQ && n < sizeof(buf) - 16; i++)
++		if (dmc->kirq[i])
++			n += scnprintf(buf + n, sizeof(buf) - n, " %u:+%u", i, dmc->kirq[i]);
++	n += scnprintf(buf + n, sizeof(buf) - n, "; softirqs");
++	for (i = 0; i < NR_SOFTIRQS && n < sizeof(buf) - 16; i++)
++		if (dmc->ksirq[i])
++			n += scnprintf(buf + n, sizeof(buf) - n, " %s:+%u", softirq_to_name[i],
++				       dmc->ksirq[i]);
++	dev_info(dmc->dev, "%s: CPU 0's interrupts from the cycle's start to the miss (irq:count):%s\n",
++		 what, buf);
++}
++
++/*
++ * The #379 park, kept only for the test kit's A/B (debugfs test "ipipark N"): parked from an
++ * asynchronous IPI, wherever each CPU was when it next had interrupts on. Test builds only.
++ */
++static void dmc_ipi_park_cpu(void *info)
++{
++	struct rk3128_dmc *dmc = info;
++	unsigned int cpu = smp_processor_id();
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++
++	call_with_stack(dmc->sram_park, &s->park[cpu], dmc->sram + SRAM_PARK_STACK(cpu));
++}
++
++static int dmc_ipi_park(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	u32 gap = 0, gap_irqs = 0;
++	int ret;
++
++	ret = dmc_park_prepare(dmc, c);
++	if (ret)
++		return ret;
++	c->t0 = dmc_now();
++	c->t_go = c->t0;
++	smp_call_function(dmc_ipi_park_cpu, dmc, 0);
++	if (dmc_poll(dmc, c, SCAN_PARKED, c->t0, ARRIVE_TIMEOUT_US, false, &gap, &gap_irqs)) {
++		c->phase = "park";
++		writel(1, &s->release);
++		dmc->ipi_stale = true;	/* its IPI may still come: never reset the flags again */
++		return -ETIMEDOUT;
++	}
++	c->arrive_us = (c->t_scan - c->t0) / c->tpu;
++	return 0;
++}
++
++static int dmc_ipi_release(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	u32 t0 = dmc_now(), gap = 0, gap_irqs = 0;
++
++	writel(1, &s->release);
++	if (dmc_poll(dmc, c, SCAN_UNPARKED, t0, UNPARK_TIMEOUT_US, false, &gap, &gap_irqs)) {
++		c->phase = "release";
++		dmc->ipi_stale = true;
++		return -ETIMEDOUT;
++	}
++	c->release_us = (c->t_scan - t0) / c->tpu;
++	return 0;
++}
++#else
++static void dmc_irq_snap(struct rk3128_dmc *dmc)
++{
++}
++
++static void dmc_irq_mark(struct rk3128_dmc *dmc)
++{
++}
++
++static void dmc_irq_log(struct rk3128_dmc *dmc, const char *what)
++{
++}
++
++/* a product build has no IPI park: no job asks for it (j->ipi is set only by the test kit) */
++static int dmc_ipi_park(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	return -EOPNOTSUPP;
++}
++
++static int dmc_ipi_release(struct rk3128_dmc *dmc, struct dmc_cycle *c)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++
++/* debugfs rk3128-dmc/regs: the registers the switch writes, eight words a line */
++static int dmc_regs_show(struct seq_file *m, void *unused)
++{
++	struct rk3128_dmc *dmc = m->private;
++	static const struct { u8 blk; u16 start, end; } r[] = {
++		{ 0, 0x07c, 0x08c }, { 0, 0x0c0, 0x144 }, { 0, 0x240, 0x268 },
++		{ 1, 0x000, 0x05c }, { 1, 0x080, 0x0a0 }, { 1, 0x0c0, 0x0e0 }, { 1, 0x100, 0x120 },
++		{ 1, 0x140, 0x160 }, { 1, 0x290, 0x290 }, { 1, 0x3e8, 0x3fc },
++	};
++	int i, o;
++
++	mutex_lock(&dmc->lock);
++	seq_printf(m, "%u MHz, STAT %u, MCFG %#010x, MCFG1 %#010x, NoC DdrTiming %#010x, DPLL %#x %#x\n",
++		   dmc_cur_mhz(dmc), readl(dmc->pctl + PCTL_STAT) & 7, readl(dmc->pctl + PCTL_MCFG),
++		   readl(dmc->pctl + PCTL_MCFG1), readl(dmc->noc + NOC_DDRTIMING),
++		   readl(dmc->cru + CRU_DPLL_CON0), readl(dmc->cru + CRU_DPLL_CON1));
++	for (i = 0; i < ARRAY_SIZE(r); i++) {
++		void __iomem *b = r[i].blk ? dmc->phy : dmc->pctl;
++
++		for (o = r[i].start; o <= r[i].end; o += 32) {
++			seq_printf(m, "%s+%03x:", r[i].blk ? "phy" : "pctl", o);
++			for (int k = o; k <= r[i].end && k < o + 32; k += 4)
++				seq_printf(m, " %08x", readl(b + k));
++			seq_putc(m, '\n');
++		}
++	}
++	mutex_unlock(&dmc->lock);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dmc_regs);
++
++/* ---- one cycle on CPU 0: park, (switch,) release ---------------------------------------- */
++
++struct dmc_job {
++	struct rk3128_dmc *dmc;
++	struct dmc_sram *k;	/* the switch's parameters; NULL: park and release only */
++	u32 *buf;		/* with k: the vendor's pattern check */
++	bool ipi;		/* the kit's #379 IPI park instead of the stopper works */
++	bool legacy;		/* the kit's "irqpark": "go" with CPU 0's interrupts on (15db184) */
++	bool quiet;		/* the kit's relock: no line per switch */
++	bool pattern_ok;
++	struct dmc_cycle c;
++};
++
++static const u32 dmc_pattern[8] = { 0xffffffff, 0, 0x55555555, 0xaaaaaaaa,
++				    0xeeeeeeee, 0x11111111, 0x22222222, 0xdddddddd };
++
++static int dmc_cycle(struct dmc_job *j)
++{
++	struct rk3128_dmc *dmc = j->dmc;
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	unsigned long flags;
++	u32 t0;
++	int ret, i;
++
++	dmc_irq_snap(dmc);	/* test builds: CPU 0's interrupt counts, for the log after a miss */
++	preempt_disable();
++	ret = j->ipi ? dmc_ipi_park(dmc, &j->c) : dmc_park_arrive(dmc, &j->c);
++	if (!ret && !j->ipi && j->legacy)
++		ret = dmc_park_go(dmc, &j->c, true);	/* the kit's A/B: interrupts still on */
++	if (ret)
++		goto missed;
++	local_irq_save(flags);
++	if (!j->ipi && !j->legacy) {
++		/* interrupts off from "go" on, on CPU 0 as on the others (stop_machine()'s order) */
++		ret = dmc_park_go(dmc, &j->c, false);
++		if (ret) {
++			local_irq_restore(flags);
++			goto missed;
++		}
++	}
++	t0 = dmc_now();
++	flush_cache_all();
++	local_flush_tlb_all();
++	/* the TLB entries of every page the SRAM code touches, before the DRAM goes away */
++	readl(dmc->sram);
++	readl(dmc->sram + SRAM_STACK_TOP - 4);
++	readl(dmc->pctl + PCTL_STAT);
++	readl(dmc->phy + PHY_REG(0x1));
++	readl(dmc->cru + CRU_DPLL_CON0);
++	readl(dmc->grf + GRF_SOC_STATUS0);
++	readl(dmc->pmu + PMU_PWRDN_ST);
++	readl(dmc->noc + NOC_DDRTIMING);
++	dsb();
++	if (j->k)
++		call_with_stack(dmc->sram_run, s, dmc->sram + SRAM_STACK_TOP);
++	j->c.window_us = (dmc_now() - t0) / j->c.tpu;
++	if (j->k) {
++		/* the vendor's check: copy a pattern through the DRAM, flush, compare */
++		memcpy(j->buf, dmc_pattern, sizeof(dmc_pattern));
++		flush_cache_all();
++		for (i = 0; i < 8 && j->buf[i] == dmc_pattern[i]; i++)
++			;
++		j->pattern_ok = i == 8;
++	}
++	local_irq_restore(flags);
++	ret = j->ipi ? dmc_ipi_release(dmc, &j->c) : dmc_release_others(dmc, &j->c);
++	if (ret)
++		dmc_irq_mark(dmc);
++	preempt_enable();
++	if (ret)
++		dmc_miss_stamps(dmc, &j->c);
++	return ret;
++missed:
++	dmc_irq_mark(dmc);
++	preempt_enable();
++	if (j->c.phase && strcmp(j->c.phase, "busy"))
++		dmc_miss_stamps(dmc, &j->c);
++	return ret;
++}
++
++/* runs on CPU 0 (dmc_on_cpu0): the rail, then the cycle */
++static long dmc_job_fn(void *arg)
++{
++	struct dmc_job *j = arg;
++	struct rk3128_dmc *dmc = j->dmc;
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	int uv, ret;
++
++	if (j->k) {
++		/* vendor OPP: 396 MHz, 1.25 V; the rail first, and no raise without it */
++		uv = regulator_get_voltage(dmc->logic);
++		ret = regulator_set_voltage(dmc->logic, 1250000, 1450000);
++		if (ret) {
++			j->c.phase = "vdd_logic";
++			return ret;
++		}
++		if (uv < 1250000) {
++			usleep_range(1000, 2000);
++			uv = regulator_get_voltage(dmc->logic);
++		}
++		if (uv < 1250000) {
++			j->c.phase = "vdd_logic";
++			return -EIO;
++		}
++		/* the last line before the CPUs stop: a hang after it is in the park or the switch */
++		if (!j->quiet)
++			dev_info(dmc->dev, "vdd_logic %d uV; switching on CPU %u with the other CPUs parked\n",
++				 uv, smp_processor_id());
++		/* the parameters only: step, release and the park flags belong to the park protocol */
++		memcpy_toio(s, j->k, offsetof(struct dmc_sram, step));
++	}
++	return dmc_cycle(j);
++}
++
++/*
++ * Every switch and kit cycle runs on CPU 0, in a kworker bound there, like the vendor's
++ * ddrfreqd (kthread_bind(ddr.task, 0)): its sleeps (the rail's ramp and settle) and wakeups
++ * never go through another CPU's run queue.
++ */
++static int dmc_on_cpu0(struct dmc_job *j)
++{
++	long ret;
++
++	cpus_read_lock();
++	ret = cpu_online(0) ? work_on_cpu(0, dmc_job_fn, j) : -ENODEV;
++	cpus_read_unlock();
++	return ret;
++}
++
++/* a failed park or release, in one line: what, who, and the deadline they missed */
++static void dmc_cycle_err(struct rk3128_dmc *dmc, struct dmc_cycle *c, int ret, const char *what)
++{
++	u32 us = !c->phase ? 0 : !strcmp(c->phase, "report in") ? ARRIVE_TIMEOUT_US :
++		 !strcmp(c->phase, "park") ? PARK_TIMEOUT_US :
++		 !strcmp(c->phase, "release") ? UNPARK_TIMEOUT_US : 0;
++
++	if (us) {
++		dev_err(dmc->dev, "%s: CPUs %*pbl (of %*pbl) missed the %s deadline of %u us (%d)\n",
++			what, cpumask_pr_args(&c->late), cpumask_pr_args(&c->others), c->phase, us,
++			ret);
++		dmc_miss_log(dmc, c, what);
++		dmc_irq_log(dmc, what);
++	} else if (c->phase && !strcmp(c->phase, "busy"))
++		dev_err(dmc->dev, "%s: CPUs %*pbl have not run the stopper work of an earlier attempt yet%s (%d)\n",
++			what, cpumask_pr_args(&c->late),
++			dmc->ipi_stale ? ", or a test IPI park timed out" : "", ret);
++	else
++		dev_err(dmc->dev, "%s: %s failed (%d)\n", what, c->phase ?: "the CPU 0 work", ret);
++}
++
++/* the park missed a deadline (or found an earlier attempt's work still queued): nothing changed */
++static bool dmc_park_missed(struct dmc_cycle *c)
++{
++	return c->phase && (!strcmp(c->phase, "busy") || !strcmp(c->phase, "report in") ||
++			    !strcmp(c->phase, "park"));
++}
++
++/*
++ * One switch to @want MHz; relock: the same rate again (the test kit's run of the whole
++ * sequence). Up only otherwise, into the DRAM's DLL-on range: going back down to the vendor's
++ * 300 MHz mode (DRAM DLL off, no ODT) decoded with errors on the board (attempt 379-7).
++ */
++static int dmc_switch(struct rk3128_dmc *dmc, u32 want, bool relock, struct dmc_job *j)
++{
++	struct dmc_sram *s = dmc->sram + SRAM_PARAM;
++	struct dmc_sram *k;
++	u32 fb, pd1, pd2, mhz, cur, step, deidle;
++	bool quiet = j->quiet;
++	int ret, attempt;
++	u32 *buf;
++
++	if (want <= DLL_DISABLE_FREQ || want > 400)
++		return -EINVAL;
++	mhz = dmc_pll(want, &fb, &pd1, &pd2);
++	cur = dmc_cur_mhz(dmc);
++	if (mhz < cur || (relock && mhz != cur))
++		return -EINVAL;
++	if (!cur || readl(dmc->pctl + PCTL_TOGCNT1U) != cur) {
++		dev_err(dmc->dev, "DPLL says %u MHz, TOGCNT1U %u: not touching it\n", cur,
++			readl(dmc->pctl + PCTL_TOGCNT1U));
++		return -EIO;
++	}
++	if (mhz == cur && !relock)
++		return 0;
++	k = kzalloc_obj(*k);
++	buf = kmalloc(sizeof(dmc_pattern), GFP_KERNEL);
++	if (!k || !buf) {
++		kfree(k);
++		kfree(buf);
++		return -ENOMEM;
++	}
++	k->pctl = dmc->pctl;
++	k->phy = dmc->phy;
++	k->cru = dmc->cru;
++	k->grf = dmc->grf;
++	k->pmu = dmc->pmu;
++	k->noc = dmc->noc;
++	k->freq = mhz;
++	k->slew_up = mhz > cur;
++	k->ticks_per_us = DIV_ROUND_UP(arch_timer_get_rate(), 1000000);
++	k->fbdiv = fb;
++	k->postdiv1 = pd1;
++	k->postdiv2 = pd2;
++	dmc_timing(dmc, mhz, k);
++	k->dll_status = dmc->dll_status;
++	k->sr_idle = 0;		/* the vendor's: no auto self-refresh */
++	k->pd_idle = pd_idle;
++	if (!quiet)
++		dev_info(dmc->dev, "%u -> %u MHz: DPLL fbdiv %u postdiv %u/%u, CL %u CWL %u tRFC %u tRAS %u tRC %u, pd_idle %#x, MR0 %#x MR1 %#x MR2 %#x, NoC %#x (was %#x), MCFG1 %#x MCFG %#x\n",
++			 cur, mhz, fb, pd1, pd2, k->timing[T_TCL], k->timing[T_TCWL],
++			 k->timing[T_TRFC], k->timing[T_TRAS], k->timing[T_TRC], k->pd_idle, k->mr[0],
++			 k->mr[1], k->mr[2], k->noc_timing, readl(dmc->noc + NOC_DDRTIMING),
++			 readl(dmc->pctl + PCTL_MCFG1), readl(dmc->pctl + PCTL_MCFG));
++
++	j->dmc = dmc;
++	j->k = k;
++	j->buf = buf;
++	/*
++	 * A park that missed its deadline changed nothing: try again (twice) after letting the
++	 * late CPUs run; the kit counts every miss instead.
++	 */
++	for (attempt = 1;; attempt++) {
++		memset(&j->c, 0, sizeof(j->c));
++		ret = dmc_on_cpu0(j);
++		if (!ret || !dmc_park_missed(&j->c) || quiet || attempt == 3)
++			break;
++		dmc_cycle_err(dmc, &j->c, ret, "no switch, trying again");
++		msleep(20);
++	}
++	if (ret && !(j->c.phase && !strcmp(j->c.phase, "release"))) {
++		/* nothing changed: the CPUs did not all park, or the rail did not come up */
++		dmc_cycle_err(dmc, &j->c, ret, "no switch");
++		dev_err(dmc->dev, "staying at %u MHz\n", cur);
++		goto out;
++	}
++	step = readl(&s->step);
++	if (step == STEP_IDLE_TIMEOUT) {
++		dev_err(dmc->dev, "the NoC ports did not idle in %u us (GRF_SOC_STATUS0 %#x): nothing changed, staying at %u MHz\n",
++			IDLE_TIMEOUT_US, readl(&s->idle_status), cur);
++		ret = ret ?: -ETIMEDOUT;
++		goto out;
++	}
++	dmc->dll_status = readl(&s->dll_status);
++	deidle = readl(&s->deidle_fail);
++	if (!quiet || ret || step != 8 || !j->pattern_ok || deidle)
++		dev_info(dmc->dev, "now %u MHz (TOGCNT1U %u, STAT %u, DPLL %#x %#x, PHY_REGff %#x, NoC %#x), step %u, %u us with the CPUs parked (in %u + %u us, out %u us), pattern %s\n",
++			 dmc_cur_mhz(dmc), readl(dmc->pctl + PCTL_TOGCNT1U),
++			 readl(dmc->pctl + PCTL_STAT) & 7,
++			 readl(dmc->cru + CRU_DPLL_CON0), readl(dmc->cru + CRU_DPLL_CON1),
++			 readl(dmc->phy + PHY_REG(0xff)), readl(dmc->noc + NOC_DDRTIMING), step,
++			 j->c.window_us, j->c.arrive_us, j->c.park_us, j->c.release_us,
++			 j->pattern_ok ? "ok" : "MISMATCH");
++	if (deidle)
++		dev_err(dmc->dev, "the NoC ports did not leave idle in %u us after the switch (GRF_SOC_STATUS0 %#x)\n",
++			IDLE_TIMEOUT_US, readl(&s->idle_status));
++	if (ret) {
++		/* switched, but a CPU did not come back out of SRAM in time */
++		dmc_cycle_err(dmc, &j->c, ret, "after the switch");
++		goto out;
++	}
++	ret = step == 8 && j->pattern_ok && !deidle ? 0 : -EIO;
++out:
++	j->k = NULL;
++	j->buf = NULL;
++	kfree(k);
++	kfree(buf);
++	return ret;
++}
++
++static int dmc_mhz_get(void *data, u64 *val)
++{
++	*val = dmc_cur_mhz(data);
++	return 0;
++}
++
++static int dmc_mhz_set(void *data, u64 val)
++{
++	struct rk3128_dmc *dmc = data;
++	struct dmc_job j = { };
++	int ret;
++
++	mutex_lock(&dmc->lock);
++	ret = dmc_switch(dmc, val, false, &j);
++	mutex_unlock(&dmc->lock);
++	return ret;
++}
++DEFINE_DEBUGFS_ATTRIBUTE(dmc_mhz_fops, dmc_mhz_get, dmc_mhz_set, "%llu\n");
++
++/* ---- the test kit: debugfs rk3128-dmc/test (#456), CONFIG_ROCKCHIP_RK3128_DMC_TEST only ----- */
++#ifdef CONFIG_ROCKCHIP_RK3128_DMC_TEST
++
++/*
++ * Write "park N" (the park and release alone, no DDR change), "relock N" (the whole switch
++ * sequence at the current rate: self-refresh, DPLL relock, PHY reset, training; then a 1 MiB
++ * pattern read back from the DRAM), "ipipark N" (the #379 IPI park, for the A/B) or "irqpark N"
++ * (the 15db184 park: "go" with CPU 0's interrupts on and the clock read after the scan, for the
++ * #456 A/B), N up to 100000. A park or report-in miss changed nothing: it is counted, the first
++ * three of a run are logged with every CPU's stamps, and the run goes on (the write then fails
++ * with -ETIMEDOUT); any other failure stops it. Read: the counts and the slowest phase times
++ * per kind. Never above the current rate or the 1.25 V rail; the product never writes it.
++ */
++static const char * const kit_name[KIT_N] = { "park", "relock", "ipipark", "irqpark" };
++#define KIT_MEM_WORDS	(SZ_1M / 4)
++
++static u32 kit_fill(u32 *m, u32 seed)
++{
++	u32 i, x = seed | 1;
++
++	for (i = 0; i < KIT_MEM_WORDS; i++) {
++		x ^= x << 13;
++		x ^= x >> 17;
++		x ^= x << 5;
++		m[i] = x;
++	}
++	return seed | 1;
++}
++
++static u32 kit_check(const u32 *m, u32 x)
++{
++	u32 i, bad = 0;
++
++	for (i = 0; i < KIT_MEM_WORDS; i++) {
++		x ^= x << 13;
++		x ^= x >> 17;
++		x ^= x << 5;
++		bad += m[i] != x;
++	}
++	return bad;
++}
++
++static void kit_count(struct dmc_kit *t, struct dmc_job *j, int ret, const char *bad)
++{
++	struct dmc_cycle *c = &j->c;
++	u32 tpu = c->tpu ?: 1;
++
++	t->runs++;
++	if (!ret && !bad)
++		t->ok++;
++	else if (ret == -EBUSY)
++		t->busy++;
++	else if (ret && c->phase && !strcmp(c->phase, "report in"))
++		t->late_arrive++;
++	else if (ret && c->phase && !strcmp(c->phase, "park"))
++		t->late_park++;
++	else if (ret && c->phase && !strcmp(c->phase, "release"))
++		t->late_release++;
++	else
++		t->bad++;
++	if (ret && dmc_miss_false(c))
++		t->false_park++;
++	if (ret || bad)
++		snprintf(t->last, sizeof(t->last), "cycle %u: %s, CPUs %*pbl (%d)", t->runs,
++			 bad ?: c->phase ?: "error", cpumask_pr_args(&c->late), ret);
++	t->max_arrive_us = max(t->max_arrive_us, c->arrive_us);
++	t->max_true_in_us = max(t->max_true_in_us, c->true_in_us);
++	t->max_park_us = max(t->max_park_us, c->park_us);
++	t->max_window_us = max(t->max_window_us, c->window_us);
++	t->max_release_us = max(t->max_release_us, c->release_us);
++	t->max_gap0_us = max(t->max_gap0_us, c->gap_park / tpu);
++}
++
++/* a miss that changed nothing and left no work behind: the kit counts it and goes on */
++static bool kit_go_on(struct dmc_job *j, int ret)
++{
++	return ret == -ETIMEDOUT && !j->ipi && j->c.phase &&
++	       (!strcmp(j->c.phase, "park") || !strcmp(j->c.phase, "report in"));
++}
++
++static int dmc_kit_run(struct rk3128_dmc *dmc, int kind, u32 n)
++{
++	struct dmc_kit *t = &dmc->kit[kind];
++	u32 i, seed, cur = dmc_cur_mhz(dmc), runs0 = t->runs, ok0 = t->ok, miss = 0;
++	const char *bad = NULL;
++	struct dmc_job j;
++	u32 *mem = NULL;
++	int ret = 0;
++
++	if (kind == KIT_RELOCK) {
++		mem = vmalloc(SZ_1M);
++		if (!mem)
++			return -ENOMEM;
++	}
++	for (i = 0; i < n; i++) {
++		memset(&j, 0, sizeof(j));
++		j.dmc = dmc;
++		j.quiet = true;
++		if (kind == KIT_RELOCK) {
++			seed = kit_fill(mem, 0x9e3779b9 * (t->runs + 1));
++			ret = dmc_switch(dmc, cur, true, &j);
++			/* the whole MiB comes back from the DRAM: the cycle flushed every cache */
++			if (!ret && kit_check(mem, seed))
++				bad = "1 MiB pattern mismatch";
++			else if (!ret && dmc_cur_mhz(dmc) != cur)
++				bad = "rate changed";
++		} else {
++			j.ipi = kind == KIT_IPI;
++			j.legacy = kind == KIT_IRQPARK;
++			ret = dmc_on_cpu0(&j);
++		}
++		kit_count(t, &j, ret, bad);
++		if (!bad && kit_go_on(&j, ret)) {
++			/* relock: dmc_switch() logged it; the first three of a run with their stamps */
++			if (kind != KIT_RELOCK && miss < 3)
++				dmc_cycle_err(dmc, &j.c, ret, kit_name[kind]);
++			miss++;
++			ret = 0;
++			continue;
++		}
++		if (ret || bad)
++			break;
++		cond_resched();
++		if (fatal_signal_pending(current))
++			break;
++	}
++	vfree(mem);
++	dev_info(dmc->dev, "test %s: %u of %u cycles ok (asked %u), %u park misses (%u with every late CPU parked before the miss); max us: in %u (by the CPUs' stamps %u), park %u, window %u, out %u, CPU 0 away in the park %u%s%s\n",
++		 kit_name[kind], t->ok - ok0, t->runs - runs0, n, miss, t->false_park,
++		 t->max_arrive_us, t->max_true_in_us, t->max_park_us, t->max_window_us,
++		 t->max_release_us, t->max_gap0_us, ret || bad ? "; FAILED " : "",
++		 ret || bad ? t->last : "");
++	if (ret && kind != KIT_RELOCK)
++		dmc_cycle_err(dmc, &j.c, ret, kit_name[kind]);
++	if (ret || bad)
++		return ret ?: -EIO;
++	return miss ? -ETIMEDOUT : 0;
++}
++
++static int dmc_test_show(struct seq_file *m, void *unused)
++{
++	struct rk3128_dmc *dmc = m->private;
++	int i;
++
++	mutex_lock(&dmc->lock);
++	for (i = 0; i < KIT_N; i++) {
++		struct dmc_kit *t = &dmc->kit[i];
++
++		seq_printf(m, "%s: runs %u ok %u busy %u late in %u park %u (false %u) out %u bad %u; max us: in %u (stamps %u) park %u window %u out %u cpu0-away %u%s%s\n",
++			   kit_name[i], t->runs, t->ok, t->busy, t->late_arrive, t->late_park,
++			   t->false_park, t->late_release, t->bad, t->max_arrive_us,
++			   t->max_true_in_us, t->max_park_us, t->max_window_us, t->max_release_us,
++			   t->max_gap0_us, t->last[0] ? "; last failure: " : "", t->last);
++	}
++	mutex_unlock(&dmc->lock);
++	return 0;
++}
++
++static int dmc_test_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, dmc_test_show, inode->i_private);
++}
++
++static ssize_t dmc_test_write(struct file *file, const char __user *ubuf, size_t len,
++			      loff_t *ppos)
++{
++	struct rk3128_dmc *dmc = ((struct seq_file *)file->private_data)->private;
++	char buf[32], *p;
++	size_t l = 0;
++	int kind, ret;
++	u32 n;
++
++	if (!len || len >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, ubuf, len))
++		return -EFAULT;
++	buf[len] = 0;
++	p = strim(buf);
++	for (kind = 0; kind < KIT_N; kind++) {
++		l = strlen(kit_name[kind]);
++		if (!strncmp(p, kit_name[kind], l) && p[l] == ' ')
++			break;
++	}
++	if (kind == KIT_N || kstrtou32(skip_spaces(p + l), 10, &n) || !n || n > 100000)
++		return -EINVAL;
++	mutex_lock(&dmc->lock);
++	ret = dmc_kit_run(dmc, kind, n);
++	mutex_unlock(&dmc->lock);
++	return ret ?: len;
++}
++
++static const struct file_operations dmc_test_fops = {
++	.owner = THIS_MODULE,
++	.open = dmc_test_open,
++	.read = seq_read,
++	.write = dmc_test_write,
++	.llseek = seq_lseek,
++	.release = single_release,
++};
++#endif /* CONFIG_ROCKCHIP_RK3128_DMC_TEST */
++
++/*
++ * Copy one function to SRAM at or after *next, at the same address modulo 8 (Thumb-2
++ * literal loads are relative to the word-aligned PC); kallsyms gives its size up to the
++ * next symbol, so its literal pool comes along.
++ */
++static int dmc_copy(struct rk3128_dmc *dmc, void (*fn)(void *), unsigned long *next,
++		    void (**out)(void *))
++{
++	unsigned long addr = (unsigned long)fn & ~1UL, size = 0, offset = 0;
++	unsigned long off = ALIGN(*next, 8) + (addr & 7);
++
++	if (!kallsyms_lookup_size_offset(addr, &size, &offset) || offset ||
++	    off + size > SRAM_CODE_MAX) {
++		dev_err(dmc->dev, "SRAM code %ps: %lu bytes at +%#lx, offset %lu: does not fit\n",
++			fn, size, off, offset);
++		return -E2BIG;
++	}
++	memcpy_toio(dmc->sram + off, (void *)addr, size);
++	flush_icache_range((unsigned long)dmc->sram + off, (unsigned long)dmc->sram + off + size);
++	*out = (void *)((unsigned long)dmc->sram + off + ((unsigned long)fn & 1UL));
++	dev_info(dmc->dev, "%ps: %lu bytes to SRAM +%#lx\n", fn, size, off);
++	*next = off + size;
++	return 0;
++}
++
++static void __iomem *dmc_map_phandle(struct device *dev, const char *prop)
++{
++	struct device_node *np = of_parse_phandle(dev->of_node, prop, 0);
++	void __iomem *base;
++
++	if (!np)
++		return NULL;
++	base = of_iomap(np, 0);	/* shared with the owner's driver: no region request */
++	of_node_put(np);
++	return base;
++}
++
++static int rk3128_dmc_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct rk3128_dmc *dmc;
++	struct resource *r;
++	u32 os, cs, col, bank, row, bw, diebw, cap;
++	unsigned long next = 0;
++	u32 mhz = 0;
++	int ret;
++
++	dmc = devm_kzalloc(dev, sizeof(*dmc), GFP_KERNEL);
++	if (!dmc)
++		return -ENOMEM;
++	dmc->dev = dev;
++	mutex_init(&dmc->lock);
++	dmc->pctl = devm_platform_ioremap_resource_byname(pdev, "pctl");
++	dmc->phy = devm_platform_ioremap_resource_byname(pdev, "phy");
++	dmc->noc = devm_platform_ioremap_resource_byname(pdev, "noc");
++	if (IS_ERR(dmc->pctl) || IS_ERR(dmc->phy) || IS_ERR(dmc->noc))
++		return dev_err_probe(dev, -ENODEV, "registers\n");
++	dmc->cru = dmc_map_phandle(dev, "rockchip,cru");
++	dmc->grf = dmc_map_phandle(dev, "rockchip,grf");
++	dmc->pmu = dmc_map_phandle(dev, "rockchip,pmu");
++	if (!dmc->cru || !dmc->grf || !dmc->pmu)
++		return dev_err_probe(dev, -ENODEV, "CRU, GRF or PMU\n");
++	r = platform_get_resource_byname(pdev, IORESOURCE_MEM, "sram");
++	if (!r || r->start != SRAM_PHYS || resource_size(r) != SRAM_SIZE)
++		return dev_err_probe(dev, -EINVAL, "sram must be %#x + %#x\n",
++				     SRAM_PHYS, SRAM_SIZE);
++	dmc->sram = __arm_ioremap_exec(r->start, SRAM_SIZE, false);
++	if (!dmc->sram)
++		return -ENOMEM;
++
++	/* required: the vendor's 396 MHz OPP needs vdd_logic at 1.25 V, so no rail, no raise */
++	dmc->logic = devm_regulator_get_optional(dev, "logic");
++	if (IS_ERR(dmc->logic))
++		return dev_err_probe(dev, PTR_ERR(dmc->logic), "logic-supply (vdd_logic)\n");
++
++	/* the loader's DDR geometry (GRF_OS_REG1), as the vendor reads it */
++	os = readl(dmc->grf + GRF_OS_REG1);
++	cs = ((os >> 11) & 1) + 1;
++	col = 9 + ((os >> 9) & 3);
++	bank = 3 - ((os >> 8) & 1);
++	row = 13 + ((os >> 6) & 3);
++	bw = 2 >> ((os >> 2) & 3);
++	diebw = 2 >> (os & 3);
++	cap = 1U << (row + col + bank + bw);
++	if (cs > 1)
++		cap += 1U << (13 + ((os >> 4) & 3) + col + bank + bw);
++	dmc->cap_per_die = cap / (cs * (1 << (bw - diebw)));
++	/* as the vendor seeds it: the first raise resets the DLL */
++	dmc->dll_status = DDR3_DLL_DISABLE;
++
++	dev_info(dev, "%s, %u CS, row %u, %u banks, col %u, %u bit, %u MB (%u MB a die); uPCTL %#x/%#x, STAT %u, %u MHz (TOGCNT1U %u), vdd_logic %d uV\n",
++		 ((os >> 13) & 7) == 3 ? "DDR3" : "not DDR3", cs, row, 1 << bank, col, 8 << bw,
++		 cap >> 20, dmc->cap_per_die >> 20, readl(dmc->pctl + PCTL_IPVR),
++		 readl(dmc->pctl + PCTL_IPTR), readl(dmc->pctl + PCTL_STAT) & 7, dmc_cur_mhz(dmc),
++		 readl(dmc->pctl + PCTL_TOGCNT1U),
++		 regulator_get_voltage(dmc->logic));
++	if (((os >> 13) & 7) != 3 || (readl(dmc->pctl + PCTL_STAT) & 7) != ST_ACCESS ||
++	    readl(dmc->pctl + PCTL_TOGCNT1U) != dmc_cur_mhz(dmc))
++		return dev_err_probe(dev, -ENODEV,
++				     "not the DDR3 controller state this driver knows\n");
++
++	ret = dmc_copy(dmc, rk3128_dmc_sram_run, &next, &dmc->sram_run);
++	if (!ret)
++		ret = dmc_copy(dmc, rk3128_dmc_sram_park, &next, &dmc->sram_park);
++	if (ret)
++		return ret;
++	BUILD_BUG_ON(SRAM_PARAM + sizeof(struct dmc_sram) > SRAM_PARK_STACK(0) - 0x40);
++	BUILD_BUG_ON(SRAM_PARK_STACK(NR_CPUS - 1) > SRAM_STACK_TOP - 0x200);
++
++	platform_set_drvdata(pdev, dmc);
++	dmc->dbg = debugfs_create_dir("rk3128-dmc", NULL);
++	debugfs_create_file_unsafe("mhz", 0600, dmc->dbg, dmc, &dmc_mhz_fops);
++	debugfs_create_file("regs", 0400, dmc->dbg, dmc, &dmc_regs_fops);
++#ifdef CONFIG_ROCKCHIP_RK3128_DMC_TEST	/* the hevc test image only, never a product build */
++	debugfs_create_file("test", 0600, dmc->dbg, dmc, &dmc_test_fops);
++#endif
++
++	if (boot_mhz >= 0)
++		mhz = boot_mhz;
++	else
++		of_property_read_u32(dev->of_node, "rockchip,boot-mhz", &mhz);
++	if (mhz) {
++		struct dmc_job j = { };
++
++		mutex_lock(&dmc->lock);
++		ret = dmc_switch(dmc, mhz, false, &j);
++		mutex_unlock(&dmc->lock);
++		if (ret)
++			dev_err(dev, "switch to %u MHz at probe: %d\n", mhz, ret);
++	}
++	return 0;
++}
++
++static const struct of_device_id rk3128_dmc_of_match[] = {
++	{ .compatible = "rockchip,rk3128-dmc" },
++	{ }
++};
++
++static struct platform_driver rk3128_dmc_driver = {
++	.probe = rk3128_dmc_probe,
++	.driver = {
++		.name = "rk3128-dmc",
++		.of_match_table = rk3128_dmc_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(rk3128_dmc_driver);

@@ -1,0 +1,403 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:48:39 -0600
+Subject: [PATCH] drm/lima: invalidate the L2 only when the vendor driver would
+
+lima clears the whole L2 before every task and waits for the clear to
+finish. On this GPU both rings share one L2, so the Demo's four PP tasks a
+frame wipe the cache four extra times, part of that while a GP task is
+running on the other side of it. That is the main kernel suspect for lima's
+GP time being x1.44 the blob's in the Demo's ignition scene (4.54 ms a frame
+against 3.16).
+
+The vendor Utgard r6p0 driver clears it conditionally, from a global order
+counter:
+
+  mali_job_cache_order_autonumber   0xc0d78c54  one atomic for both
+  mali_l2_cache_invalidate_conditional 0xc0394d90
+        if ((s32)(job->cache_order - l2->last_invalidated_id) > 0) {
+                l2->last_invalidated_id = ++cache_order;
+                send_command(COMMAND, CLEAR_ALL);
+        }
+  mali_l2_cache_send_command        0xc0394810  wait for COMMAND_BUSY to
+                                    clear, issue, return (no wait for the
+                                    invalidate to complete)
+  mali_group_start_gp_job           0xc0391ea0  one call, l2_cache[0]
+  mali_group_start_pp_job           0xc039200c, 0xc0392028  one per L2
+
+A task's cache order is taken when the task is created, so everything the
+CPU wrote for it is already in memory; an invalidate that happened after
+that point covers it. GPU writes go through the L2 and stay coherent for
+later GPU reads. Page tables the CPU writes are covered by the previous
+patch, at the point they are written, which is what makes this sound rather
+than merely usually-true.
+
+So a batch of tasks queued before the GPU reaches the first of them costs
+one invalidate, not one each - exactly the Demo's three glow PP tasks plus
+the on-screen one.
+
+Kept conservative in two places:
+- A task that waits on a fence from another device (a decoder frame used as
+  a texture) always invalidates: that memory can land after the task was
+  created. lima_sched_task_set_l2_flush() walks the task's dependencies and
+  sets task->flush_l2 for anything that is not a lima fence.
+- lima.l2_flush_always (0644, default N) puts lima's invalidate-every-task
+  behaviour back at runtime for the A/B.
+
+lima_l2_cache_flush() also follows the vendor's send_command order now -
+wait for the previous command, then issue - instead of issue-then-wait, and
+all L2 register work takes the lock with interrupts off because the IRQ
+handler will start tasks later in this series.
+
+Risk to pictures: this is the one patch in the series that could in
+principle show stale data. It relies on the same two rules the vendor driver
+relies on: GPU writes are coherent in the L2 for later GPU reads, and
+CPU-written page tables are invalidated where they are written. If glow or
+blur ever looks stale, lima.l2_flush_always=Y settles it without a reboot.
+No arithmetic or rounding changes, so a correct run is bit-identical.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_device.h   | 12 ++++-
+ drivers/gpu/drm/lima/lima_drv.c      |  4 ++
+ drivers/gpu/drm/lima/lima_drv.h      |  1 +
+ drivers/gpu/drm/lima/lima_gem.c      |  3 ++
+ drivers/gpu/drm/lima/lima_l2_cache.c | 81 +++++++++++++++++++++++-----
+ drivers/gpu/drm/lima/lima_l2_cache.h |  1 +
+ drivers/gpu/drm/lima/lima_sched.c    | 64 ++++++++++++++++------
+ drivers/gpu/drm/lima/lima_sched.h    |  6 +++
+ 8 files changed, 143 insertions(+), 29 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_device.h b/drivers/gpu/drm/lima/lima_device.h
+index c62cee0..20a27a5 100644
+--- a/drivers/gpu/drm/lima/lima_device.h
++++ b/drivers/gpu/drm/lima/lima_device.h
+@@ -63,7 +63,11 @@ struct lima_ip {
+ 		/* gp/pp */
+ 		bool async_reset;
+ 		/* l2 cache */
+-		spinlock_t lock;
++		struct {
++			spinlock_t lock;
++			/* cache order of the last invalidate of this L2 */
++			u32 last_invalidated;
++		};
+ 		/* pmu/bcast */
+ 		u32 mask;
+ 		/* mmu: page directory currently in LIMA_MMU_DTE_ADDR */
+@@ -104,6 +108,12 @@ struct lima_device {
+ 
+ 	struct lima_devfreq devfreq;
+ 
++	/*
++	 * Global order of task creation and L2 invalidates, the vendor
++	 * driver's mali_job_cache_order_autonumber (0xc0d78c54).
++	 */
++	atomic_t cache_order;
++
+ 	/* debug info */
+ 	struct lima_dump_head dump;
+ 	struct list_head error_task_list;
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index deec16d..5b89458 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -23,6 +23,7 @@ uint lima_max_error_tasks;
+ uint lima_job_hang_limit;
+ int lima_l2_max_reads = 0x1c;
+ bool lima_mmu_zap_tlb = true;
++bool lima_l2_flush_always;
+ 
+ MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+@@ -39,6 +40,9 @@ module_param_named(job_hang_limit, lima_job_hang_limit, uint, 0444);
+ MODULE_PARM_DESC(l2_max_reads, "L2 cache MAX_READS (outstanding reads); -1 keeps the hardware reset value like the vendor driver (default 0x1c)");
+ module_param_named(l2_max_reads, lima_l2_max_reads, int, 0444);
+ 
++MODULE_PARM_DESC(l2_flush_always, "invalidate the whole L2 before every task (lima's old behaviour) instead of the vendor driver's conditional invalidate (default N)");
++module_param_named(l2_flush_always, lima_l2_flush_always, bool, 0644);
++
+ MODULE_PARM_DESC(mmu_zap_tlb, "with the page directory the MMU already has, only zap the TLB instead of stalling and reprogramming it, like the vendor driver (default Y)");
+ module_param_named(mmu_zap_tlb, lima_mmu_zap_tlb, bool, 0644);
+ 
+diff --git a/drivers/gpu/drm/lima/lima_drv.h b/drivers/gpu/drm/lima/lima_drv.h
+index c6d0faf..c6694fd 100644
+--- a/drivers/gpu/drm/lima/lima_drv.h
++++ b/drivers/gpu/drm/lima/lima_drv.h
+@@ -13,6 +13,7 @@ extern int lima_sched_timeout_ms;
+ extern uint lima_heap_init_nr_pages;
+ extern int lima_l2_max_reads;
+ extern bool lima_mmu_zap_tlb;
++extern bool lima_l2_flush_always;
+ extern uint lima_max_error_tasks;
+ extern uint lima_job_hang_limit;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_gem.c b/drivers/gpu/drm/lima/lima_gem.c
+index 0c73860..1fa3806 100644
+--- a/drivers/gpu/drm/lima/lima_gem.c
++++ b/drivers/gpu/drm/lima/lima_gem.c
+@@ -17,6 +17,7 @@
+ #include "lima_drv.h"
+ #include "lima_gem.h"
+ #include "lima_vm.h"
++#include "lima_sched.h"
+ 
+ int lima_heap_alloc(struct lima_bo *bo, struct lima_vm *vm)
+ {
+@@ -358,6 +359,8 @@ int lima_gem_submit(struct drm_file *file, struct lima_submit *submit)
+ 			goto err_out2;
+ 	}
+ 
++	lima_sched_task_set_l2_flush(submit->task);
++
+ 	fence = lima_sched_context_queue_task(submit->task);
+ 
+ 	for (i = 0; i < submit->nr_bos; i++) {
+diff --git a/drivers/gpu/drm/lima/lima_l2_cache.c b/drivers/gpu/drm/lima/lima_l2_cache.c
+index f251dfd..13185dc 100644
+--- a/drivers/gpu/drm/lima/lima_l2_cache.c
++++ b/drivers/gpu/drm/lima/lima_l2_cache.c
+@@ -30,14 +30,69 @@ static int lima_l2_cache_wait_idle(struct lima_ip *ip)
+ 	return 0;
+ }
+ 
++/*
++ * mali_l2_cache_send_command (0xc0394810): wait for the previous command to
++ * drain, then issue this one and return. It does not wait for the
++ * invalidate itself to finish; the core cannot see a half-invalidated cache
++ * because the L2 holds its own accesses off while the command runs.
++ */
++static int lima_l2_cache_command(struct lima_ip *ip, u32 reg, u32 val)
++{
++	int err = lima_l2_cache_wait_idle(ip);
++
++	if (err)
++		return err;
++
++	l2_cache_write(reg, val);
++	return 0;
++}
++
+ int lima_l2_cache_flush(struct lima_ip *ip)
+ {
++	unsigned long flags;
+ 	int ret;
+ 
+-	spin_lock(&ip->data.lock);
+-	l2_cache_write(LIMA_L2_CACHE_COMMAND, LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
+-	ret = lima_l2_cache_wait_idle(ip);
+-	spin_unlock(&ip->data.lock);
++	/* irqsave: the IRQ handler starts the next task (lima.irq_start) */
++	spin_lock_irqsave(&ip->data.lock, flags);
++	ip->data.last_invalidated = atomic_inc_return(&ip->dev->cache_order);
++	ret = lima_l2_cache_command(ip, LIMA_L2_CACHE_COMMAND,
++				    LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
++	spin_unlock_irqrestore(&ip->data.lock, flags);
++	return ret;
++}
++
++/*
++ * mali_l2_cache_invalidate_conditional (0xc0394d90):
++ *
++ *	if ((s32)(job->cache_order - l2->last_invalidated_id) > 0) {
++ *		l2->last_invalidated_id = ++cache_order;
++ *		send_command(COMMAND, CLEAR_ALL);
++ *	}
++ *
++ * Everything the CPU wrote for a task was in memory before the task was
++ * created, so an invalidate that happened after that covers it. GPU writes
++ * go through the L2 and stay coherent for later GPU reads, and page tables
++ * the CPU writes do their own invalidate where they are written (see
++ * lima_l2_cache_flush_pagetables()). The win is a batch of tasks submitted
++ * before the GPU reaches the first of them: one invalidate instead of one
++ * per task. In the Demo that is the three glow PP tasks and the on-screen
++ * one, i.e. four fewer whole-L2 wipes per frame, some of them while a GP
++ * task is running on the other side of the same cache.
++ */
++int lima_l2_cache_flush_conditional(struct lima_ip *ip, u32 order)
++{
++	struct lima_device *ldev = ip->dev;
++	unsigned long flags;
++	int ret = 0;
++
++	spin_lock_irqsave(&ip->data.lock, flags);
++	if ((s32)(order - ip->data.last_invalidated) > 0) {
++		ip->data.last_invalidated =
++			atomic_inc_return(&ldev->cache_order);
++		ret = lima_l2_cache_command(ip, LIMA_L2_CACHE_COMMAND,
++					    LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
++	}
++	spin_unlock_irqrestore(&ip->data.lock, flags);
+ 	return ret;
+ }
+ 
+@@ -63,26 +118,27 @@ int lima_l2_cache_flush(struct lima_ip *ip)
+ static void lima_l2_cache_clear_pages(struct lima_ip *ip,
+ 				      const dma_addr_t *pa, int num)
+ {
++	unsigned long flags;
+ 	int i;
+ 
+-	spin_lock(&ip->data.lock);
++	spin_lock_irqsave(&ip->data.lock, flags);
+ 
+ 	if (num > LIMA_L2_MAX_CLEAR_PAGES) {
+-		l2_cache_write(LIMA_L2_CACHE_COMMAND,
+-			       LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
+-		lima_l2_cache_wait_idle(ip);
++		ip->data.last_invalidated =
++			atomic_inc_return(&ip->dev->cache_order);
++		lima_l2_cache_command(ip, LIMA_L2_CACHE_COMMAND,
++				      LIMA_L2_CACHE_COMMAND_CLEAR_ALL);
+ 		goto out;
+ 	}
+ 
+ 	for (i = 0; i < num; i++) {
+-		if (lima_l2_cache_wait_idle(ip))
++		if (lima_l2_cache_command(ip, LIMA_L2_CACHE_CLEAR_PAGE,
++					  (u32)pa[i]))
+ 			break;
+-		l2_cache_write(LIMA_L2_CACHE_CLEAR_PAGE, (u32)pa[i]);
+ 	}
+-	lima_l2_cache_wait_idle(ip);
+ 
+ out:
+-	spin_unlock(&ip->data.lock);
++	spin_unlock_irqrestore(&ip->data.lock, flags);
+ }
+ 
+ void lima_l2_cache_flush_pagetables(struct lima_device *ldev,
+@@ -159,6 +215,7 @@ int lima_l2_cache_init(struct lima_ip *ip)
+ 	}
+ 
+ 	spin_lock_init(&ip->data.lock);
++	ip->data.last_invalidated = 0;
+ 
+ 	size = l2_cache_read(LIMA_L2_CACHE_SIZE);
+ 	dev_info(dev->dev, "%s MAX_READS reset value 0x%x, %s 0x%x\n",
+diff --git a/drivers/gpu/drm/lima/lima_l2_cache.h b/drivers/gpu/drm/lima/lima_l2_cache.h
+index 94e7fff..cf5004c 100644
+--- a/drivers/gpu/drm/lima/lima_l2_cache.h
++++ b/drivers/gpu/drm/lima/lima_l2_cache.h
+@@ -13,6 +13,7 @@ int lima_l2_cache_init(struct lima_ip *ip);
+ void lima_l2_cache_fini(struct lima_ip *ip);
+ 
+ int lima_l2_cache_flush(struct lima_ip *ip);
++int lima_l2_cache_flush_conditional(struct lima_ip *ip, u32 order);
+ 
+ /* number of page-granular invalidates we do instead of one CLEAR_ALL */
+ #define LIMA_L2_MAX_CLEAR_PAGES 8
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+index 5c7d3d9..c5a86e2 100644
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -138,6 +138,14 @@ int lima_sched_task_init(struct lima_sched_task *task,
+ 
+ 	task->num_bos = num_bos;
+ 	task->vm = lima_vm_get(vm);
++	/*
++	 * Everything the CPU wrote for this task is in memory by now, so an
++	 * L2 invalidate that happens after this point covers it. The vendor
++	 * driver takes the same number at job creation
++	 * (mali_job_cache_order_autonumber, read by
++	 * mali_l2_cache_invalidate_conditional).
++	 */
++	task->cache_order = atomic_inc_return(&vm->dev->cache_order);
+ 
+ 	return 0;
+ }
+@@ -172,6 +180,35 @@ void lima_sched_context_fini(struct lima_sched_pipe *pipe,
+ 	drm_sched_entity_destroy(&context->base);
+ }
+ 
++/*
++ * Memory another device writes - a decoder frame imported as a texture, a
++ * buffer another DRM driver fills - can land after this task was created, so
++ * its cache order does not cover it. Those tasks always invalidate.
++ */
++void lima_sched_task_set_l2_flush(struct lima_sched_task *task)
++{
++	struct lima_device *ldev = task->vm->dev;
++	struct dma_fence *fence;
++	unsigned long index;
++	int i;
++
++	xa_for_each(&task->base.dependencies, index, fence) {
++		struct drm_sched_fence *s_fence;
++		bool ours = fence->ops == &lima_fence_ops;
++
++		s_fence = to_drm_sched_fence(fence);
++		for (i = 0; s_fence && i < lima_pipe_num; i++) {
++			if (s_fence->sched == &ldev->pipe[i].base)
++				ours = true;
++		}
++
++		if (!ours) {
++			task->flush_l2 = true;
++			return;
++		}
++	}
++}
++
+ struct dma_fence *lima_sched_context_queue_task(struct lima_sched_task *task)
+ {
+ 	struct dma_fence *fence = dma_fence_get(&task->base.s_fence->finished);
+@@ -268,23 +305,18 @@ static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
+ 
+ 	pipe->current_task = task;
+ 
+-	/* this is needed for MMU to work correctly, otherwise GP/PP
+-	 * will hang or page fault for unknown reason after running for
+-	 * a while.
+-	 *
+-	 * Need to investigate:
+-	 * 1. is it related to TLB
+-	 * 2. how much performance will be affected by L2 cache flush
+-	 * 3. can we reduce the calling of this function because all
+-	 *    GP/PP use the same L2 cache on mali400
+-	 *
+-	 * TODO:
+-	 * 1. move this to task fini to save some wait time?
+-	 * 2. when GP/PP use different l2 cache, need PP wait GP l2
+-	 *    cache flush?
++	/*
++	 * Cache and MMU maintenance before the task runs. The vendor driver
++	 * does the same two steps in mali_group_start_gp_job (0xc0391e7c)
++	 * and mali_group_start_pp_job (0xc0391fdc), both conditional.
+ 	 */
+-	for (i = 0; i < pipe->num_l2_cache; i++)
+-		lima_l2_cache_flush(pipe->l2_cache[i]);
++	for (i = 0; i < pipe->num_l2_cache; i++) {
++		if (task->flush_l2 || READ_ONCE(lima_l2_flush_always))
++			lima_l2_cache_flush(pipe->l2_cache[i]);
++		else
++			lima_l2_cache_flush_conditional(pipe->l2_cache[i],
++							task->cache_order);
++	}
+ 
+ 	lima_sched_activate_vm(pipe, task->vm);
+ 
+diff --git a/drivers/gpu/drm/lima/lima_sched.h b/drivers/gpu/drm/lima/lima_sched.h
+index 1a08faf..86f456e 100644
+--- a/drivers/gpu/drm/lima/lima_sched.h
++++ b/drivers/gpu/drm/lima/lima_sched.h
+@@ -29,6 +29,11 @@ struct lima_sched_task {
+ 	bool recoverable;
+ 	struct lima_bo *heap;
+ 
++	/* lima_device.cache_order when the task was created */
++	u32 cache_order;
++	/* waits on another device's fence: always invalidate the L2 */
++	bool flush_l2;
++
+ 	/* pipe fence */
+ 	struct dma_fence *fence;
+ };
+@@ -97,6 +102,7 @@ int lima_sched_context_init(struct lima_sched_pipe *pipe,
+ void lima_sched_context_fini(struct lima_sched_pipe *pipe,
+ 			     struct lima_sched_context *context);
+ struct dma_fence *lima_sched_context_queue_task(struct lima_sched_task *task);
++void lima_sched_task_set_l2_flush(struct lima_sched_task *task);
+ 
+ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name);
+ void lima_sched_pipe_fini(struct lima_sched_pipe *pipe);

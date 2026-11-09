@@ -1,0 +1,334 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Board basics for the RK3128 reference board Linux port (development record #302, docs/RK3128-LINUX.md
+ * "Board basics"): CPU DVFS, Lima GPU, touch, RTC interrupt, accelerometers, keys, IR.
+ * Included by scripts/linux-build.sh after the board file (#298); labels come from there and
+ * from rk3128.dtsi. Every vendor number is read from the stock rk-kernel.dtb or from the stock
+ * 3.10 kernel binary (the doc names the source of each one).
+ */
+
+#include <dt-bindings/input/input.h>
+
+/*
+ * SAFETY, regulators: on this board a HIGHER PWM duty gives a LOWER voltage, so a wrong table
+ * over-volts the CPU. The vendor driver (pwm_regulator_set_voltage at 0xc0341cb8 in the stock
+ * kernel, read as ARM code) computes, for a requested voltage V:
+ *
+ *     duty_percent = ((max_uV - V) / coefficient / 10)      all integer divisions
+ *     duty_ns      = period * duty_percent / 100
+ *
+ * with max_uV = rockchip,pwm_max_voltage = 1450000, coefficient = rockchip,pwm_coefficient = 550,
+ * period = 25000 ns, then pwm_config(duty_ns, period) and rk_pwm_config_v2 (period to the
+ * register at +4, duty to +8, control 0xb = enable | continuous | DUTY_POSITIVE): the duty is the
+ * HIGH time. So duty_percent = floor((1450000 - V) / 5500), e.g. 1.25 V -> 36 %, 1.05 V -> 72 %,
+ * 1.45 V -> 0 %. The tables below are exactly that, for the vendor's own 21-entry voltage map.
+ *
+ * The board file's tables were written in per mille with pwm-dutycycle-unit = 1000. The kernel's
+ * pwm-regulator ignores that unit in voltage-table mode (it always scales by 100), so every
+ * entry above 100 would fail pwm_set_relative_duty_cycle() and leave the duty at 0 = 1.45 V.
+ * They are replaced here by percent values, and the unused unit/range properties dropped.
+ *
+ * The whole block is behind RK3128_PWM_REGULATORS (default "disabled", the board file's knob):
+ * the board file sets the status of vdd_arm, vdd_logic, pwm1 and pwm2 from it, and the OPP
+ * entries that need more than u-boot's voltage carry the same status. cpu-supply points at
+ * vdd_arm, so while the regulators are disabled cpufreq-dt defers its probe and the CPU stays
+ * at the clock and voltage u-boot left (the first test image).
+ */
+&vdd_arm {
+	/delete-property/ pwm-dutycycle-unit;
+	/delete-property/ pwm-dutycycle-range;
+	voltage-table = <950000 90>, <975000 86>, <1000000 81>, <1025000 77>,
+			<1050000 72>, <1075000 68>, <1100000 63>, <1125000 59>,
+			<1150000 54>, <1175000 50>, <1200000 45>, <1225000 40>,
+			<1250000 36>, <1275000 31>, <1300000 27>, <1325000 22>,
+			<1350000 18>, <1375000 13>, <1400000 9>, <1425000 4>,
+			<1450000 0>;
+	/* floor: the fork's measured stability limit (1.05 V); ceiling: the vendor's top DVFS step */
+	regulator-min-microvolt = <1050000>;
+	regulator-max-microvolt = <1425000>;
+	/*
+	 * The vendor waits (new - old) >> 9 microseconds after raising the voltage
+	 * (dvfs_volt_up_delay, 0xc0036c08): 512 uV per us.
+	 */
+	regulator-ramp-delay = <512>;
+};
+
+/*
+ * vdd_logic feeds the whole PD_LOGIC (DRAM controller, GPU, VOP...). Nothing changes it in this
+ * image (no dmc, the GPU has no mali-supply), so it keeps u-boot's value; the limits only stop
+ * a stray consumer: floor 1.05 V (mainline's own warning on rk3128-xpi-3128, and the fork's
+ * floor), ceiling the vendor's highest logic step (clk_ddr 396 MHz at 1.25 V).
+ */
+&vdd_logic {
+	/delete-property/ pwm-dutycycle-unit;
+	/delete-property/ pwm-dutycycle-range;
+	voltage-table = <950000 90>, <975000 86>, <1000000 81>, <1025000 77>,
+			<1050000 72>, <1075000 68>, <1100000 63>, <1125000 59>,
+			<1150000 54>, <1175000 50>, <1200000 45>, <1225000 40>,
+			<1250000 36>, <1275000 31>, <1300000 27>, <1325000 22>,
+			<1350000 18>, <1375000 13>, <1400000 9>, <1425000 4>,
+			<1450000 0>;
+	regulator-min-microvolt = <1050000>;
+	regulator-max-microvolt = <1250000>;
+	regulator-ramp-delay = <512>;
+};
+
+/*
+ * CPU DVFS. Frequencies are the vendor's (stock dvfs/vd_arm/clk_core operating-points: 216, 408,
+ * 600, 696, 816, 1008, 1200 MHz). Each voltage is the larger of the vendor's step and the
+ * fork's measured floor (docs/RK3128-LINUX.md "Kernel findings"):
+ *
+ *    MHz    vendor   fork    used
+ *    216    1.000    1.050   1.050
+ *    408    1.000    1.050   1.050
+ *    600    1.150    1.100   1.150
+ *    696    1.150    dropped (the fork's hang, and no clock-tree rate it likes)
+ *    816    1.200    1.200   1.200
+ *   1008    1.350    1.200   1.350
+ *   1200    1.425    1.350   1.425
+ *
+ * Without regulators (the default) u-boot's 1.25 V (vendor rockchip,pwm_voltage of vdd_arm)
+ * carries at most the 816 MHz step, so 1008 and 1200 MHz are disabled with the same knob.
+ * rk3128.dtsi's own voltages (0.95..1.325 V) are below the fork's floor and are replaced.
+ */
+&cpu0 {
+	cpu-supply = <&vdd_arm>;
+};
+
+&cpu_opp_table {
+	/delete-node/ opp-696000000;
+
+	opp-216000000 {
+		opp-microvolt = <1050000 1050000 1425000>;
+	};
+	opp-408000000 {
+		opp-microvolt = <1050000 1050000 1425000>;
+	};
+	opp-600000000 {
+		opp-microvolt = <1150000 1150000 1425000>;
+	};
+	opp-816000000 {
+		opp-microvolt = <1200000 1200000 1425000>;
+	};
+	opp-1008000000 {
+		opp-microvolt = <1350000 1350000 1425000>;
+		status = RK3128_PWM_REGULATORS;
+	};
+	/*
+	 * Off in every build, with no knob (#387): the owner's rule keeps the CPU at the operating
+	 * points Android runs, 1008 MHz at most (1.425 V here is the vendor's table, not used).
+	 */
+	opp-1200000000 {
+		opp-microvolt = <1425000 1425000 1425000>;
+		status = "disabled";
+	};
+};
+
+/*
+ * GPU: Mali-400 MP2 for the Lima DRM driver. rk3128.dtsi already has the register map, the six
+ * IRQs (identical to the vendor's: GP 3, GPMMU 4, PP0 5, PPMMU 4, PP1 5), clocks and the PD_GPU
+ * power domain; the stock `gpu` node lists the same blocks at 0x10090000 (GP), 0x10091000 (L2),
+ * 0x10093000/94000/95000 (MMUs) and 0x10098000/9a000 (PP0/PP1).
+ *
+ * No mali-supply: the vendor ties the GPU to vdd_logic (clk_gpu 396 MHz at 1.15 V, regulator-
+ * mode table only), and vdd_logic must never be lowered here (see above). Lima treats the
+ * supply as optional, so devfreq only changes the clock and the rail stays at u-boot's 1.2 V,
+ * above every step used. 480 MHz is dropped: the vendor never goes above 396 MHz.
+ */
+&gpu {
+	status = "okay";
+};
+
+&gpu_opp_table {
+	/delete-node/ opp-480000000;
+};
+
+/*
+ * Fixed rails that exist only because mainline drivers insist on a supply. The touch controller
+ * has no switchable supply (the vendor driver logs "failed to get regulator, -19" and runs
+ * without), and the SARADC wants a vref regulator: the vendor says rockchip,adc-vref = 1800 mV.
+ */
+/ {
+	rk3128_touch_3v3: regulator-rk3128-touch-3v3 {
+		compatible = "regulator-fixed";
+		regulator-name = "touch_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	rk3128_saradc_1v8: regulator-rk3128-saradc-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "saradc_vref";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
+	/*
+	 * SARADC keys: stock `key` node under 2006c000.adc, io-channels = saradc channel 2
+	 * (10-bit, vref 1.8 V). The vendor poll (adc_key_poll, 0xc0500d70) ignores readings
+	 * >= 950 (no key: the line idles near full scale) and calls a key pressed within +-70
+	 * counts of its rockchip,adc_value: vol-up 1, vol-down 0x1f7 = 503. adc-keys picks the
+	 * nearest threshold (in whole mV), so the thresholds are the vendor centres in microvolt
+	 * (counts * 1800000 / 1024) and keyup is full scale:
+	 *   1 -> 1758 uV, 503 -> 884180 uV, idle -> 1800000 uV.
+	 * Vendor polling is every 10 jiffies (100 ms at HZ=100).
+	 *
+	 * DISABLED BY DEFAULT (#432, docs/RK3128-LINUX.md "Inputs and sensors"): on this board channel 2 rests
+	 * at 6..11 counts (10..19 mV), inside the vol-up window, so adc-keys holds KEY_VOLUMEUP down for good
+	 * (the stock rk29-keypad does too: `getevent -pl` marks KEY_VOLUMEUP with a star). A fitted button
+	 * network pulls the line up to full scale at rest; this one has no pull-up, so the board has no
+	 * volume buttons. The node status is the RK3128_ADC_KEYS knob (linux/dts/rk3128-inputs.dtsi).
+	 */
+	adc_keys: adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 2>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;
+		poll-interval = <100>;
+
+		button-vol-up {
+			label = "volume up";
+			linux,code = <KEY_VOLUMEUP>;
+			press-threshold-microvolt = <1758>;
+		};
+
+		button-vol-down {
+			label = "volume down";
+			linux,code = <KEY_VOLUMEDOWN>;
+			press-threshold-microvolt = <884180>;
+		};
+	};
+
+	/*
+	 * GPIO keys: the power key only (the board has one physical button, owner answer 2026-11-07, #466).
+	 * Stock `key` node: power-key gpio3 pin 22 (GPIO3_C6) flags 1 = active low, code 0x74 = KEY_POWER,
+	 * gpio-key,wakeup. The stock node also has a sensor-key on gpio3 pin 21 (GPIO3_C5, code 0x45 =
+	 * KEY_NUMLOCK); it is NOT a button: the same pin is `gpio_sensor_ctl`'s sensor_ctl_io, the
+	 * accelerometer driver's control line (Android's log: "gpio-117 (sensor_ctl_gpio) status -16" because
+	 * the key node got the pin first). It is left unbound here (no key, no pinctrl; #466, docs/RK3128-LINUX.md
+	 * "Inputs and sensors").
+	 */
+	gpio-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&rk3128_power_key>;
+
+		key-power {
+			label = "power";
+			gpios = <&gpio3 RK_PC6 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_POWER>;
+			wakeup-source;
+		};
+	};
+
+	/*
+	 * IR receiver: stock `rkxx-remotectl`, remotectl_gpios = gpio3 pin 26 (GPIO3_D2, the pin
+	 * the PWM3 block would capture on) flags 1 = active low. Mainline has no Rockchip IR
+	 * capture driver; the vendor driver is a GPIO-interrupt NEC decoder anyway, which is
+	 * exactly gpio-ir-receiver + rc-core's NEC decoder. The keymap is the vendor's seven
+	 * remote tables (linux/patches/302-0002, tools/rk3128_ir_keymap.py).
+	 *
+	 * DISABLED BY DEFAULT (#466): the board has no remote (owner answer 2026-11-07), and the keymap carries
+	 * volume and other keys the launcher would act on, so a live receiver can only make spurious input. The
+	 * node status is the RK3128_IR knob (linux/dts/rk3128-inputs.dtsi).
+	 */
+	ir_receiver: ir-receiver {
+		compatible = "gpio-ir-receiver";
+		gpios = <&gpio3 RK_PD2 GPIO_ACTIVE_LOW>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&rk3128_ir_pin>;
+		linux,rc-map-name = "rc-rk3128-reference";
+	};
+};
+
+&saradc {
+	vref-supply = <&rk3128_saradc_1v8>;
+	status = "okay";
+};
+
+&pinctrl {
+	rk3128-board {
+		/* touch interrupt GPIO2_D1 and power/reset GPIO2_D0 (stock touchscreen@40, gpio2 25/24) */
+		rk3128_touch_int: rk3128-touch-int {
+			rockchip,pins = <2 RK_PD1 RK_FUNC_GPIO &pcfg_pull_default>;
+		};
+
+		rk3128_touch_power: rk3128-touch-power {
+			rockchip,pins = <2 RK_PD0 RK_FUNC_GPIO &pcfg_pull_none>;
+		};
+
+		/* hym8563 INT: stock rtc@51 irq_gpio = gpio0 pin 17 (GPIO0_C1), flags 2 = falling edge */
+		rk3128_rtc_int: rk3128-rtc-int {
+			rockchip,pins = <0 RK_PC1 RK_FUNC_GPIO &pcfg_pull_default>;
+		};
+
+		rk3128_power_key: rk3128-power-key {
+			rockchip,pins = <3 RK_PC6 RK_FUNC_GPIO &pcfg_pull_default>;
+		};
+
+		rk3128_ir_pin: rk3128-ir-pin {
+			rockchip,pins = <3 RK_PD2 RK_FUNC_GPIO &pcfg_pull_default>;
+		};
+	};
+};
+
+&i2c0 {
+	/*
+	 * Touch: Silead GSL family, stock `gslX680-d708` at 0x40. The firmware table is extracted
+	 * by tools/gsl_fw_extract.py (docs/RK3128-LINUX.md "Touch firmware") and goes to
+	 * /lib/firmware/silead/gslx680-d708.fw; silead.c prepends "silead/" to firmware-name.
+	 * Firmware coordinates are 1024 x 640, X right to left (#357). The board-specific
+	 * compatible restores the vendor host calibration (#579), producing 0..800 / 0..1280
+	 * and applying X inversion once. These are calibrated evdev maxima, as on Android;
+	 * touchscreen-size-* includes the endpoint. No extra inversion or swap.
+	 * Interrupt rising edge
+	 * (the vendor requests IRQF_TRIGGER_RISING), wake pin GPIO2_D0 active high.
+	 */
+	touchscreen@40 {
+		compatible = "rockchip,rk3128-reference-gslx680", "silead,gsl1680";
+		reg = <0x40>;
+		interrupt-parent = <&gpio2>;
+		interrupts = <RK_PD1 IRQ_TYPE_EDGE_RISING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&rk3128_touch_int &rk3128_touch_power>;
+		power-gpios = <&gpio2 RK_PD0 GPIO_ACTIVE_HIGH>;
+		firmware-name = "gslx680-d708.fw";
+		touchscreen-size-x = <801>;
+		touchscreen-size-y = <1281>;
+		silead,max-fingers = <5>;
+		vddio-supply = <&rk3128_touch_3v3>;
+		avdd-supply = <&rk3128_touch_3v3>;
+	};
+
+	/* hym8563 RTC: the node is in the board file; this adds the interrupt line */
+	rtc@51 {
+		interrupt-parent = <&gpio0>;
+		interrupts = <RK_PC1 IRQ_TYPE_EDGE_FALLING>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&rk3128_rtc_int>;
+	};
+
+	/*
+	 * Accelerometer: stock sensor@18 `gs_stk8baxx` (layout 1 = identity matrix, poll 10 ms,
+	 * no interrupt). It is the one bound to the stock `gsensor` input device.
+	 */
+	accelerometer@18 {
+		compatible = "sensortek,stk8ba50";
+		reg = <0x18>;
+	};
+
+	/*
+	 * Stock sensor@4c `gs_mc3236`: listed in the stock DT but never bound to a driver in the
+	 * stock sysfs (board-inventory.txt: 0-004c has no driver link), so the part is probably not
+	 * fitted. Disabled; mainline's mc3230 driver covers the MC3230 family at 0x4c if a unit has it.
+	 */
+	accelerometer@4c {
+		compatible = "mcube,mc3230";
+		reg = <0x4c>;
+		status = "disabled";
+	};
+};

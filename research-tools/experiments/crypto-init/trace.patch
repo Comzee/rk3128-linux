@@ -1,0 +1,104 @@
+From: RK3128 reference <maintainers@example.invalid>
+Subject: [PATCH] crypto: trace RK3128 probe PM and reset history
+
+Record lifecycle metadata for early/late initialization comparisons.
+Never read the crypto window while clocks are gated or change power policy.
+The normal profile leaves this read-only diagnostic disabled.
+
+Signed-off-by: RK3128 reference <maintainers@example.invalid>
+
+diff --git a/drivers/crypto/rockchip/rk3128-crypto.c b/drivers/crypto/rockchip/rk3128-crypto.c
+--- a/drivers/crypto/rockchip/rk3128-crypto.c
++++ b/drivers/crypto/rockchip/rk3128-crypto.c
+@@ -55,6 +55,9 @@
+ static unsigned int power_probe;
+ module_param(power_probe, uint, 0400);
+ MODULE_PARM_DESC(power_probe, "Exclusive power probe: 1 handshake, 2 idle, 3 hash, 4 RNG, 5 RNG/PIO cycles");
++static bool init_trace;
++module_param(init_trace, bool, 0400);
++MODULE_PARM_DESC(init_trace, "Bounded probe/resume PM and reset metadata; no crypto register reads");
+ static unsigned int trace_writes;
+ module_param(trace_writes, uint, 0600);
+ MODULE_PARM_DESC(trace_writes, "Bounded pre-MMIO breadcrumbs, offsets only (0..8192)");
+@@ -406,6 +409,28 @@
+ 	memset_io(d->reg + off, 0, bytes);
+ }
+ 
++/* Observe lifecycle state without reading the crypto register window. */
++static void rk_init_trace(struct rk3128_dev *d, const char *phase)
++{
++	struct device *dev = d->dev;
++	unsigned long flags;
++	int status, refs, disabled;
++	bool automatic;
++
++	if (!init_trace)
++		return;
++	spin_lock_irqsave(&dev->power.lock, flags);
++	status = dev->power.runtime_status;
++	refs = atomic_read(&dev->power.usage_count);
++	disabled = dev->power.disable_depth;
++	automatic = dev->power.runtime_auto;
++	spin_unlock_irqrestore(&dev->power.lock, flags);
++	dev_emerg(dev, "INIT %s refs=%d status=%d disabled=%d auto=%u reset=%d sclk=%lu hclk=%lu\n",
++		  phase, refs, status, disabled, automatic,
++		  reset_control_status(d->reset), clk_get_rate(d->clks[0].clk),
++		  clk_get_rate(d->clks[1].clk));
++}
++
+ /* TRM: block flush >=20 cycles; hash flush >=10. Read back before delay. */
+ static void rk_flush(struct rk3128_dev *d, u32 mask)
+ {
+@@ -454,9 +479,11 @@
+ 
+ 	if (d->broken)
+ 		return -EIO;
++	rk_init_trace(d, "resume-before-clocks");
+ 	err = clk_bulk_prepare_enable(ARRAY_SIZE(d->clks), d->clks);
+ 	if (err)
+ 		return runtime_pm ? rk_abort(d, err) : err;
++	rk_init_trace(d, "resume-before-deassert");
+ 	err = reset_control_deassert(d->reset);
+ 	if (err) {
+ 		if (runtime_pm)
+@@ -469,6 +496,7 @@
+ 		if (err)
+ 			return rk_abort(d, err);
+ 	}
++	rk_init_trace(d, "resume-port-active");
+ 	/* No crypto MMIO until clocks, reset and the NoC port are active. Each
+ 	 * hash/PIO request reloads its registers. RNG reprograms OSC, withholds
+ 	 * startup bits and clears the block on each read, as in lifetime mode.
+@@ -1956,13 +1984,16 @@
+ 	d->reset = devm_reset_control_get_exclusive(dev, NULL);
+ 	if (IS_ERR(d->reset))
+ 		return dev_err_probe(dev, PTR_ERR(d->reset), "reset\n");
++	rk_init_trace(d, "probe-before-clocks");
+ 	err = clk_bulk_prepare_enable(ARRAY_SIZE(d->clks), d->clks);
+ 	if (err)
+ 		return err;
++	rk_init_trace(d, "probe-before-assert");
+ 	rk_trace(d, "probe: clocks on, assert reset\n");
+ 	err = reset_control_assert(d->reset);
+ 	udelay(10);
+ 	clk_bulk_disable_unprepare(ARRAY_SIZE(d->clks), d->clks);
++	rk_init_trace(d, "probe-reset-held-clocks-off");
+ 	if (err)
+ 		return err;
+ 	rk_trace(d, "probe: allocate DMA buffers\n");
+@@ -2024,6 +2055,7 @@
+ 		__module_get(THIS_MODULE);
+ 		d->retain_binding = true;
+ 	}
++	rk_init_trace(d, "probe-before-pm-enable");
+ 	pm_runtime_enable(dev);
+ 	/* Hold both clocks for the entire binding: no post-DMA runtime gate.
+ 	 * Normal begin/end calls take/drop only their own extra references.
+@@ -2032,6 +2064,7 @@
+ 	if (err < 0)
+ 		goto unregister;
+ 	d->lifetime_ref = true;
++	rk_init_trace(d, "probe-lifetime-ref");
+ 	if (power_probe) {
+ 		unsigned int cycle, cycles = power_probe >= 3 ? 4 : 1;
+ 		u8 sample[RK_RNG_BYTES];

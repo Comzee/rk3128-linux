@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * HEVC decode (development record #301, docs/RK3128-LINUX.md "Video decode: HEVC").
+ * Included by scripts/linux-build.sh after the board file (#298 fragment convention).
+ *
+ * The RK3128 HEVC decoder (vendor `hevc_service`, hw id 0x6867) is the RK3288 block that mainline
+ * rkvdec drives, wired as half of the vendor "vpu_combo": no bus clocks of its own (ACLK_VDPU and
+ * HCLK_VDPU, shared with the Hantro VPU1 of rk3128-vpu.dtsi), and GRF_SOC_CON1 bit 15 connects one of
+ * the two decoders to the shared bus. Patches 301-0002..0005 add the arbiter for that bit, taken in the
+ * runtime PM callbacks of both decoders and of both IOMMUs; it finds the GRF by compatible and the
+ * IOMMUs through the decoders' `iommus`, so no property here names it.
+ *
+ * #379: the decoder runs without its IOMMU, on the CMA pool of rk3128-vpu.dtsi, as the VPU does since #336:
+ * the VOP has no IOMMU in this port, so only contiguous capture buffers can go to win0 with no copy
+ * (LINUX-DESIGN.md 13). `hevc_mmu` stays described (disabled) for the arbiter's and the binding's sake.
+ *
+ * Addresses, interrupts, clocks and the power domain are the board's own vendor DT
+ * (resource.img rk-kernel.dtb: hevc_service 0x10104000 SPI 66, hevc_mmu 0x10104440 + 0x10104480
+ * SPI 65; vpu_combo clocks clk_vdpu, hclk_vdpu, clk_hevc_core) and the RK3128 TRM (hevc_dec_irq 98,
+ * hevc_mmu_irq 97). rk3128.dtsi has no HEVC nodes, so they are added here, not patched in.
+ */
+
+/ {
+	hevc: video-codec@10104000 {
+		compatible = "rockchip,rk3128-vdec";
+		/* the decoder's registers end where its IOMMU starts (RK3288 layout) */
+		reg = <0x10104000 0x440>;
+		interrupts = <GIC_SPI 66 IRQ_TYPE_LEVEL_HIGH>;
+		/*
+		 * "vpu" (ACLK_VEPU) is the clock the GRF selects as the VPU main clock (bit 10 = 0,
+		 * mainline's grf.c default); it is kept running during HEVC jobs so the decoder
+		 * does not depend on which ACLK that select feeds.
+		 */
+		clocks = <&cru ACLK_VDPU>, <&cru HCLK_VDPU>,
+			 <&cru SCLK_HEVC_CORE>, <&cru ACLK_VEPU>;
+		clock-names = "axi", "ahb", "core", "vpu";
+		/* the vendor clock init: clk_hevc_core 200 MHz (ACLK_VDPU 300 MHz is set by hantro) */
+		assigned-clocks = <&cru SCLK_HEVC_CORE>;
+		assigned-clock-rates = <200000000>;
+		power-domains = <&power RK3128_PD_VIDEO>;
+	};
+
+	hevc_mmu: iommu@10104440 {
+		compatible = "rockchip,iommu";
+		/* two MMU banks, as on RK3288's hevc_mmu */
+		reg = <0x10104440 0x40>, <0x10104480 0x40>;
+		interrupts = <GIC_SPI 65 IRQ_TYPE_LEVEL_HIGH>;
+		/*
+		 * #357 (attempt 13): with only ACLK_VDPU/HCLK_VDPU on, the first read of this MMU
+		 * (rk_iommu_enable_stall, from the attach at rkvdec's probe) reset the SoC at once.
+		 * The vendor's vpu_combo node always runs clk_core (SCLK_HEVC_CORE) with the two bus
+		 * clocks, so the MMU gets it too (rk_iommu takes every clock listed).
+		 */
+		clocks = <&cru ACLK_VDPU>, <&cru HCLK_VDPU>, <&cru SCLK_HEVC_CORE>, <&cru ACLK_VEPU>;
+		clock-names = "aclk", "iface", "core", "vpu";
+		power-domains = <&power RK3128_PD_VIDEO>;
+		#iommu-cells = <0>;
+		/* #379: off, the decoder allocates from CMA (above) */
+		status = "disabled";
+	};
+};

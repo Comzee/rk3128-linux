@@ -1,0 +1,124 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Configfs CDC-NCM example; start/stop/status, no IP address or SSH configuration.
+# Inspect USBG_CONFIGFS, USBG_UDC_DIR, USBG_SERIAL and USBG_NAME overrides before use.
+set -u
+
+CONFIGFS=${USBG_CONFIGFS:-/sys/kernel/config}
+UDC_DIR=${USBG_UDC_DIR:-/sys/class/udc}
+NAME=${USBG_NAME:-rk3128}
+G=$CONFIGFS/usb_gadget/$NAME
+# the Linux Foundation's "multifunction composite gadget" ids: what any Linux gadget uses and every host already knows.
+# (2207:0006 is Android's, Rockchip's: not ours to reuse.)
+VID=0x1d6b
+PID=0x0104
+
+say() { echo "rk3128-usb-gadget: $*"; }
+die() { say "$*" >&2; exit 1; }
+
+serial() {
+	[ -z "${USBG_SERIAL:-}" ] || { echo "$USBG_SERIAL"; return; }
+	n=0
+	while [ $n -lt 30 ]; do
+		for f in /sys/block/mmcblk0/device/serial /sys/class/mmc_host/mmc*/mmc*/serial; do
+			[ -r "$f" ] || continue
+			s=$(cat "$f" 2>/dev/null)
+			[ -z "$s" ] || { echo "${s#0x}"; return; }
+		done
+		sleep 0.1 2>/dev/null || sleep 1
+		n=$((n + 1))
+	done
+	if [ -s /etc/machine-id ]; then
+		s=$(cut -c1-16 /etc/machine-id)
+		[ -z "$s" ] || { echo "$s"; return; }
+	fi
+	echo 0000000000000001
+}
+
+# a locally administered unicast MAC from the serial and a role word
+mac() {
+	h=$(printf '%s' "rk3128-usb-$1-$2" | md5sum | cut -c1-10)
+	printf '02:%s:%s:%s:%s:%s\n' "$(echo "$h" | cut -c1-2)" "$(echo "$h" | cut -c3-4)" "$(echo "$h" | cut -c5-6)" "$(echo "$h" | cut -c7-8)" "$(echo "$h" | cut -c9-10)"
+}
+
+find_udc() {
+	n=0
+	lim=$((${USBG_WAIT:-5} * 10))
+	while [ $n -le $lim ]; do
+		for u in "$UDC_DIR"/*; do
+			[ -e "$u" ] && { basename "$u"; return 0; }
+		done
+		sleep 0.1 2>/dev/null || sleep 1
+		n=$((n + 1))
+	done
+	return 1
+}
+
+stop() {
+	[ -d "$G" ] || return 0
+	# the network interfaces go down while the gadget is still bound: closing one after the unbind makes u_ether's debug
+	# message (USB_GADGET_DEBUG builds) dereference a gadget that is gone (kernel 7.3.1 oops, #431 attempt 431-3)
+	for f in "$G"/functions/*/ifname; do
+		[ -r "$f" ] && [ -z "${USBG_CONFIGFS:-}" ] || continue # (not in the tests: a plain directory, and the host's own usb0 is not ours)
+		n=$(cat "$f" 2>/dev/null)
+		[ -z "$n" ] || ip link set dev "$n" down 2>/dev/null
+	done
+	[ -w "$G/UDC" ] && echo "" >"$G/UDC" 2>/dev/null
+	rm -f "$G"/configs/*/*.* 2>/dev/null
+	for d in "$G"/configs/*/strings/*; do [ -d "$d" ] && rmdir "$d"; done
+	for d in "$G"/configs/*; do [ -d "$d" ] && rmdir "$d"; done
+	for d in "$G"/functions/*; do [ -d "$d" ] && rmdir "$d"; done
+	for d in "$G"/strings/*; do [ -d "$d" ] && rmdir "$d"; done
+	rmdir "$G" 2>/dev/null || die "could not remove $G"
+	say "stopped"
+}
+
+start() {
+	[ -d "$CONFIGFS/usb_gadget" ] || modprobe libcomposite 2>/dev/null # built in on the board; a module in a test kernel
+	[ -d "$CONFIGFS/usb_gadget" ] || mount -t configfs none "$CONFIGFS" 2>/dev/null
+	[ -d "$CONFIGFS/usb_gadget" ] || die "no $CONFIGFS/usb_gadget (CONFIG_USB_CONFIGFS, configfs not mounted)"
+	udc=$(find_udc) || die "no UDC in $UDC_DIR (the OTG controller did not bind: dwc2, usb2phy)"
+	stop >/dev/null 2>&1
+	ser=$(serial)
+	mkdir "$G" || die "mkdir $G failed"
+	echo "$VID" >"$G/idVendor"
+	echo "$PID" >"$G/idProduct"
+	echo 0x0200 >"$G/bcdUSB"
+	# (configfs makes functions/, configs/ and strings/ itself: the -p is for the test's plain directory)
+	mkdir -p "$G/functions" "$G/strings/0x409" "$G/configs/c.1/strings/0x409"
+	echo "$ser" >"$G/strings/0x409/serialnumber"
+	echo "RK3128 Linux reference" >"$G/strings/0x409/manufacturer"
+	echo "RK3128 reference board" >"$G/strings/0x409/product"
+	# the board is self-powered; the host draws nothing from it
+	echo 2 >"$G/configs/c.1/MaxPower"
+	echo 0xc0 >"$G/configs/c.1/bmAttributes"
+	mkdir "$G/functions/ncm.usb0" || die "no ncm function (CONFIG_USB_CONFIGFS_NCM)"
+	mac "$ser" host >"$G/functions/ncm.usb0/host_addr"
+	mac "$ser" board >"$G/functions/ncm.usb0/dev_addr"
+	{ echo usb0 >"$G/functions/ncm.usb0/ifname"; } 2>/dev/null
+	ln -s "$G/functions/ncm.usb0" "$G/configs/c.1/ncm.usb0"
+	echo "RK3128 CDC-NCM" >"$G/configs/c.1/strings/0x409/configuration"
+	if ! echo "$udc" >"$G/UDC"; then
+		stop >/dev/null 2>&1
+		die "binding to $udc failed"
+	fi
+	say "bound to $udc: ncm, serial $ser, host mac $(mac "$ser" host)"
+}
+
+status() {
+	if [ -d "$G" ] && [ -n "$(cat "$G/UDC" 2>/dev/null)" ]; then
+		echo "bound $(cat "$G/UDC") $(cd "$G/functions" && echo *)"
+	else
+		echo "not bound"
+		return 1
+	fi
+}
+
+cmd=${1:-}
+[ $# -eq 0 ] || shift
+case $cmd in
+start) start ;;
+stop) stop ;;
+status) status ;;
+*) echo "usage: rk3128-usb-gadget start | stop | status" >&2; exit 2 ;;
+esac

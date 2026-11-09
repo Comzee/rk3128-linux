@@ -1,0 +1,37 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* RK312x TRM GIC ID 72 = SPI 40; archived frame DT confirms base and IRQ. */
+#ifndef RK3128_CRYPTO
+#define RK3128_CRYPTO "disabled"
+#endif
+#ifndef RK3128_CRYPTO_DIAG
+#define RK3128_CRYPTO_DIAG 0
+#endif
+/ {
+#if RK3128_CRYPTO_DIAG
+	/* Private diagnostic CMA below 2 GiB; no production reservation. */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+		crypto_low_dma: crypto-dma-pool {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x00400000>;
+			alignment = <0x00400000>;
+			alloc-ranges = <0x60000000 0x20000000>;
+		};
+	};
+#endif
+	crypto: crypto@100fc000 {
+		compatible = "rockchip,rk3128-crypto";
+		reg = <0x100fc000 0x4000>;
+		interrupts = <GIC_SPI 40 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru SCLK_CRYPTO>, <&cru HCLK_CRYPTO>;
+		clock-names = "sclk", "hclk";
+		resets = <&cru SRST_CRYPTO>;
+#if RK3128_CRYPTO_DIAG
+		memory-region = <&crypto_low_dma>;
+#endif
+		status = RK3128_CRYPTO;
+	};
+};

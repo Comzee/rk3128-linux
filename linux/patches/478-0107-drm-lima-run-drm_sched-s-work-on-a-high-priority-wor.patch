@@ -1,0 +1,101 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:52:28 -0600
+Subject: [PATCH] drm/lima: run drm_sched's work on a high-priority workqueue
+
+drm_sched allocates an ordered WQ_MEM_RECLAIM workqueue on the normal pool
+for run_job and free_job, so every job start the IRQ handler does not do
+itself waits for a nice-0 kworker, behind the app's own threads.
+
+The vendor driver queues those starts on a WQ_HIGHPRI | WQ_UNBOUND
+workqueue: _mali_osk_wq_init creates mali_wq_high with flags 0x12, used
+through mali_executor_schedule_from_mask (0xc0390d34) ->
+_mali_osk_wq_schedule_work_high_pri.
+
+Give each lima pipe its own ordered high-priority workqueue and hand it to
+drm_sched. Worth tens of microseconds on the first task of a burst and on
+the GP->PP hop.
+
+Rebased from the #375 prototype (375-0104), with the workqueue freed when
+drm_sched_init() fails.
+
+Risk to pictures: none.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_sched.c | 27 +++++++++++++++++++++++++--
+ drivers/gpu/drm/lima/lima_sched.h |  3 +++
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+index 6fe4a19..c4368de 100644
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -691,7 +691,7 @@ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ {
+ 	unsigned int timeout = lima_sched_timeout_ms > 0 ?
+ 			       lima_sched_timeout_ms : 10000;
+-	const struct drm_sched_init_args args = {
++	struct drm_sched_init_args args = {
+ 		.ops = &lima_sched_ops,
+ 		.num_rqs = DRM_SCHED_PRIORITY_COUNT,
+ 		/* one on the hardware, one waiting for its IRQ */
+@@ -701,6 +701,25 @@ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ 		.name = name,
+ 		.dev = pipe->ldev->dev,
+ 	};
++	int err;
++
++	/*
++	 * drm_sched's own submit workqueue is an ordered WQ_MEM_RECLAIM one on
++	 * the normal pool, so every job start it does - the first of a burst,
++	 * and a PP task whose GP task just ended - waits for a nice-0 kworker
++	 * behind the app's own threads. The vendor driver puts the job starts
++	 * its interrupt handler does not do itself on a high-priority
++	 * workqueue: _mali_osk_wq_init creates mali_wq_high with flags 0x12
++	 * (WQ_HIGHPRI | WQ_UNBOUND), used through
++	 * mali_executor_schedule_from_mask (0xc0390d34) ->
++	 * _mali_osk_wq_schedule_work_high_pri.
++	 */
++	pipe->submit_wq = alloc_ordered_workqueue("lima-%s",
++						  WQ_HIGHPRI | WQ_MEM_RECLAIM,
++						  name);
++	if (!pipe->submit_wq)
++		return -ENOMEM;
++	args.submit_wq = pipe->submit_wq;
+ 
+ 	pipe->fence_context = dma_fence_context_alloc(1);
+ 	spin_lock_init(&pipe->fence_lock);
+@@ -709,13 +728,17 @@ int lima_sched_pipe_init(struct lima_sched_pipe *pipe, const char *name)
+ 	INIT_WORK(&pipe->start_work, lima_sched_start_work);
+ 	spin_lock_init(&pipe->hw_lock);
+ 
+-	return drm_sched_init(&pipe->base, &args);
++	err = drm_sched_init(&pipe->base, &args);
++	if (err)
++		destroy_workqueue(pipe->submit_wq);
++	return err;
+ }
+ 
+ void lima_sched_pipe_fini(struct lima_sched_pipe *pipe)
+ {
+ 	drm_sched_fini(&pipe->base);
+ 	cancel_work_sync(&pipe->start_work);
++	destroy_workqueue(pipe->submit_wq);
+ }
+ 
+ void lima_sched_pipe_task_done(struct lima_sched_pipe *pipe)
+diff --git a/drivers/gpu/drm/lima/lima_sched.h b/drivers/gpu/drm/lima/lima_sched.h
+index 6fc40fc..989e713 100644
+--- a/drivers/gpu/drm/lima/lima_sched.h
++++ b/drivers/gpu/drm/lima/lima_sched.h
+@@ -72,6 +72,9 @@ struct lima_sched_pipe {
+ 	struct lima_sched_task *next_task;
+ 	struct work_struct start_work;
+ 
++	/* drm_sched's run_job/free_job work, on the high-priority pool */
++	struct workqueue_struct *submit_wq;
++
+ 	struct lima_ip *mmu[LIMA_SCHED_PIPE_MAX_MMU];
+ 	int num_mmu;
+ 

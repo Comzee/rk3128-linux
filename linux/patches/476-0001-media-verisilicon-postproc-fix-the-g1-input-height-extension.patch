@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 10:05:00 -0600
+Subject: [PATCH] media: verisilicon: postproc: fix the G1 input height
+ extension
+
+hantro_postproc_g1_enable() writes the extension bits of the
+post-processor's input height (in macroblocks) as
+MB_HEIGHT(height >> 8): the shift is inside the macro, so any picture of
+256 lines or more gets an extension of 1 or more, which adds 256 (or a
+multiple) macroblock rows to the input height the post-processor
+expects. The width next to it is right (MB_WIDTH(width) >> 9).
+
+On the RK3128 G1 the post-processor honours those bits. In pipeline mode
+it then waits for macroblock rows the decoder never sends: the decoder
+finishes the picture, goes idle and ends the job with DEC_TIMEOUT (bus
+idle for 2^18 cycles) instead of DEC_RDY, and the last lines of the
+post-processed picture are never written. Pictures up to 15 macroblock
+rows (240 lines) ended with DEC_RDY, from 16 rows (256 lines) on every
+one timed out, whatever the width; the vendor stack never uses the
+post-processor and always got DEC_RDY.
+
+Shift the macroblock count, as for the width.
+
+development record #476
+---
+ drivers/media/platform/verisilicon/hantro_postproc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/verisilicon/hantro_postproc.c b/drivers/media/platform/verisilicon/hantro_postproc.c
+index e94d1ba..ecc6b31 100644
+--- a/drivers/media/platform/verisilicon/hantro_postproc.c
++++ b/drivers/media/platform/verisilicon/hantro_postproc.c
+@@ -106,7 +106,7 @@ static void hantro_postproc_g1_enable(struct hantro_ctx *ctx)
+ 	HANTRO_PP_REG_WRITE(vpu, orig_width, MB_WIDTH(ctx->dst_fmt.width));
+ 	HANTRO_PP_REG_WRITE(vpu, display_width, ctx->dst_fmt.width);
+ 	HANTRO_PP_REG_WRITE(vpu, input_width_ext, MB_WIDTH(ctx->dst_fmt.width) >> 9);
+-	HANTRO_PP_REG_WRITE(vpu, input_height_ext, MB_HEIGHT(ctx->dst_fmt.height >> 8));
++	HANTRO_PP_REG_WRITE(vpu, input_height_ext, MB_HEIGHT(ctx->dst_fmt.height) >> 8);
+ }
+ 
+ static int down_scale_factor(struct hantro_ctx *ctx)
+-- 
+2.47.0
+

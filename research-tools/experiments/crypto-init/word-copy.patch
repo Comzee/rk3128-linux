@@ -1,0 +1,15 @@
+--- a/rk3128-crypto.c
++++ b/rk3128-crypto.c
+@@ -399,8 +399,11 @@
+ 
+ static void rk_copy(struct rk3128_dev *d, u32 off, const void *src, unsigned int bytes)
+ {
++	unsigned int i;
++
+ 	rk_trace_write(d, off, bytes);
+-	memcpy_toio(d->reg + off, src, bytes);
++	for (i = 0; i < bytes; i += sizeof(u32))
++		writel(get_unaligned_le32((const u8 *)src + i), d->reg + off + i);
+ }
+ 
+ static void rk_clear(struct rk3128_dev *d, u32 off, unsigned int bytes)

@@ -1,0 +1,232 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 08:53:44 -0600
+Subject: [PATCH 3/4] drm/rockchip: lvds: Add RK3128 support
+
+The RK3128 drives a single-channel LVDS panel from its only VOP
+through the LVDS mode of the Innosilicon combo PHY (the same PHY the
+PX30 uses), plus one control register in the GRF.
+
+LVDS_CON0 (GRF + 0x150) holds the data source select (VOP or EBC),
+the 2-bit data format, MSB select, LVDS mode enable, LVTTL enable, the
+lane 0 enable and the parallel-to-serial enable. Program them in one
+write, then switch the PHY to LVDS mode and power it on. There is no
+VOP select: the SoC has one VOP. The VOP side needs nothing new: the
+rk3126 output data already has the RGB output enable and the dot
+clock polarity that a VOP-to-LVDS connection uses.
+
+Unlike the PX30 variant, which powers the PHY on once at probe, power
+it on and off with the encoder, after the VOP clock runs and before
+the panel is enabled, and refuse an unbalanced disable. Only the two
+24 bit data mappings are accepted: the encoding of the 18 bit formats
+in the format field is not documented for this SoC.
+
+The GRF register layout and the PHY-based structure follow Stanislav
+Datskovskiy's "drm/rockchip: lvds: Support LVDS output on RK3126/RK3128"
+(KING JIM DM250 tree, jcs/linux-dm250 1d5b0bbb47bb), which works on
+that RK3128 panel. This version is a separate implementation written
+against the vendor 3.10 rk31xx-lvds driver: it writes the whole
+register as the vendor does (including lane 0 enable and the data
+source select), ties the PHY to the encoder instead of to probe, and
+uses the RK3128 compatible.
+
+Link: https://github.com/jcs/linux-dm250/commit/1d5b0bbb47bb
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/gpu/drm/rockchip/Kconfig b/drivers/gpu/drm/rockchip/Kconfig
+index 4e58685f5..b8ecf93c4 100644
+--- a/drivers/gpu/drm/rockchip/Kconfig
++++ b/drivers/gpu/drm/rockchip/Kconfig
+@@ -128,8 +128,9 @@ config ROCKCHIP_LVDS
+ 	help
+ 	  Choose this option to enable support for Rockchip LVDS controllers.
+ 	  Rockchip rk3288 SoC has LVDS TX Controller can be used, and it
+-	  support LVDS, rgb, dual LVDS output mode. say Y to enable its
+-	  driver.
++	  support LVDS, rgb, dual LVDS output mode. The px30 and rk3128 SoCs
++	  drive LVDS panels through their MIPI/LVDS combo PHY. say Y to
++	  enable its driver.
+ 
+ config ROCKCHIP_RGB
+ 	bool "Rockchip RGB support"
+diff --git a/drivers/gpu/drm/rockchip/rockchip_lvds.c b/drivers/gpu/drm/rockchip/rockchip_lvds.c
+index 505c6c567..2d5daec4e 100644
+--- a/drivers/gpu/drm/rockchip/rockchip_lvds.c
++++ b/drivers/gpu/drm/rockchip/rockchip_lvds.c
+@@ -58,6 +58,7 @@ struct rockchip_lvds {
+ 	struct drm_bridge *bridge;
+ 	struct rockchip_encoder encoder;
+ 	struct dev_pin_info *pins;
++	bool enabled;
+ };
+ 
+ static inline struct rockchip_lvds *brige_to_lvds(struct drm_bridge *bridge)
+@@ -430,6 +431,85 @@ static const struct drm_encoder_funcs rockchip_lvds_encoder_funcs = {
+ 	.destroy = drm_encoder_cleanup,
+ };
+ 
++static int rk3128_lvds_poweron(struct rockchip_lvds *lvds)
++{
++	int ret;
++
++	if (lvds->output != DISPLAY_OUTPUT_LVDS) {
++		DRM_DEV_ERROR(lvds->dev, "Unsupported display output %d\n",
++			      lvds->output);
++		return -EINVAL;
++	}
++
++	/* The LVDS_CON0 format field is only known for the 24 bit mappings */
++	if (lvds->format != LVDS_VESA_24 && lvds->format != LVDS_JEIDA_24) {
++		DRM_DEV_ERROR(lvds->dev, "Unsupported data mapping %d\n",
++			      lvds->format);
++		return -EINVAL;
++	}
++
++	/*
++	 * LVDS mode and the parallel to serial converter on, LVTTL off, the
++	 * VOP (not the EBC) as the source, MSB on D7, and the data format.
++	 */
++	ret = regmap_write(lvds->grf, RK3128_LVDS_GRF_LVDS_CON0,
++			   RK3128_LVDS_DATA_SEL(0) |
++			   RK3128_LVDS_FORMAT(lvds->format) |
++			   RK3128_LVDS_MSBSEL(1) |
++			   RK3128_LVDS_MODE_EN(1) |
++			   RK3128_LVDS_TTL_EN(0) |
++			   RK3128_LVDS_LANE0_EN(1) |
++			   RK3128_LVDS_P2S_EN(1));
++	if (ret)
++		return ret;
++
++	ret = phy_set_mode(lvds->dphy, PHY_MODE_LVDS);
++	if (ret)
++		return ret;
++
++	return phy_power_on(lvds->dphy);
++}
++
++static void rk3128_lvds_poweroff(struct rockchip_lvds *lvds)
++{
++	phy_power_off(lvds->dphy);
++
++	regmap_write(lvds->grf, RK3128_LVDS_GRF_LVDS_CON0,
++		     RK3128_LVDS_MODE_EN(0) | RK3128_LVDS_TTL_EN(0) |
++		     RK3128_LVDS_LANE0_EN(0) | RK3128_LVDS_P2S_EN(0));
++}
++
++static void rk3128_lvds_encoder_enable(struct drm_encoder *encoder)
++{
++	struct rockchip_lvds *lvds = encoder_to_lvds(encoder);
++	int ret;
++
++	drm_panel_prepare(lvds->panel);
++
++	ret = rk3128_lvds_poweron(lvds);
++	if (ret) {
++		DRM_DEV_ERROR(lvds->dev, "failed to power on LVDS: %d\n", ret);
++		drm_panel_unprepare(lvds->panel);
++		return;
++	}
++
++	drm_panel_enable(lvds->panel);
++	lvds->enabled = true;
++}
++
++static void rk3128_lvds_encoder_disable(struct drm_encoder *encoder)
++{
++	struct rockchip_lvds *lvds = encoder_to_lvds(encoder);
++
++	if (!lvds->enabled)
++		return;
++
++	drm_panel_disable(lvds->panel);
++	rk3128_lvds_poweroff(lvds);
++	drm_panel_unprepare(lvds->panel);
++	lvds->enabled = false;
++}
++
+ static const
+ struct drm_encoder_helper_funcs rk3288_lvds_encoder_helper_funcs = {
+ 	.enable = rk3288_lvds_encoder_enable,
+@@ -444,6 +524,12 @@ struct drm_encoder_helper_funcs px30_lvds_encoder_helper_funcs = {
+ 	.atomic_check = rockchip_lvds_encoder_atomic_check,
+ };
+ 
++static const struct drm_encoder_helper_funcs rk3128_lvds_encoder_helper_funcs = {
++	.enable = rk3128_lvds_encoder_enable,
++	.disable = rk3128_lvds_encoder_disable,
++	.atomic_check = rockchip_lvds_encoder_atomic_check,
++};
++
+ static int rk3288_lvds_probe(struct platform_device *pdev,
+ 			     struct rockchip_lvds *lvds)
+ {
+@@ -507,6 +593,28 @@ static int px30_lvds_probe(struct platform_device *pdev,
+ 	return phy_power_on(lvds->dphy);
+ }
+ 
++static void rk3128_lvds_phy_exit(void *data)
++{
++	phy_exit(data);
++}
++
++static int rk3128_lvds_probe(struct platform_device *pdev,
++			     struct rockchip_lvds *lvds)
++{
++	int ret;
++
++	lvds->dphy = devm_phy_get(&pdev->dev, "dphy");
++	if (IS_ERR(lvds->dphy))
++		return PTR_ERR(lvds->dphy);
++
++	ret = phy_init(lvds->dphy);
++	if (ret)
++		return ret;
++
++	return devm_add_action_or_reset(&pdev->dev, rk3128_lvds_phy_exit,
++					lvds->dphy);
++}
++
+ static const struct rockchip_lvds_soc_data rk3288_lvds_data = {
+ 	.probe = rk3288_lvds_probe,
+ 	.helper_funcs = &rk3288_lvds_encoder_helper_funcs,
+@@ -517,6 +625,11 @@ static const struct rockchip_lvds_soc_data px30_lvds_data = {
+ 	.helper_funcs = &px30_lvds_encoder_helper_funcs,
+ };
+ 
++static const struct rockchip_lvds_soc_data rk3128_lvds_data = {
++	.probe = rk3128_lvds_probe,
++	.helper_funcs = &rk3128_lvds_encoder_helper_funcs,
++};
++
+ static const struct of_device_id rockchip_lvds_dt_ids[] = {
+ 	{
+ 		.compatible = "rockchip,rk3288-lvds",
+@@ -526,6 +639,10 @@ static const struct of_device_id rockchip_lvds_dt_ids[] = {
+ 		.compatible = "rockchip,px30-lvds",
+ 		.data = &px30_lvds_data
+ 	},
++	{
++		.compatible = "rockchip,rk3128-lvds",
++		.data = &rk3128_lvds_data
++	},
+ 	{}
+ };
+ MODULE_DEVICE_TABLE(of, rockchip_lvds_dt_ids);
+diff --git a/drivers/gpu/drm/rockchip/rockchip_lvds.h b/drivers/gpu/drm/rockchip/rockchip_lvds.h
+index 2d92447d8..9c095afae 100644
+--- a/drivers/gpu/drm/rockchip/rockchip_lvds.h
++++ b/drivers/gpu/drm/rockchip/rockchip_lvds.h
+@@ -121,4 +121,13 @@
+ #define   PX30_LVDS_P2S_EN(val)			FIELD_PREP_WM16(BIT(6), (val))
+ #define   PX30_LVDS_VOP_SEL(val)		FIELD_PREP_WM16(BIT(1), (val))
+ 
++#define RK3128_LVDS_GRF_LVDS_CON0		0x150
++#define   RK3128_LVDS_DATA_SEL(val)		FIELD_PREP_WM16(BIT(0), (val))
++#define   RK3128_LVDS_FORMAT(val)		FIELD_PREP_WM16(GENMASK(2, 1), (val))
++#define   RK3128_LVDS_MSBSEL(val)		FIELD_PREP_WM16(BIT(3), (val))
++#define   RK3128_LVDS_MODE_EN(val)		FIELD_PREP_WM16(BIT(6), (val))
++#define   RK3128_LVDS_TTL_EN(val)		FIELD_PREP_WM16(BIT(7), (val))
++#define   RK3128_LVDS_LANE0_EN(val)		FIELD_PREP_WM16(BIT(8), (val))
++#define   RK3128_LVDS_P2S_EN(val)		FIELD_PREP_WM16(BIT(9), (val))
++
+ #endif /* _ROCKCHIP_LVDS_ */

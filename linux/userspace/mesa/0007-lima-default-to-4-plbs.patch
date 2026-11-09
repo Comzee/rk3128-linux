@@ -1,0 +1,28 @@
+From: RK3128 reference #416 <reference@example.invalid>
+Subject: [PATCH] lima: default to 4 PLBs per context
+
+The PLB ring index advances per job, and the GP of job k waits for the
+PP of job k - LIMA_CTX_NUM_PLB. With the default of 2 and an app that
+renders 4-5 jobs a frame, the next frame's GP can never overlap this
+frame's PP. 4 (the existing maximum) lets frames pipeline: the
+RK3128 reference Demo on a Mali-400 at 297 MHz dropped 30 frames a loop
+with 2 and 14 with 4 (before its shader patches; none with them).
+---
+--- a/src/gallium/drivers/lima/lima_context.h
++++ b/src/gallium/drivers/lima/lima_context.h
+@@ -240,9 +240,14 @@
+    unsigned min_index;
+    unsigned max_index;
+ 
++   /* plb_index turns per job, not per frame, and the GP of job k writes plb[i] and gp_tile_heap[i], which the PP of
++    * job k - num_plb reads (implicit sync in the kernel): with 2 and an app of 4-5 jobs a frame (offscreen passes),
++    * the on-screen GP of frame N+1 waits for the on-screen PP of frame N, so frames never overlap. 4 lets them
++    * (RK3128 reference #416, its Demo on a Mali-400 at 297 MHz: 30 late frames a loop with 2, 14 with 4).
++    * LIMA_CTX_NUM_PLB still picks 1-4. */
+    #define LIMA_CTX_PLB_MIN_NUM  1
+    #define LIMA_CTX_PLB_MAX_NUM  4
+-   #define LIMA_CTX_PLB_DEF_NUM  2
++   #define LIMA_CTX_PLB_DEF_NUM  4
+    #define LIMA_CTX_PLB_BLK_SIZE 512
+    unsigned plb_size;
+    unsigned plb_gp_size;

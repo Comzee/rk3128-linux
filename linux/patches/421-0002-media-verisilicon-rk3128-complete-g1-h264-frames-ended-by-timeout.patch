@@ -1,0 +1,105 @@
+From 6b461bf1165b02803afbb6ffd4248736f83ab04e Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 05:59:42 -0600
+Subject: [PATCH] media: verisilicon: rk3128: complete G1 H.264 frames that end
+ by the idle timeout
+
+The RK3128 G1 never raises DEC_RDY for an H.264 picture. It decodes every
+macroblock, writes the picture out, goes idle, and its bus idle watchdog
+ends the job with DEC_TIMEOUT 2^18 aclk cycles later (0.88 ms at 297 MHz).
+Every capture buffer was flagged ERROR although the pictures are
+byte-identical to a software decode.
+
+On the variant with the shared VPU/HEVC bus (vcodec_combo), take such a
+timeout as completion when no fault bit is set and the macroblock counter
+in Rockchip's debug word (swreg58, bits 20:0) equals the picture size in
+macroblocks (half of it for a field picture). Anything else stays ERROR.
+
+development record #476 found why: the post-processor's input height
+extension was wrong for pictures 256 lines or taller (476-0001), and the
+decoder waited for it. With that fixed every picture ends with DEC_RDY;
+this path stays as a safety net and logs each picture it completes
+("ended by the idle timeout").
+
+development record #421
+---
+ .../media/platform/verisilicon/hantro_g1.c    | 56 ++++++++++++++++++-
+ 1 file changed, 55 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/media/platform/verisilicon/hantro_g1.c b/drivers/media/platform/verisilicon/hantro_g1.c
+index 3207441..c7d9884 100644
+--- a/drivers/media/platform/verisilicon/hantro_g1.c
++++ b/drivers/media/platform/verisilicon/hantro_g1.c
+@@ -11,6 +11,59 @@
+ #include "hantro.h"
+ #include "hantro_g1_regs.h"
+ 
++/*
++ * RK3128 (the G1 behind the bus it shares with the HEVC decoder): Rockchip
++ * debug word, swreg58.  Bits [20:0] count the macroblocks the decoder has
++ * finished in the current picture.
++ */
++#define G1_REG_RK_DEBUG				0x0e8
++#define     G1_REG_RK_DEBUG_MB_CNT		GENMASK(20, 0)
++
++#define G1_REG_INTERRUPT_DEC_FAULT		(G1_REG_INTERRUPT_DEC_ERROR_INT | \
++						 G1_REG_INTERRUPT_DEC_ASO_INT | \
++						 G1_REG_INTERRUPT_DEC_BUFFER_INT | \
++						 G1_REG_INTERRUPT_DEC_BUS_INT)
++
++/*
++ * A safety net for an RK3128 H.264 picture that the G1 decodes completely
++ * but ends with DEC_TIMEOUT (its bus idle watchdog, 2^18 aclk cycles, 0.88 ms
++ * at 297 MHz) instead of DEC_RDY.  Every picture 256 lines or taller ended
++ * so while the post-processor waited for macroblock rows that never came
++ * (its input height extension, fixed in hantro_postproc.c); with that right
++ * the decoder raises DEC_RDY, so this logs each picture it completes.  The
++ * picture is complete when no fault bit is set and the macroblock counter
++ * has reached the size of the picture (half of it for a field).
++ */
++static bool hantro_g1_h264_ended_by_timeout(struct hantro_dev *vpu, u32 status)
++{
++	struct hantro_ctx *ctx;
++	u32 ctrl0, ctrl1, mbs, total;
++
++	if (!vpu->variant->vcodec_combo ||
++	    !(status & G1_REG_INTERRUPT_DEC_TIMEOUT) ||
++	    (status & G1_REG_INTERRUPT_DEC_FAULT))
++		return false;
++
++	ctx = v4l2_m2m_get_curr_priv(vpu->m2m_dev);
++	if (!ctx || ctx->vpu_src_fmt->codec_mode != HANTRO_MODE_H264_DEC)
++		return false;
++
++	ctrl0 = vdpu_read(vpu, G1_REG_DEC_CTRL0);
++	ctrl1 = vdpu_read(vpu, G1_REG_DEC_CTRL1);
++	total = ((ctrl1 >> 23) & 0x1ff) * ((ctrl1 >> 11) & 0xff);
++	mbs = vdpu_read(vpu, G1_REG_RK_DEBUG) & G1_REG_RK_DEBUG_MB_CNT;
++
++	if (!total || (mbs != total &&
++		       !((ctrl0 & G1_REG_DEC_CTRL0_PIC_FIELDMODE_E) &&
++			 mbs == total / 2)))
++		return false;
++
++	dev_warn_ratelimited(vpu->dev,
++			     "G1 H.264 picture ended by the idle timeout, status 0x%08x, all %u macroblocks decoded: completed\n",
++			     status, mbs);
++	return true;
++}
++
+ irqreturn_t hantro_g1_irq(int irq, void *dev_id)
+ {
+ 	struct hantro_dev *vpu = dev_id;
+@@ -18,7 +71,8 @@ irqreturn_t hantro_g1_irq(int irq, void *dev_id)
+ 	u32 status;
+ 
+ 	status = vdpu_read(vpu, G1_REG_INTERRUPT);
+-	state = (status & G1_REG_INTERRUPT_DEC_RDY_INT) ?
++	state = ((status & G1_REG_INTERRUPT_DEC_RDY_INT) ||
++		 hantro_g1_h264_ended_by_timeout(vpu, status)) ?
+ 		 VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR;
+ 	if (state == VB2_BUF_STATE_ERROR)
+ 		dev_warn_ratelimited(vpu->dev, "G1 decode error, status 0x%08x\n",
+-- 
+2.53.0
+

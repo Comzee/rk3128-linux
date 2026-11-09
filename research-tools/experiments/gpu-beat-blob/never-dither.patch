@@ -1,0 +1,43 @@
+From 937c9f0e726f141367f305a71bf82ae58b87f8cd Mon Sep 17 00:00:00 2001
+From: beat-state <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 07:55:50 -0600
+Subject: [PATCH] lima: never dither, as the Mali blob does not
+
+GL leaves dithering implementation defined (GLES 2.0 4.1.8: "the selection of... a dithering algorithm is not
+specified") and GL_DITHER is enabled by default, so lima set the RSW's "Dithering" bit on every draw of an app
+that never asked for it. The Mali blob never dithers: all 220 render states of the #478 Demo, Photos and Games
+captures have "Dithering: false", and it is the only RSW field besides the stencil write masks and the varying
+formats that differed on all 54 matched Demo draws.
+
+This is a picture-parity change, not a performance one: Mali Utgard's dither matrix is applied in the
+fixed-function writeback and costs no PP cycles and no bandwidth.
+
+Pixel effect: an 8-bit channel whose fp16 tilebuffer value is not exactly representable now rounds instead of
+taking a +-1/255 offset from the 4x4 ordered matrix, so a pixel can move by up to 1/255 either way and a smooth
+gradient can show banding where the dither pattern hid it. Every pixel then matches what the blob writes on the
+same frame, which is what #407 compares.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/gallium/drivers/lima/lima_draw.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+index a14e86e..ed28e54 100644
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -740,7 +740,13 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
+       state.varying_stride = ctx->vs->state.varying_stride;
+ 
+       state.front_face_ccw = ctx->rasterizer->base.front_ccw;
+-      state.dithering = ctx->blend->base.dither;
++      /* GL leaves dithering implementation defined ("the selection of... a dithering algorithm is not
++       * specified", GLES 2.0 4.1.8) and GL_DITHER is on by default, so lima dithered every draw of an app that
++       * never asked for it. The Mali blob never dithers: every one of the 220 render states of the #478 Demo and
++       * reference UI captures have "Dithering: false", including the Demo's gradients. Match it, so a frame rendered by
++       * lima and one rendered by the blob agree bit for bit, which #407 needs, and so no surface gets the 4x4
++       * ordered pattern on a near-flat gradient or an antialiased text edge. */
++      state.dithering = false;
+ 
+       state.early_z = true;
+       state.pixel_kill = true;

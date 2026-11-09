@@ -1,0 +1,199 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:49:47 -0600
+Subject: [PATCH] drm/lima: relaxed register writes, skipping reset values,
+ like the vendor
+
+lima writes all 23 frame and 36 write-back registers of every PP core with
+writel(), i.e. a dsb st before each one: about 118 ordered register accesses
+per PP task on a Mali-400 MP2, plus 8 for the GP.
+
+The vendor driver writes the same registers with bare stores and one barrier
+before the start command, and skips any register whose value already equals
+the hardware reset value:
+
+  _mali_osk_mem_iowrite32          0xc037f65c  dsb st, then the store
+                                               (= lima's writel)
+  _mali_osk_mem_iowrite32_relaxed  0xc037f620  the store only
+                                               (= writel_relaxed)
+  _mali_osk_write_mem_barrier      0xc037f5e0  dsb st
+  mali_gp_job_start                0xc038b950  6 relaxed frame registers,
+                                               relaxed CMD=UPDATE_PLBU_ALLOC,
+                                               barrier, relaxed CMD=start
+  mali_pp_job_start                0xc038c0d4  relaxed, each register
+                                               compared with the reset-value
+                                               table at 0xc087735c (frame)
+                                               and 0xc08773b8 (write-back),
+                                               barrier, START_RENDERING
+
+Dropping the barriers is safe: accesses to Device-nGnRE memory are not
+reordered against each other, so the per-register dsb st only ordered the
+CPU's earlier writes to DDR (command lists, page tables) against the
+register writes, and the dsb st inside the final writel() of the start
+command does that for all of them. This is exactly the vendor's structure,
+including where the one surviving barrier sits.
+
+Skipping reset values needs the core to actually be at its reset values.
+Both drivers reset the core between tasks - the vendor in
+mali_group_complete_pp (0xc03921a4, mali_pp_reset_async/_wait), lima in
+lima_pp_task_fini() with the wait moved to the next
+lima_pp_soft_reset_async_wait() before the register writes - and the error
+path hard-resets. In the Demo most of the write-back registers are zero
+(only one write-back unit is used), so this is about 59 ordered writes per
+core replaced by about 30 unordered ones.
+
+lima.reg_skip_reset (0644, default Y) turns only the skipping off; the
+relaxed writes stay, since they are provably the vendor's own behaviour.
+
+Risk to pictures: none if the reset invariant holds; a register left at a
+previous task's value would be a visible corruption, not a rounding
+difference, and reg_skip_reset=N rules it out without a reboot. No
+arithmetic changes.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_drv.c |  4 +++
+ drivers/gpu/drm/lima/lima_drv.h |  1 +
+ drivers/gpu/drm/lima/lima_gp.c  | 17 +++++++++++--
+ drivers/gpu/drm/lima/lima_pp.c  | 44 ++++++++++++++++++++++++++++++---
+ 4 files changed, 60 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index 5b89458..ac8d47d 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -24,6 +24,7 @@ uint lima_job_hang_limit;
+ int lima_l2_max_reads = 0x1c;
+ bool lima_mmu_zap_tlb = true;
+ bool lima_l2_flush_always;
++bool lima_reg_skip_reset = true;
+ 
+ MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+@@ -43,6 +44,9 @@ module_param_named(l2_max_reads, lima_l2_max_reads, int, 0444);
+ MODULE_PARM_DESC(l2_flush_always, "invalidate the whole L2 before every task (lima's old behaviour) instead of the vendor driver's conditional invalidate (default N)");
+ module_param_named(l2_flush_always, lima_l2_flush_always, bool, 0644);
+ 
++MODULE_PARM_DESC(reg_skip_reset, "skip PP frame and write-back register writes whose value already equals the hardware reset value, like the vendor driver (default Y)");
++module_param_named(reg_skip_reset, lima_reg_skip_reset, bool, 0644);
++
+ MODULE_PARM_DESC(mmu_zap_tlb, "with the page directory the MMU already has, only zap the TLB instead of stalling and reprogramming it, like the vendor driver (default Y)");
+ module_param_named(mmu_zap_tlb, lima_mmu_zap_tlb, bool, 0644);
+ 
+diff --git a/drivers/gpu/drm/lima/lima_drv.h b/drivers/gpu/drm/lima/lima_drv.h
+index c6694fd..7be4cd1 100644
+--- a/drivers/gpu/drm/lima/lima_drv.h
++++ b/drivers/gpu/drm/lima/lima_drv.h
+@@ -14,6 +14,7 @@ extern uint lima_heap_init_nr_pages;
+ extern int lima_l2_max_reads;
+ extern bool lima_mmu_zap_tlb;
+ extern bool lima_l2_flush_always;
++extern bool lima_reg_skip_reset;
+ extern uint lima_max_error_tasks;
+ extern uint lima_job_hang_limit;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_gp.c b/drivers/gpu/drm/lima/lima_gp.c
+index 3282997..feb194d 100644
+--- a/drivers/gpu/drm/lima/lima_gp.c
++++ b/drivers/gpu/drm/lima/lima_gp.c
+@@ -9,6 +9,7 @@
+ #include <drm/lima_drm.h>
+ 
+ #include "lima_device.h"
++#include "lima_drv.h"
+ #include "lima_gp.h"
+ #include "lima_regs.h"
+ #include "lima_gem.h"
+@@ -160,10 +161,22 @@ static void lima_gp_task_run(struct lima_sched_pipe *pipe,
+ 	/* before any hw ops, wait last success task async soft reset */
+ 	lima_gp_soft_reset_async_wait(ip);
+ 
++	/*
++	 * mali_gp_job_start (0xc038b950) writes the six frame registers and
++	 * the UPDATE_PLBU_ALLOC command with _mali_osk_mem_iowrite32_relaxed
++	 * (0xc037f620, a bare store) and puts one
++	 * _mali_osk_write_mem_barrier (0xc037f5e0, dsb st) between them and
++	 * the start command. Accesses to Device-nGnRE memory keep their order
++	 * among themselves, so the only thing the dropped barriers did was
++	 * order the CPU's writes to DDR - the command lists and page tables -
++	 * before the register writes, and the dsb st inside the final
++	 * writel() of the start command still does that. That removes six
++	 * dsb st per GP task.
++	 */
+ 	for (i = 0; i < LIMA_GP_FRAME_REG_NUM; i++)
+-		writel(f[i], ip->iomem + LIMA_GP_VSCL_START_ADDR + i * 4);
++		writel_relaxed(f[i], ip->iomem + LIMA_GP_VSCL_START_ADDR + i * 4);
+ 
+-	gp_write(LIMA_GP_CMD, LIMA_GP_CMD_UPDATE_PLBU_ALLOC);
++	writel_relaxed(LIMA_GP_CMD_UPDATE_PLBU_ALLOC, ip->iomem + LIMA_GP_CMD);
+ 	gp_write(LIMA_GP_CMD, cmd);
+ }
+ 
+diff --git a/drivers/gpu/drm/lima/lima_pp.c b/drivers/gpu/drm/lima/lima_pp.c
+index eaab478..fd34815 100644
+--- a/drivers/gpu/drm/lima/lima_pp.c
++++ b/drivers/gpu/drm/lima/lima_pp.c
+@@ -9,6 +9,7 @@
+ #include <drm/lima_drm.h>
+ 
+ #include "lima_device.h"
++#include "lima_drv.h"
+ #include "lima_pp.h"
+ #include "lima_dlbu.h"
+ #include "lima_bcast.h"
+@@ -155,16 +156,51 @@ static int lima_pp_soft_reset_async_wait(struct lima_ip *ip)
+ 	return err;
+ }
+ 
++/*
++ * Hardware reset values of the PP frame registers, the vendor driver's table
++ * at 0xc087735c (indexed there by byte offset): register 0x0c reads 2 and
++ * register 0x48, the subpixel specifier, reads 0x75 after a reset; the rest
++ * read 0. Its write-back table at 0xc08773b8 is all zeroes.
++ */
++static const u32 lima_pp_frame_reset_value[LIMA_PP_FRAME_REG_NUM] = {
++	[3] = 0x2,	/* 0x0c */
++	[18] = 0x75,	/* 0x48 */
++};
++
++/*
++ * mali_pp_job_start (0xc038c0d4) writes every frame and write-back register
++ * with _mali_osk_mem_iowrite32_relaxed and skips the ones whose value
++ * already equals the hardware reset value (0xc038c174, 0xc038c1c4 and the
++ * three write-back loops, each gated on its first register being non-zero),
++ * then one _mali_osk_write_mem_barrier before START_RENDERING.
++ *
++ * Skipping is only valid because the core is reset between tasks, so the
++ * registers really do hold their reset values. lima has the same invariant:
++ * lima_pp_task_fini() queues a soft reset and lima_pp_task_run() waits for
++ * it with lima_pp_soft_reset_async_wait() before calling this, and the error
++ * path does a full lima_pp_hard_reset().
++ *
++ * For the Demo this turns 59 ordered register writes per core into about 30
++ * unordered ones: the two unused write-back units are all zeroes, so they
++ * disappear completely.
++ */
+ static void lima_pp_write_frame(struct lima_ip *ip, u32 *frame, u32 *wb)
+ {
++	bool skip = READ_ONCE(lima_reg_skip_reset);
+ 	int i, j, n = 0;
+ 
+-	for (i = 0; i < LIMA_PP_FRAME_REG_NUM; i++)
+-		writel(frame[i], ip->iomem + LIMA_PP_FRAME + i * 4);
++	for (i = 0; i < LIMA_PP_FRAME_REG_NUM; i++) {
++		if (skip && frame[i] == lima_pp_frame_reset_value[i])
++			continue;
++		writel_relaxed(frame[i], ip->iomem + LIMA_PP_FRAME + i * 4);
++	}
+ 
+ 	for (i = 0; i < 3; i++) {
+-		for (j = 0; j < LIMA_PP_WB_REG_NUM; j++)
+-			writel(wb[n++], ip->iomem + LIMA_PP_WB(i) + j * 4);
++		for (j = 0; j < LIMA_PP_WB_REG_NUM; j++, n++) {
++			if (skip && !wb[n])
++				continue;
++			writel_relaxed(wb[n], ip->iomem + LIMA_PP_WB(i) + j * 4);
++		}
+ 	}
+ }
+ 

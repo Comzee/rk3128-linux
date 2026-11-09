@@ -1,0 +1,155 @@
+From: RK3128 reference <frame@localhost>
+Subject: [PATCH] drm/lima: report per-client engine execution time and GEM memory
+
+GPL-2.0. The per-file VM already outlives every submitted job; keep atomic
+GP/PP totals there so destroyed contexts cannot reset client accounting.
+Timestamp at the hardware start, account at completion or drained timeout.
+Queued and dependency-waiting jobs do not count. PP is one engine, including
+all its pixel cores. No scheduling, clocks, MMIO or runtime-PM changes.
+
+fdinfo reads completed-job counters without waking the GPU, and uses DRM's
+standard GEM memory helper. Existing kernel recovery ordering stays intact.
+
+diff -uNr a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -10,6 +10,8 @@
+ #include <drm/drm_ioctl.h>
+ #include <drm/drm_drv.h>
+ #include <drm/drm_prime.h>
++#include <drm/drm_file.h>
++#include <drm/drm_print.h>
+ #include <drm/lima_drm.h>
+ 
+ #include "lima_device.h"
+@@ -287,7 +289,11 @@
+ 	DRM_IOCTL_DEF_DRV(LIMA_CTX_FREE, lima_ioctl_ctx_free, DRM_RENDER_ALLOW),
+ };
+ 
+-DEFINE_DRM_GEM_FOPS(lima_drm_driver_fops);
++static const struct file_operations lima_drm_driver_fops = {
++	.owner = THIS_MODULE,
++	DRM_GEM_FOPS,
++	.show_fdinfo = drm_show_fdinfo,
++};
+ 
+ /*
+  * Changelog:
+@@ -295,8 +301,24 @@
+  * - 1.1.0 - add heap buffer support
+  */
+ 
++/* No MMIO or runtime-PM reference: reading fdinfo never wakes the GPU.
++ * PP is one engine (the pixel cores execute a single task together).
++ * Completed jobs are counted; an in-flight job appears when it completes.
++ */
++static void lima_show_fdinfo(struct drm_printer *p, struct drm_file *file)
++{
++	struct lima_drm_priv *priv = file->driver_priv;
++
++	drm_printf(p, "drm-engine-gp:\t%llu ns\n",
++		   (unsigned long long)atomic64_read(&priv->vm->engine_ns[lima_pipe_gp]));
++	drm_printf(p, "drm-engine-pp:\t%llu ns\n",
++		   (unsigned long long)atomic64_read(&priv->vm->engine_ns[lima_pipe_pp]));
++	drm_show_memory_stats(p, file);
++}
++
+ static const struct drm_driver lima_drm_driver = {
+ 	.driver_features    = DRIVER_RENDER | DRIVER_GEM | DRIVER_SYNCOBJ,
++	.show_fdinfo        = lima_show_fdinfo,
+ 	.open               = lima_drm_driver_open,
+ 	.postclose          = lima_drm_driver_postclose,
+ 	.ioctls             = lima_drm_driver_ioctls,
+diff -uNr a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -312,6 +312,18 @@
+ 	return true;
+ }
+ 
++static void lima_sched_account_done(struct lima_sched_pipe *pipe,
++				    struct lima_sched_task *task)
++{
++	int id = pipe - pipe->ldev->pipe;
++
++	if (task && task->usage_start_ns) {
++		atomic64_add(ktime_get_ns() - task->usage_start_ns,
++			     &task->vm->engine_ns[id]);
++		task->usage_start_ns = 0;
++	}
++}
++
+ /*
+  * Put a task on the hardware. Called with pipe->hw_lock held, either from
+  * run_job in process context or from the IRQ handler of the task before it.
+@@ -345,6 +357,7 @@
+ 	trace_lima_task_run(task);
+ 
+ 	pipe->error = false;
++	task->usage_start_ns = ktime_get_ns();
+ 	pipe->task_run(pipe, task);
+ 
+ 	return old;
+@@ -653,6 +666,8 @@
+ 	spin_lock_irqsave(&pipe->hw_lock, flags);
+ 	running = pipe->current_task;
+ 	next = pipe->next_task;
++	/* IRQs and recovery work are drained; count a partial timed-out run once. */
++	lima_sched_account_done(pipe, running);
+ 	spin_unlock_irqrestore(&pipe->hw_lock, flags);
+ 
+ 	if (!pipe->error)
+@@ -828,6 +843,7 @@
+ 		struct lima_sched_task *next;
+ 		bool defer = false;
+ 
++		lima_sched_account_done(pipe, task);
+ 		pipe->task_fini(pipe);
+ 
+ 		/*
+diff -uNr a/drivers/gpu/drm/lima/lima_sched.h b/drivers/gpu/drm/lima/lima_sched.h
+--- a/drivers/gpu/drm/lima/lima_sched.h
++++ b/drivers/gpu/drm/lima/lima_sched.h
+@@ -34,6 +34,9 @@
+ 	/* waits on another device's fence: always invalidate the L2 */
+ 	bool flush_l2;
+ 
++	/* Hardware execution only: queue/dependency/PM waits are excluded. */
++	u64 usage_start_ns;
++
+ 	/* pipe fence */
+ 	struct dma_fence *fence;
+ };
+diff -uNr a/drivers/gpu/drm/lima/lima_vm.c b/drivers/gpu/drm/lima/lima_vm.c
+--- a/drivers/gpu/drm/lima/lima_vm.c
++++ b/drivers/gpu/drm/lima/lima_vm.c
+@@ -258,6 +258,8 @@
+ 	if (!vm)
+ 		return NULL;
+ 
++	atomic64_set(&vm->engine_ns[0], 0);
++	atomic64_set(&vm->engine_ns[1], 0);
+ 	vm->dev = dev;
+ 	mutex_init(&vm->lock);
+ 	kref_init(&vm->refcount);
+diff -uNr a/drivers/gpu/drm/lima/lima_vm.h b/drivers/gpu/drm/lima/lima_vm.h
+--- a/drivers/gpu/drm/lima/lima_vm.h
++++ b/drivers/gpu/drm/lima/lima_vm.h
+@@ -6,6 +6,7 @@
+ 
+ #include <drm/drm_mm.h>
+ #include <linux/kref.h>
++#include <linux/atomic.h>
+ 
+ #define LIMA_PAGE_SIZE    4096
+ #define LIMA_PAGE_MASK    (LIMA_PAGE_SIZE - 1)
+@@ -30,6 +31,9 @@
+ 	struct mutex lock;
+ 	struct kref refcount;
+ 
++	/* Per DRM client, across every context; jobs retain the VM. */
++	atomic64_t engine_ns[2];
++
+ 	struct drm_mm mm;
+ 
+ 	struct lima_device *dev;

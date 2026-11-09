@@ -1,0 +1,80 @@
+From: RK3128 reference developers
+Subject: [PATCH] supplicant: try the previous channel once after explicit disconnect
+
+The old scan cache may have expired when RECONNECT arrives. The RK3128 reference board
+otherwise waits for a full all-band scan, including passive DFS channels.
+Use the last working station frequency as a one-scan hint. Keep freshness
+checks, configured scan restrictions, ordinary fallback and band scoring.
+No configuration or DHCP state is written. Interface off/on is unchanged.
+
+Base: Debian wpa 2:2.10-24 (all Debian patches applied first).
+Licence: BSD-3-Clause, as the surrounding wpa_supplicant code.
+
+--- a/wpa_supplicant/wpa_supplicant.c
++++ b/wpa_supplicant/wpa_supplicant.c
+@@ -8151,6 +8151,9 @@
+  */
+ void wpas_request_connection(struct wpa_supplicant *wpa_s)
+ {
++	unsigned int freq = wpa_s->disconnected ? wpa_s->reconnect_freq : 0;
++
++	wpa_s->reconnect_freq = 0;
+ 	wpa_s->normal_scans = 0;
+ 	wpa_s->scan_req = NORMAL_SCAN_REQ;
+ 	wpa_supplicant_reinit_autoscan(wpa_s);
+@@ -8158,10 +8161,29 @@
+ 	wpa_s->reassociate = 1;
+ 	wpa_s->last_owe_group = 0;
+ 
+-	if (wpa_supplicant_fast_associate(wpa_s) != 1)
++	if (wpa_supplicant_fast_associate(wpa_s) != 1) {
++		/* RK3128 reference #541: first look where the explicit disconnect
++		 * left a working station. This is a fresh scan, not stale BSS
++		 * acceptance. scan.c consumes next_scan_freqs once and keeps
++		 * per-network scan frequencies ahead of this hint; a miss falls
++		 * back to the ordinary all-channel scan and selection rules.
++		 * Explicit global scan/band modes retain their standard path. */
++		if (freq && !wpa_s->next_scan_freqs &&
++		    wpa_s->conf->ap_scan == 1 && !wpa_s->conf->freq_list &&
++		    !wpa_s->conf->scan_cur_freq && !wpa_s->autoscan_params &&
++		    wpa_s->setband_mask == WPA_SETBAND_AUTO) {
++			wpa_s->next_scan_freqs = os_calloc(2, sizeof(int));
++			if (wpa_s->next_scan_freqs) {
++				wpa_s->next_scan_freqs[0] = freq;
++				wpa_dbg(wpa_s, MSG_INFO,
++					"Reconnect: initial scan on previous frequency %u MHz",
++					freq);
++			}
++		}
+ 		wpa_supplicant_req_scan(wpa_s, 0, 0);
+-	else
++	} else {
+ 		wpa_s->reattach = 0;
++	}
+ }
+ 
+ 
+@@ -8174,6 +8196,13 @@
+  */
+ void wpas_request_disconnection(struct wpa_supplicant *wpa_s)
+ {
++	/* Only explicit disconnect of an established infrastructure station
++	 * supplies the hint. Interface off/on and autonomous roaming retain
++	 * their original paths. No network configuration is changed. */
++	wpa_s->reconnect_freq =
++		wpa_s->wpa_state == WPA_COMPLETED && wpa_s->current_ssid &&
++		wpa_s->current_ssid->mode == WPAS_MODE_INFRA ?
++		wpa_s->assoc_freq : 0;
+ #ifdef CONFIG_SME
+ 	wpa_s->sme.prev_bssid_set = 0;
+ #endif /* CONFIG_SME */
+--- a/wpa_supplicant/wpa_supplicant_i.h
++++ b/wpa_supplicant/wpa_supplicant_i.h
+@@ -738,6 +738,7 @@
+ 	struct wpa_bss *current_bss;
+ 	int ap_ies_from_associnfo;
+ 	unsigned int assoc_freq;
++	unsigned int reconnect_freq; /* explicit disconnect: one-scan channel hint */
+ 	u8 *last_con_fail_realm;
+ 	size_t last_con_fail_realm_len;
+ 

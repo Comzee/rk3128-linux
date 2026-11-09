@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * #736: VEPU1 is the encoder bank of the existing vpu@10106000 node.
+ * Keep one device, one m2m scheduler, its clocks/IRQs and combo bus ownership.
+ * No second register mapping, DT device, IOMMU or clock change is needed.
+ * Codec support is selected by linux/config/vepu.config.
+ */
+&vpu {
+	status = "okay";
+};

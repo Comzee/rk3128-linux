@@ -1,0 +1,145 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] glsl: acquire built-in IR only on a real compiler/cache-miss path
+
+The public CompileShader/LinkProgram entry points eagerly initialize built-in
+GLSL functions even when the shader and NIR disk caches hit. Move per-context
+acquisition after those early exits. Real parse/link paths retain their ref,
+and context teardown/ReleaseShaderCompiler keep their existing accounting.
+Standalone callers already holding a ref mark it in their context as well.
+
+--- a/src/compiler/glsl/builtin_functions.h
++++ b/src/compiler/glsl/builtin_functions.h
+@@ -25,6 +25,7 @@
+ #define BULITIN_FUNCTIONS_H
+ 
+ struct glsl_symbol_table;
++struct gl_context;
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -35,6 +36,9 @@
+ 
+ void
+ _mesa_glsl_builtin_functions_decref(void);
++
++void
++_mesa_glsl_builtin_functions_init_for_context(struct gl_context *ctx);
+ 
+ #ifdef __cplusplus
+ 
+--- a/src/compiler/glsl/gl_nir_linker.c
++++ b/src/compiler/glsl/gl_nir_linker.c
+@@ -25,6 +25,7 @@
+ #include "nir_builder.h"
+ #include "nir_xfb_info.h"
+ #include "gl_nir.h"
++#include "builtin_functions.h"
+ #include "gl_nir_linker.h"
+ #include "gl_nir_link_varyings.h"
+ #include "linker_util.h"
+@@ -3744,6 +3745,8 @@
+    if (prog->NumShaders == 0)
+       return true;
+ 
++   _mesa_glsl_builtin_functions_init_for_context(ctx);
++
+    MESA_TRACE_FUNC();
+ 
+    void *mem_ctx = ralloc_context(NULL); /* temporary linker context */
+--- a/src/compiler/glsl/standalone.cpp
++++ b/src/compiler/glsl/standalone.cpp
+@@ -54,6 +54,7 @@
+ {
+    initialize_context_to_defaults(ctx, api);
+    _mesa_glsl_builtin_functions_init_or_ref();
++   ctx->shader_builtin_ref = true;
+ 
+    ctx->Version = 450;
+ 
+--- a/src/compiler/glsl/builtin_functions.cpp
++++ b/src/compiler/glsl/builtin_functions.cpp
+@@ -79,6 +79,7 @@
+ #include <stdio.h>
+ #include "util/simple_mtx.h"
+ #include "main/consts_exts.h"
++#include "main/mtypes.h"
+ #include "main/shader_types.h"
+ #include "main/shaderobj.h"
+ #include "ir_builder.h"
+@@ -9606,6 +9607,19 @@
+    simple_mtx_unlock(&builtins_lock);
+ }
+ 
++/* Cache hits only deserialize NIR and do not need the GLSL built-in IR module.
++ * Keep the existing per-context reference and ReleaseShaderCompiler lifetime,
++ * but acquire it at the first real parse/link instead of the public API entry.
++ */
++extern "C" void
++_mesa_glsl_builtin_functions_init_for_context(struct gl_context *ctx)
++{
++   if (!ctx->shader_builtin_ref) {
++      _mesa_glsl_builtin_functions_init_or_ref();
++      ctx->shader_builtin_ref = true;
++   }
++}
++
+ extern "C" void
+ _mesa_glsl_builtin_functions_decref()
+ {
+--- a/src/compiler/glsl/glsl_parser_extras.cpp
++++ b/src/compiler/glsl/glsl_parser_extras.cpp
+@@ -2439,6 +2439,8 @@
+       return;
+    }
+ 
++   _mesa_glsl_builtin_functions_init_for_context(ctx);
++
+    if (!state->error) {
+      _mesa_glsl_lexer_ctor(state, source);
+      _mesa_glsl_parse(state);
+--- a/src/compiler/glsl/tests/test_gl_lower_mediump.cpp
++++ b/src/compiler/glsl/tests/test_gl_lower_mediump.cpp
+@@ -186,6 +186,7 @@
+       ctx->Const.Program[MESA_SHADER_FRAGMENT].MaxCombinedUniformComponents = 16 * 4;
+ 
+       _mesa_glsl_builtin_functions_init_or_ref();
++      ctx->shader_builtin_ref = true;
+ 
+       whole_program = standalone_create_shader_program();
+       whole_program->IsES = true;
+--- a/src/mesa/main/shaderapi.c
++++ b/src/mesa/main/shaderapi.c
+@@ -1221,15 +1221,6 @@
+    memcpy(sh->source_blake3, original_blake3, BLAKE3_OUT_LEN);
+ }
+ 
+-static void
+-ensure_builtin_types(struct gl_context *ctx)
+-{
+-   if (!ctx->shader_builtin_ref) {
+-      _mesa_glsl_builtin_functions_init_or_ref();
+-      ctx->shader_builtin_ref = true;
+-   }
+-}
+-
+ /**
+  * Compile a shader.
+  */
+@@ -1264,8 +1255,6 @@
+       }
+ 
+       MESA_TRACE_FUNC();
+-
+-      ensure_builtin_types(ctx);
+ 
+       /* this call will set the shader->CompileStatus field to indicate if
+        * compilation was successful.
+@@ -1405,8 +1394,6 @@
+             programs_in_use |= 1 << stage;
+          }
+       }
+-
+-   ensure_builtin_types(ctx);
+ 
+    FLUSH_VERTICES(ctx, 0, 0);
+    st_link_shader(ctx, shProg);

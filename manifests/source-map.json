@@ -1,0 +1,1944 @@
+{
+  "description": "Current reference paths and original input-file hashes, for attribution and reproducibility; no original source-tree layout or history is included. Sanitized identifies presentation or naming adaptations.",
+  "files": [
+    {
+      "path": "assets/images/fastfetch-rk3128.png",
+      "source_sha256": "27afca4a1b9987d2cf6ebf5b97173603045bc88981c392b04972926dc4e4fdec",
+      "sanitized": false,
+      "reference_sha256": "27afca4a1b9987d2cf6ebf5b97173603045bc88981c392b04972926dc4e4fdec"
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg.h",
+      "source_sha256": "9c4ff09d682c613eebc8df1c64bde1af7dd48080d5adf05a712de55c4dc6a326",
+      "sanitized": true,
+      "reference_sha256": "428f88a7a8cadfcdcf81a52b3b4102b6efa1fee45ad9745909573edbc7b3cb87"
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg_linux.c",
+      "source_sha256": "b0182524854e5e82ba569539a61fa997462dfed92348419048318e9257491f21",
+      "sanitized": true,
+      "reference_sha256": "ec103b2218500d38854f181f6d86147ff569e88614c5e1c324489debd84a8613"
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg_rga.h",
+      "source_sha256": "563666e7ff49e1cd52882ca090d4dc64ffa1ff4ba6c431ae151a8dd609e571ff",
+      "sanitized": true,
+      "reference_sha256": "9636b8e2f69419b94a6ee8d3b4b26a26fe4ba470c28c43f4f6ed28aad2898722"
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg_rga_linux.c",
+      "source_sha256": "e521aafdd2068ea5764a5ebe0275f60dbcadb5a9dcbe584da26bf46f4aa1d844",
+      "sanitized": true,
+      "reference_sha256": "9b694b625bb61839f41462a20c6841e57d439942b10846f299fd4e9f38cd096b"
+    },
+    {
+      "path": "examples/usb/rk3128-usb-gadget",
+      "source_sha256": "7bf93bd8e88c58d2c6c252fed35933049420a3290d8bb062985eacb0eaa4a728",
+      "sanitized": true,
+      "reference_sha256": "0cf06fc1a75dda1a1a0ab05d4065a5e9434fbacf0c03d5823d5472ff302d690f"
+    },
+    {
+      "path": "linux/bases/mainline-7.3.env",
+      "source_sha256": "f9608a003321482553c1ad06eb668d95e96a89b0974386aebd8c58a4cb9d59a7",
+      "sanitized": true,
+      "reference_sha256": "e7fa35d7a3d52010122669ac62b29f819710565a96744297b569c7304d4a24d4"
+    },
+    {
+      "path": "linux/config/audio.config",
+      "source_sha256": "702eeaeb3871bc68dba148935e512a230ab1b793ab5df44a7b53c204a8854d54",
+      "sanitized": true,
+      "reference_sha256": "2d11322de28210e5df3137bddc798ce2d95ca3fa75074bdd63f0f8d9c11f5bb3"
+    },
+    {
+      "path": "linux/config/board.config",
+      "source_sha256": "bb81ab7042141e0e2e26ec7a379630983c3d784fe73499a90fe545e493824c33",
+      "sanitized": true,
+      "reference_sha256": "e5b925084cb35bbd5dbb644c3c2a0cf8532f9b5fbbd7f2a53d1f81a207955b58"
+    },
+    {
+      "path": "linux/config/boot.config",
+      "source_sha256": "1e2843576068b864563aa6da3980b2b4440490748e525dfcb117d4884189f8e3",
+      "sanitized": true,
+      "reference_sha256": "e9def775649080e5904419474cfc2549360a05a5c23a0e42d97091f4c5b6480b"
+    },
+    {
+      "path": "linux/config/cgroups.config",
+      "source_sha256": "ee59ed8c64239952d22221aa6e8a566586d95bcf493a6776a0239b0383d54e7f",
+      "sanitized": true,
+      "reference_sha256": "da20c3e1e458f3b926a9e8d6a879d6dd9a4db86ec8d50bc1b2cde0077a067825"
+    },
+    {
+      "path": "linux/config/coredump.config",
+      "source_sha256": "1d202492c45ebe6b088e000a919c86e50e180e508f11463ccad0e9a3358bbf58",
+      "sanitized": true,
+      "reference_sha256": "bd2fc869709bd008a11043cd5c9136fcdb1d81e8da16c89dcd9f0f5d0f511155"
+    },
+    {
+      "path": "linux/config/dmc.config",
+      "source_sha256": "907c24468ce57cc49669e9d7a4e122350a608a49694a03a084bf48ec4aaaa2e7",
+      "sanitized": true,
+      "reference_sha256": "0a374afad196abd032c9bd70076647726051dd51ef582e120aac9fcfe76f8ca9"
+    },
+    {
+      "path": "linux/config/emmc.config",
+      "source_sha256": "07027cb9965657bb35f6b6e065e9e8d1b1a821152ec591f29d066c1d1679f86b",
+      "sanitized": true,
+      "reference_sha256": "fd4ff24d2f422699ab6693c4b71382f685e56e01f8fd995dfea63cc1f38c2931"
+    },
+    {
+      "path": "linux/config/hardening.config",
+      "source_sha256": "c8cdef1a9e954487f145ef634aa71d0848ebf97191ea8728a18f4c138f952dfe",
+      "sanitized": false,
+      "reference_sha256": "c8cdef1a9e954487f145ef634aa71d0848ebf97191ea8728a18f4c138f952dfe"
+    },
+    {
+      "path": "linux/config/hevc.config",
+      "source_sha256": "8736ec62049046e241e8d8fe2aaee295291334e1462e9a6b9ad5ac4f56d7a131",
+      "sanitized": true,
+      "reference_sha256": "dfd2c4642f8d3f10ff3ae26604b1f47cb7ed2bab5f03fab3b923a0a064c7b693"
+    },
+    {
+      "path": "linux/config/iep.config",
+      "source_sha256": "064c63add24da0dfd500d5656e26d568bc5a0c977d4ea54f777b79046bfd9d2e",
+      "sanitized": true,
+      "reference_sha256": "cb2ba7c8cd09fa50270ab125637c8e4c1a7eadd149e1a6eb860d8ef3555c0526"
+    },
+    {
+      "path": "linux/config/knobs/crypto-diag.config",
+      "source_sha256": "38b2092be9b3b3d9ad7739729896ed5b7557ebb80ce3d060afb4761811843f8e",
+      "sanitized": false,
+      "reference_sha256": "38b2092be9b3b3d9ad7739729896ed5b7557ebb80ce3d060afb4761811843f8e"
+    },
+    {
+      "path": "linux/config/knobs/crypto-full.config",
+      "source_sha256": "81f4009170b8503daef84fe978c93e3966af62a6e157399523fd680fd332dc1e",
+      "sanitized": false,
+      "reference_sha256": "81f4009170b8503daef84fe978c93e3966af62a6e157399523fd680fd332dc1e"
+    },
+    {
+      "path": "linux/config/knobs/crypto-hash-pio.config",
+      "source_sha256": "f255e70156dda90f200ca20d90ad7e43ba8bd2c5755a2df99e422d79bfa486c4",
+      "sanitized": false,
+      "reference_sha256": "f255e70156dda90f200ca20d90ad7e43ba8bd2c5755a2df99e422d79bfa486c4"
+    },
+    {
+      "path": "linux/config/knobs/crypto-module.config",
+      "source_sha256": "257495e41383f0681f055f8ea85019b455f18dbc4dffd4f4f4c3edc6ca67a2d7",
+      "sanitized": true,
+      "reference_sha256": "d7149839643bc8ddba8c1bfc7a09737ae402ef8836b5b0a33ebd9dbf2ddc7e9d"
+    },
+    {
+      "path": "linux/config/knobs/crypto-rng.config",
+      "source_sha256": "c4d95b211ea46920eb7b331c0f0b977fb0138b2ce562468284ef3dfa9553d7b3",
+      "sanitized": false,
+      "reference_sha256": "c4d95b211ea46920eb7b331c0f0b977fb0138b2ce562468284ef3dfa9553d7b3"
+    },
+    {
+      "path": "linux/config/knobs/crypto.config",
+      "source_sha256": "c14869dc3ca79b160a577928c21e12700e1c1ef3ace17ad64c50d1eb2bdb3964",
+      "sanitized": true,
+      "reference_sha256": "38bf3f3cc5910dc690499e8dd9977b6e6ed8480c851f1d8f168ed78e5fc8d079"
+    },
+    {
+      "path": "linux/config/knobs/diagnostics.config",
+      "source_sha256": "3240e1046c7350c55d641a652c141b7fc92ac566c64aeb428c6a0b436d0a833e",
+      "sanitized": false,
+      "reference_sha256": "3240e1046c7350c55d641a652c141b7fc92ac566c64aeb428c6a0b436d0a833e"
+    },
+    {
+      "path": "linux/config/knobs/display-lvds.config",
+      "source_sha256": "9e8e29e3fc87b51e41cf1e76e3177071a9cb0a028cb9ecc546740c2aed8cd656",
+      "sanitized": true,
+      "reference_sha256": "7f30dfa57403d3a46ba9babe102155148c9969c329fed45b21689543c63ed536"
+    },
+    {
+      "path": "linux/config/knobs/qemu.config",
+      "source_sha256": "fcef54e0071fa9b4bf80f014b6e797936d204b132bb1ad3fb717ccb5138db846",
+      "sanitized": true,
+      "reference_sha256": "aa0bc4c355e67b7814a92d41ce17eb9513898a77d12ec2564b9c3b76fad8d400"
+    },
+    {
+      "path": "linux/config/knobs/root.config",
+      "source_sha256": "85e9a36aa326331091a9e2960e488c1d4b56e4e535c974c5e275249c726a83f2",
+      "sanitized": true,
+      "reference_sha256": "55683f3d89500be55298a506ce0056794fd4c02eec7c7e7f0eb948c519109111"
+    },
+    {
+      "path": "linux/config/knobs/usb-debug.config",
+      "source_sha256": "977135157736a14aa1afaae9b72361fedf85c34346d493b61bdc040c46e84e9b",
+      "sanitized": true,
+      "reference_sha256": "a86e25bdb67da53ceb3658a3c089bd8ad9aa19ec396b8fb4bf375b4a039ca9d8"
+    },
+    {
+      "path": "linux/config/knobs/vop-trace.config",
+      "source_sha256": "dbeac6b664e92201737af4186704543596570a9f50e3e7a62a5b23919279b8cb",
+      "sanitized": true,
+      "reference_sha256": "2ae51bbdbd2a0a0e3bd228ebed2fe1b29e3f3fd42c7e6a116716e4eecce9d354"
+    },
+    {
+      "path": "linux/config/memory.config",
+      "source_sha256": "d64d3a325bb13321d69e03d19596e48f418624b2b8ab7f07a837f1395e423d20",
+      "sanitized": true,
+      "reference_sha256": "5884da187b0c97bac574feeb2a65fedc68a8ec66733dd4a9e9c3770e242cb857"
+    },
+    {
+      "path": "linux/config/pmic.config",
+      "source_sha256": "2dc672b5d02377129844cd02153f836125cd9050325474d66f27f3935a790b27",
+      "sanitized": true,
+      "reference_sha256": "7741cf468db2d825c5fa6616cf6c7498cff7ef3aa0f4155cd6e8dae6b1886f60"
+    },
+    {
+      "path": "linux/config/power.config",
+      "source_sha256": "4373db24019b5f62096bbf4c5a02bf439e5a74fbd84a76870f95dbb76b7d69b9",
+      "sanitized": true,
+      "reference_sha256": "8b5c851755f0c0f11cc2a0b26843b100490a4be18c9203e8cbcf854ebad233b7"
+    },
+    {
+      "path": "linux/config/reboot.config",
+      "source_sha256": "4e1b0cff0310ce6aabbcbb8d36258dd2ac3dc89af797dc56f5a9ee6364831641",
+      "sanitized": true,
+      "reference_sha256": "f7fa2bebb03d00aaaa39584a15a046901b9516a3dc421ec9cc75f2b407e59ee3"
+    },
+    {
+      "path": "linux/config/rescue.config",
+      "source_sha256": "646329343b89d58e99b16e18e90219878b828151e3f7e9440e9d54af97a05339",
+      "sanitized": true,
+      "reference_sha256": "782c47440821fd1ca5c46940c80c728d3d102bfb0ff67d7f49257a423833c7cd"
+    },
+    {
+      "path": "linux/config/rga.config",
+      "source_sha256": "724fa4b5701bb2567eb14f39e2080d7d3c655d5e5e09d2f70de22dc66fbd97ae",
+      "sanitized": true,
+      "reference_sha256": "414422bfea012fea73e3a15d4c1c9569d08df9746dccb2332aca2c491dff8a74"
+    },
+    {
+      "path": "linux/config/rk3128.config",
+      "source_sha256": "4ec96f1b6892f5b6523b765ef07198eb91026b656c461852232d1d262f9a5203",
+      "sanitized": true,
+      "reference_sha256": "b55b2350d781a8c536c178b46610ace5b53e242deca63c90a10b47fc668b1a47"
+    },
+    {
+      "path": "linux/config/time.config",
+      "source_sha256": "dec0ba8e69090b88c8073b1f57b5436d948cc1cf7328eaf3f7d35a9f94fd709b",
+      "sanitized": true,
+      "reference_sha256": "1e61e0a6032c76a2e0e9543bd5d806582c6d533b00ac9e76ce6d7519b03d3614"
+    },
+    {
+      "path": "linux/config/usb.config",
+      "source_sha256": "d3ce222fd8739f89229be0e69e879afa945e73b75bacab6f037502de3a996128",
+      "sanitized": true,
+      "reference_sha256": "29571b62f0fe89cd037e024cae69fb45deea6c2c7f85a26f763367ecf4d95287"
+    },
+    {
+      "path": "linux/config/vepu.config",
+      "source_sha256": "fd084611befdb6a314bb87e9b99baa5ec8be13fa52480191bf3b85ed79a271cf",
+      "sanitized": false,
+      "reference_sha256": "fd084611befdb6a314bb87e9b99baa5ec8be13fa52480191bf3b85ed79a271cf"
+    },
+    {
+      "path": "linux/config/vpu.config",
+      "source_sha256": "8f182ff98c0d518dfff8c70607a78910efefb7c36d3cd2abd5dd5ed3bfb0deca",
+      "sanitized": true,
+      "reference_sha256": "6290cd5c6967ce76ee1f5ff4e0600a87674e686292bdb3dd97389debc5713ccd"
+    },
+    {
+      "path": "linux/config/wifi.config",
+      "source_sha256": "a31a7a13e198cf0d6a884c3cf56b8ab58a12a6805c6e1bf00c903d5e9e08f6b0",
+      "sanitized": true,
+      "reference_sha256": "dc5257c0cc1a7f11765b65937033ba8e61d98c0c7b2d94ad9633984a67116549"
+    },
+    {
+      "path": "linux/dts/rk3128-audio.dtsi",
+      "source_sha256": "a1fd4b9deccb07c6e01c9f149732aa308788c2f30a550b9ae08e5d7994f8459e",
+      "sanitized": true,
+      "reference_sha256": "171d26d7ccdacba61578a72fa9435c19b4c72171f294131f923700f9e3da017e"
+    },
+    {
+      "path": "linux/dts/rk3128-board.dtsi",
+      "source_sha256": "f991d1d2395b2f6e3bc4b22c7cc38222d38d832cc420f21492b8cfcef3d26c42",
+      "sanitized": true,
+      "reference_sha256": "e9beeaf290c7dfd3177ee48e840910bf20514f8e0f971e1cdb54ebf47b2e3b76"
+    },
+    {
+      "path": "linux/dts/rk3128-boot.dtsi",
+      "source_sha256": "bc52b11bfc2a48674a90ebfe7ea8dd34e2c3ddc8b1dcc95ebf6c856dbe9a79cb",
+      "sanitized": true,
+      "reference_sha256": "da6f3a5a7992f922ea1ce0825b8c20467744be811610a76fd3e1c342f5b11311"
+    },
+    {
+      "path": "linux/dts/rk3128-cpu-boost.dtsi",
+      "source_sha256": "254a7dd0eae61dffe1f5f7d1feb0d0afde4f62973ad294a51d0e8c744521fe58",
+      "sanitized": true,
+      "reference_sha256": "3d5f8446aad224b9431b53f61754ab214b7e4833e48477a00defe78ba2d5de08"
+    },
+    {
+      "path": "linux/dts/rk3128-crypto.dtsi",
+      "source_sha256": "aa26d90bafe7e933f90438bf73edbcf76b07846761f9811f9560c458d844065a",
+      "sanitized": true,
+      "reference_sha256": "dc74b4a9f04f06acb508e6aed3ffb2c50a643d97091427489e8705bd1b844c0b"
+    },
+    {
+      "path": "linux/dts/rk3128-display-lvds.dtsi",
+      "source_sha256": "cff62edfb65908b6adc1d7946ea2f4acab6e058548d4f7bf3ccd4443bbe9eb5d",
+      "sanitized": true,
+      "reference_sha256": "5228c77d3ead92e8c77cd3563bdb33f7667e1be1e32d5d6fb4961aa58b586155"
+    },
+    {
+      "path": "linux/dts/rk3128-dmc.dtsi",
+      "source_sha256": "bd140e538f1c6f548698ff7f95f227323fdb11fe71018b5c15eda9e08f9a0918",
+      "sanitized": true,
+      "reference_sha256": "30b63963b90ea6d196a33dad55f5a00b9d3d28126cd4c06cacb7e9a988f793dc"
+    },
+    {
+      "path": "linux/dts/rk3128-emmc.dtsi",
+      "source_sha256": "fb6caa99cb74544caa6e5693622295de0e5650ebd225555ba59aeb1130daeb35",
+      "sanitized": true,
+      "reference_sha256": "7e53eda0a8d912692e4e849acdc8bfd4fd73f0ea3848bad443bd67574bbdeb4e"
+    },
+    {
+      "path": "linux/dts/rk3128-hevc.dtsi",
+      "source_sha256": "9d1f9a52a3035cb81f6cf8cff84a8bdcb8b15e369c979721159560a4bb989045",
+      "sanitized": true,
+      "reference_sha256": "da450422f61569cc3789b5722586b17096f0c4cd8fa032231153eb530706fdf4"
+    },
+    {
+      "path": "linux/dts/rk3128-iep.dtsi",
+      "source_sha256": "e95a6c577b506d913c109122b9165ad5fa123908965cbec5debf09a3efacf7a8",
+      "sanitized": true,
+      "reference_sha256": "27d7a84f0e736b6106bdb1a7d5cf27f9ab20022633011cf026056f8803316037"
+    },
+    {
+      "path": "linux/dts/rk3128-inputs.dtsi",
+      "source_sha256": "f27dfc0bcccabef79ed106a1b6d8d0b7ebb49df0c84da2e10c02b3377e9a1945",
+      "sanitized": true,
+      "reference_sha256": "ba8d4064013efc87a0639c5baa450129c83562d094382a002e21902fd27345ac"
+    },
+    {
+      "path": "linux/dts/rk3128-memory.dtsi",
+      "source_sha256": "022433d58f43cd4b727abb238732d3022f7675e195f8c2a3bc630a385cc10939",
+      "sanitized": true,
+      "reference_sha256": "4b5455eb797d097ea9dad2761ab4c6931dfb1095d3e85a0afae492ccd643cd7d"
+    },
+    {
+      "path": "linux/dts/rk3128-pmic.dtsi",
+      "source_sha256": "7987ab6ce6b3c378e7d7370eec28652bf83809f50393c2e7633bbeb2b0d8baac",
+      "sanitized": true,
+      "reference_sha256": "8d98bd9935d7e7c3f4bb39f85fba3740e73cfa558d0a0c5cecbd4b6681bf4d8e"
+    },
+    {
+      "path": "linux/dts/rk3128-reboot.dtsi",
+      "source_sha256": "b0413b2e76e0eca3f4b26f0684a0db6a0961a1d03b3ebbebf4fdddce814c96d6",
+      "sanitized": true,
+      "reference_sha256": "848966444572cfcbfe6155b76058e02f87ebca4c22c46acfe44f8d7870b2bdae"
+    },
+    {
+      "path": "linux/dts/rk3128-reference.dts",
+      "source_sha256": "a513cc897582b1e996ca203d7fd7ffdee2d48c16f1fbff9c75f0e6a2b5693cc7",
+      "sanitized": true,
+      "reference_sha256": "699dc8e0265f49a470fd83bac8aca2b569df8001950e83ef7424c0da7f4602ac"
+    },
+    {
+      "path": "linux/dts/rk3128-rga.dtsi",
+      "source_sha256": "28f4e1d4f98db8d6bc6ec5a318e9e59b22036678c90c5cc69dfa95ce78a1e2fe",
+      "sanitized": true,
+      "reference_sha256": "a14aa06472364e9fe130865ada01453db4e41b1fddf53d507eb033e2b65b80c5"
+    },
+    {
+      "path": "linux/dts/rk3128-scanout-qos.dtsi",
+      "source_sha256": "5ad8c33997ab79b0fce365081228a6c44d121ea85a92ef807cbf35fea6e4c0e5",
+      "sanitized": false,
+      "reference_sha256": "5ad8c33997ab79b0fce365081228a6c44d121ea85a92ef807cbf35fea6e4c0e5"
+    },
+    {
+      "path": "linux/dts/rk3128-usb.dtsi",
+      "source_sha256": "a81f9bb89fd0bbd621dc0fb905db7e428fc2b3c36b8a9f7bda6b48b6cbc17d91",
+      "sanitized": true,
+      "reference_sha256": "3261217300922ed1a321c153168f7567fb1c20425d50c3a76c018c71a4f75b92"
+    },
+    {
+      "path": "linux/dts/rk3128-vepu.dtsi",
+      "source_sha256": "01275e0584dc3a3441b69db6c3cafba02d466b4f98667659d285948f50403b4d",
+      "sanitized": false,
+      "reference_sha256": "01275e0584dc3a3441b69db6c3cafba02d466b4f98667659d285948f50403b4d"
+    },
+    {
+      "path": "linux/dts/rk3128-vpu.dtsi",
+      "source_sha256": "7f431096fe293463e621333bb59ff773a09e896ba588c21945b0b343df378f10",
+      "sanitized": true,
+      "reference_sha256": "06c2334019d4e282e3ec35f658b8f4f469764b8c8973cb32908cbfb1ce4e219b"
+    },
+    {
+      "path": "linux/dts/rk3128-wifi.dtsi",
+      "source_sha256": "520cac348dd0f5bbfbef02c5bd4e22be863436d2654c2d8fcf8301fd28579ce4",
+      "sanitized": true,
+      "reference_sha256": "1c9e60f4665d0b17c2e099d9b69da67875886654ef3cc9fda835ed423808804b"
+    },
+    {
+      "path": "linux/fbtest/fbtest.c",
+      "source_sha256": "bc6d1062f5e0c0255466b61fe12c7354d3db3e7750dee5bd3eaa4082c9751b03",
+      "sanitized": false,
+      "reference_sha256": "bc6d1062f5e0c0255466b61fe12c7354d3db3e7750dee5bd3eaa4082c9751b03"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/Kbuild",
+      "source_sha256": "a3df424db8b97adbffad58f725567c9bfb39f4effa8143ea8b6ee471a22c4355",
+      "sanitized": true,
+      "reference_sha256": "6ae00102b8111ef30bdaeedb9b04e348aec80bb4f6d1b8b066cef22d15b9e83a"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/LICENSE",
+      "source_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "sanitized": false,
+      "reference_sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hci/hctrl.h",
+      "source_sha256": "7085293f5de15246b78c88c6ad8f84647cfd1abc3a3b9441f0b310c8d3b7d50b",
+      "sanitized": false,
+      "reference_sha256": "7085293f5de15246b78c88c6ad8f84647cfd1abc3a3b9441f0b310c8d3b7d50b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hci/ssv_hci.c",
+      "source_sha256": "047c2be72f2a817ad83135c1090db6171121937bac733c35137305057cc1c909",
+      "sanitized": false,
+      "reference_sha256": "047c2be72f2a817ad83135c1090db6171121937bac733c35137305057cc1c909"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hci/ssv_hci.h",
+      "source_sha256": "ada3b64ba2d801acb379c31e2318456ee10961b5fccfe66d2ff677f3bb7c35fc",
+      "sanitized": false,
+      "reference_sha256": "ada3b64ba2d801acb379c31e2318456ee10961b5fccfe66d2ff677f3bb7c35fc"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/hwif.h",
+      "source_sha256": "8da9e2689b608f787d88c5fbce020d562923fbb7db8ba263f4618ac06e67075d",
+      "sanitized": false,
+      "reference_sha256": "8da9e2689b608f787d88c5fbce020d562923fbb7db8ba263f4618ac06e67075d"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/sdio/sdio.c",
+      "source_sha256": "7e20dd80126e820a8f53817db6660ff5554f9721457393f6647843284264cb6f",
+      "sanitized": false,
+      "reference_sha256": "7e20dd80126e820a8f53817db6660ff5554f9721457393f6647843284264cb6f"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/sdio/sdio.h",
+      "source_sha256": "4aff3aad38c61fc22d127e8a9c584f7e970df03a60a098dc2b6bd4b28b5d4529",
+      "sanitized": false,
+      "reference_sha256": "4aff3aad38c61fc22d127e8a9c584f7e970df03a60a098dc2b6bd4b28b5d4529"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/sdio/sdio_def.h",
+      "source_sha256": "8b277c99b8a6c6c554c047e6e1f91484009a745994d63ea570e3dc683c3f30f3",
+      "sanitized": false,
+      "reference_sha256": "8b277c99b8a6c6c554c047e6e1f91484009a745994d63ea570e3dc683c3f30f3"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/usb/usb.h",
+      "source_sha256": "2d332b45a60fcb1c0b7ba00519ff7e73dc522468900089efe4c022df7982610d",
+      "sanitized": false,
+      "reference_sha256": "2d332b45a60fcb1c0b7ba00519ff7e73dc522468900089efe4c022df7982610d"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/hal.h",
+      "source_sha256": "94f1eea553aae5d9a59b84900cf4fcaed1302ee71a9db6736fa06c7b9f3cd117",
+      "sanitized": false,
+      "reference_sha256": "94f1eea553aae5d9a59b84900cf4fcaed1302ee71a9db6736fa06c7b9f3cd117"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/linux_80211.h",
+      "source_sha256": "e681c4bde24af7ecde346be5294e756ca391806c57d310d3889ca3aa870e83e5",
+      "sanitized": false,
+      "reference_sha256": "e681c4bde24af7ecde346be5294e756ca391806c57d310d3889ca3aa870e83e5"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6200.h",
+      "source_sha256": "ac5050f33b859df3a324606d01ee967c9f71fb22499aa37a080bc8b694a753c4",
+      "sanitized": false,
+      "reference_sha256": "ac5050f33b859df3a324606d01ee967c9f71fb22499aa37a080bc8b694a753c4"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6200_common.h",
+      "source_sha256": "50831333853673632d194787034b4a97b2bb557665f5fe6de39b9a3181d2d4e5",
+      "sanitized": false,
+      "reference_sha256": "50831333853673632d194787034b4a97b2bb557665f5fe6de39b9a3181d2d4e5"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6200_configuration.h",
+      "source_sha256": "ce42081a8590d26296e02920709422780dfbee47240cec5989127937dd5c9c4d",
+      "sanitized": false,
+      "reference_sha256": "ce42081a8590d26296e02920709422780dfbee47240cec5989127937dd5c9c4d"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6xxx_common.h",
+      "source_sha256": "827e68a752785cf27bbaf2dc62bf152faf6cd6b186deacf06bb76a2c7d6df480",
+      "sanitized": false,
+      "reference_sha256": "827e68a752785cf27bbaf2dc62bf152faf6cd6b186deacf06bb76a2c7d6df480"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_cfg.h",
+      "source_sha256": "2b6cf0c21867a2d7e0648c3700cc7d856f9c7374712e1946e77fa66f1c872b9b",
+      "sanitized": false,
+      "reference_sha256": "2b6cf0c21867a2d7e0648c3700cc7d856f9c7374712e1946e77fa66f1c872b9b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_chip_id.h",
+      "source_sha256": "cd00f3200b478661c25acf31ab61b73918930276ed90dc3f8efb64871877090b",
+      "sanitized": false,
+      "reference_sha256": "cd00f3200b478661c25acf31ab61b73918930276ed90dc3f8efb64871877090b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_data_struct.h",
+      "source_sha256": "f6e94657616c4fc7371941a48dd81869bf30a425fe80cf6bb2f12aaa862adc88",
+      "sanitized": false,
+      "reference_sha256": "f6e94657616c4fc7371941a48dd81869bf30a425fe80cf6bb2f12aaa862adc88"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_firmware_version.h",
+      "source_sha256": "901d09c5656ffd20da068a3402c33c020616785869436d23f6cbdc02b10cad04",
+      "sanitized": true,
+      "reference_sha256": "1eb1432b57b46b6866ad5842fa3598459f99503015a42be8d12fe9caae8919f8"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_version.h",
+      "source_sha256": "0dad6162c01687d7d9b471db7d1e8ce8a60ad2169eeadfb942fe1ae8ff57a87a",
+      "sanitized": true,
+      "reference_sha256": "ade42c63911d69dcf6fc04c0d3df5d5f1c3fa7f6046156461c52f069e2c5ca64"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ampdu.c",
+      "source_sha256": "aaa142ef28eba6b6a4aae97e0717906a7eb412452400ade06b44e990480224b2",
+      "sanitized": false,
+      "reference_sha256": "aaa142ef28eba6b6a4aae97e0717906a7eb412452400ade06b44e990480224b2"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ampdu.h",
+      "source_sha256": "492e3d8371f13dffcf807dec18bbc3d5e1bd26db6a625402d41b41575186f346",
+      "sanitized": false,
+      "reference_sha256": "492e3d8371f13dffcf807dec18bbc3d5e1bd26db6a625402d41b41575186f346"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ap.c",
+      "source_sha256": "d55d55d0c978a259ec2d649d928621114a31acadecec9f5bd9c080128fd1a8cc",
+      "sanitized": false,
+      "reference_sha256": "d55d55d0c978a259ec2d649d928621114a31acadecec9f5bd9c080128fd1a8cc"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ap.h",
+      "source_sha256": "08eb7206c56497a6e02a5d5b8a5e0e138b9ad890210fcea13bda985f0db62a80",
+      "sanitized": false,
+      "reference_sha256": "08eb7206c56497a6e02a5d5b8a5e0e138b9ad890210fcea13bda985f0db62a80"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/dev.c",
+      "source_sha256": "2dc931e911508ef42fac2f25698c3ac562f775ed1a3a9d5bf24a66da1c1ed532",
+      "sanitized": true,
+      "reference_sha256": "5cc51587ddbd267847cbf8ae769228c0c49f002fda90b7020dc2b6ca941d8aa8"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/dev.h",
+      "source_sha256": "401056676da140bfeb49bb239c426aad58c27d00eb039a7c8205974aaf208995",
+      "sanitized": true,
+      "reference_sha256": "9bab091150b20478e33267fda5e7fffff831630eece5bbb82349c6d28402654f"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/dev_tbl.h",
+      "source_sha256": "9d8e4d8e269b89368332fa989fc3a509034bc409fee9de1690897bc0a3788945",
+      "sanitized": false,
+      "reference_sha256": "9d8e4d8e269b89368332fa989fc3a509034bc409fee9de1690897bc0a3788945"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/drv_comm.h",
+      "source_sha256": "87cae7ec0c52f2619e952a46c83bf9f64c1c00d81aae3cbfd9a5939c833ea215",
+      "sanitized": false,
+      "reference_sha256": "87cae7ec0c52f2619e952a46c83bf9f64c1c00d81aae3cbfd9a5939c833ea215"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/efuse.c",
+      "source_sha256": "65e21dfcf6fbb807a2f8aa26f6f1aa8cd504822ebd091878e71bae321a8f4222",
+      "sanitized": false,
+      "reference_sha256": "65e21dfcf6fbb807a2f8aa26f6f1aa8cd504822ebd091878e71bae321a8f4222"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/efuse.h",
+      "source_sha256": "81127ddcf1c96c1f66c8b67eec3fbb76d4f5a12e603796e76ec3e342d5e0f973",
+      "sanitized": false,
+      "reference_sha256": "81127ddcf1c96c1f66c8b67eec3fbb76d4f5a12e603796e76ec3e342d5e0f973"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/hal.c",
+      "source_sha256": "cf6be8a91d852005b52473a1f57592f2e77cd3f01dddb8c98210e917e66914d8",
+      "sanitized": false,
+      "reference_sha256": "cf6be8a91d852005b52473a1f57592f2e77cd3f01dddb8c98210e917e66914d8"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006C_aux.h",
+      "source_sha256": "92eaf5782d96d0aa5b5f316b9c18434762dd7a9aaba2fcca3447ba9c3064cb06",
+      "sanitized": false,
+      "reference_sha256": "92eaf5782d96d0aa5b5f316b9c18434762dd7a9aaba2fcca3447ba9c3064cb06"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006C_mac.c",
+      "source_sha256": "0cf4b2070a82bb4c66a441e829bd97d930780c05edcf9356166743aa1d782f5c",
+      "sanitized": false,
+      "reference_sha256": "0cf4b2070a82bb4c66a441e829bd97d930780c05edcf9356166743aa1d782f5c"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006C_reg.h",
+      "source_sha256": "7bd1d07b6829eaa5e5428612cee8612abf017a05aaf72c637f88f8b4dd5c5d62",
+      "sanitized": false,
+      "reference_sha256": "7bd1d07b6829eaa5e5428612cee8612abf017a05aaf72c637f88f8b4dd5c5d62"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_cfg.h",
+      "source_sha256": "88e900a46dae678626982b024e01c5dca69ef0fd0c2674a0e11f7349fe85a742",
+      "sanitized": false,
+      "reference_sha256": "88e900a46dae678626982b024e01c5dca69ef0fd0c2674a0e11f7349fe85a742"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_common.c",
+      "source_sha256": "5cb2db86a8872c6bfcedd315c6b4f69316e95a40ae5bf37173ed7c36948222c9",
+      "sanitized": false,
+      "reference_sha256": "5cb2db86a8872c6bfcedd315c6b4f69316e95a40ae5bf37173ed7c36948222c9"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_common.h",
+      "source_sha256": "8441db32f9d1338e67ce4fccacf82158a58a3c6dafde592c23e95e7c75b82146",
+      "sanitized": false,
+      "reference_sha256": "8441db32f9d1338e67ce4fccacf82158a58a3c6dafde592c23e95e7c75b82146"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_mac.h",
+      "source_sha256": "9430e7de603fedf512a468f412d3785bfcc31426a3c2015c98429ade3cd44b32",
+      "sanitized": false,
+      "reference_sha256": "9430e7de603fedf512a468f412d3785bfcc31426a3c2015c98429ade3cd44b32"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_phy.c",
+      "source_sha256": "f4cd21085d7b708948bfd83422c279da789ae134fece95255765e81e98cc0518",
+      "sanitized": false,
+      "reference_sha256": "f4cd21085d7b708948bfd83422c279da789ae134fece95255765e81e98cc0518"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_priv.h",
+      "source_sha256": "1b7bfd6f824259ca1ef4a97ade8aa5007315bc3d8a792807a7917ef31d7ea625",
+      "sanitized": false,
+      "reference_sha256": "1b7bfd6f824259ca1ef4a97ade8aa5007315bc3d8a792807a7917ef31d7ea625"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_priv_normal.h",
+      "source_sha256": "cd4097be43725fadb12fcb0c22204ddbb7479a5097c3aa6e12ec67fa1936563b",
+      "sanitized": false,
+      "reference_sha256": "cd4097be43725fadb12fcb0c22204ddbb7479a5097c3aa6e12ec67fa1936563b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_priv_safe.h",
+      "source_sha256": "475a22c5e9cea819d8b35470f24571c04ecfe53231667650f843c3dfa52b6d63",
+      "sanitized": false,
+      "reference_sha256": "475a22c5e9cea819d8b35470f24571c04ecfe53231667650f843c3dfa52b6d63"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_turismoC.c",
+      "source_sha256": "f7f801d1a87ab098aa4bbcf88d0072517a8346c5fafa13f340916bf3ee5a7d8b",
+      "sanitized": false,
+      "reference_sha256": "f7f801d1a87ab098aa4bbcf88d0072517a8346c5fafa13f340916bf3ee5a7d8b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismoC_rf_reg.c",
+      "source_sha256": "101762238e5ed3df7166bcbb0dae34f3ca3ad31c988567ed15ffdb2a0ec4629a",
+      "sanitized": false,
+      "reference_sha256": "101762238e5ed3df7166bcbb0dae34f3ca3ad31c988567ed15ffdb2a0ec4629a"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismoC_wifi_phy_reg.c",
+      "source_sha256": "31828a7124a2e406c2aeb60f440b298696816ced6ab8be4dfc122123edfd7e31",
+      "sanitized": false,
+      "reference_sha256": "31828a7124a2e406c2aeb60f440b298696816ced6ab8be4dfc122123edfd7e31"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismo_common.c",
+      "source_sha256": "7eb9dedaaf09bfd21767d7a72ad4969c6be7d760b28bb292880bba5e4bd2ef24",
+      "sanitized": false,
+      "reference_sha256": "7eb9dedaaf09bfd21767d7a72ad4969c6be7d760b28bb292880bba5e4bd2ef24"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismo_common.h",
+      "source_sha256": "7cbd7ee03bc58333d617f2e0fd6c495dedc6c8ee98a2ee6241dbb704301e2125",
+      "sanitized": false,
+      "reference_sha256": "7cbd7ee03bc58333d617f2e0fd6c495dedc6c8ee98a2ee6241dbb704301e2125"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/init.c",
+      "source_sha256": "5ca30b7dd9019eb14f10b20669bb312667a20416a48e546627765d03a5eb2a54",
+      "sanitized": false,
+      "reference_sha256": "5ca30b7dd9019eb14f10b20669bb312667a20416a48e546627765d03a5eb2a54"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/init.h",
+      "source_sha256": "00ef305b7933bc2e17975220f881a1ea4a6a50420b404af2fcbc43f383dd9451",
+      "sanitized": false,
+      "reference_sha256": "00ef305b7933bc2e17975220f881a1ea4a6a50420b404af2fcbc43f383dd9451"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/lib.c",
+      "source_sha256": "b584f96e6bb42da520d01a80be982fe2a05cee73c682b874e833fd08de4569f2",
+      "sanitized": false,
+      "reference_sha256": "b584f96e6bb42da520d01a80be982fe2a05cee73c682b874e833fd08de4569f2"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/lib.h",
+      "source_sha256": "b67d96463bb5246cfc890fbbf4e86012bceccd0acfd25ce99b754e30fd6987a4",
+      "sanitized": false,
+      "reference_sha256": "b67d96463bb5246cfc890fbbf4e86012bceccd0acfd25ce99b754e30fd6987a4"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/p2p.h",
+      "source_sha256": "135652336145b1c645fb17d5ae31b8f611cd427a67fda5c9b2bcfa267bbb03d5",
+      "sanitized": false,
+      "reference_sha256": "135652336145b1c645fb17d5ae31b8f611cd427a67fda5c9b2bcfa267bbb03d5"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/scan.c",
+      "source_sha256": "7d80a4e54f72bfa4b5c35ffad161a91650eb7ac57b193628bd85eaafe3b86eb1",
+      "sanitized": true,
+      "reference_sha256": "1dd9a0aa74d6eced617879bdeb7f631e278fba355f4a4693c7f2ae64a830ef25"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/sec.h",
+      "source_sha256": "a4ccd65fd474df00441a2336fa5e7e8791bc3b6d78c86dacdd7827e5d50b0401",
+      "sanitized": false,
+      "reference_sha256": "a4ccd65fd474df00441a2336fa5e7e8791bc3b6d78c86dacdd7827e5d50b0401"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_cli.h",
+      "source_sha256": "f1359678459a66bd8ae3f17e9c46018890a89d5e11be15e7fc6f87b3e5a132dc",
+      "sanitized": false,
+      "reference_sha256": "f1359678459a66bd8ae3f17e9c46018890a89d5e11be15e7fc6f87b3e5a132dc"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_ht_rc.h",
+      "source_sha256": "61389564ef99c51c1f17ac0518d50984d5acc55bef9d68524ddb8c8a798dec5b",
+      "sanitized": false,
+      "reference_sha256": "61389564ef99c51c1f17ac0518d50984d5acc55bef9d68524ddb8c8a798dec5b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_pm.c",
+      "source_sha256": "a4f357c34c467283e3b0feaff04259b0819d1d40bb9fec8ee0b091d770beefd2",
+      "sanitized": false,
+      "reference_sha256": "a4f357c34c467283e3b0feaff04259b0819d1d40bb9fec8ee0b091d770beefd2"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_pm.h",
+      "source_sha256": "a057503622a99793f92c02a24357a5419a50d7d68e28e4b770b4a67ecb2d7139",
+      "sanitized": false,
+      "reference_sha256": "a057503622a99793f92c02a24357a5419a50d7d68e28e4b770b4a67ecb2d7139"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc.h",
+      "source_sha256": "8d14016d5814527c73cdc18d669ad9e0916be55d53e1360961a501135aa4f820",
+      "sanitized": false,
+      "reference_sha256": "8d14016d5814527c73cdc18d669ad9e0916be55d53e1360961a501135aa4f820"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_common.h",
+      "source_sha256": "03f9b2382ad0ea90620bac7a51b015c65bb4d25ba5cfb800e5dc91a4c9c460d0",
+      "sanitized": false,
+      "reference_sha256": "03f9b2382ad0ea90620bac7a51b015c65bb4d25ba5cfb800e5dc91a4c9c460d0"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel.c",
+      "source_sha256": "dcd13fed1f3a5768f23d47a476df9968d9222734f908eadc900d66a85280b678",
+      "sanitized": false,
+      "reference_sha256": "dcd13fed1f3a5768f23d47a476df9968d9222734f908eadc900d66a85280b678"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel.h",
+      "source_sha256": "673fa89905a84caf9955abae17f68aa80bcb0db4e7b3fee11c57ecf1908b75ff",
+      "sanitized": false,
+      "reference_sha256": "673fa89905a84caf9955abae17f68aa80bcb0db4e7b3fee11c57ecf1908b75ff"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel_ht.c",
+      "source_sha256": "c0b43d6549ef72bbae70ebd9599c40e445d97fb075870088ca4488b9b8aeece6",
+      "sanitized": false,
+      "reference_sha256": "c0b43d6549ef72bbae70ebd9599c40e445d97fb075870088ca4488b9b8aeece6"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel_ht.h",
+      "source_sha256": "d120fe86f4a987a17607f43ab9903a24647e7a0848bc0494fb2361960dc74b40",
+      "sanitized": false,
+      "reference_sha256": "d120fe86f4a987a17607f43ab9903a24647e7a0848bc0494fb2361960dc74b40"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_reg_acc.h",
+      "source_sha256": "03f6a589f767897e194dbb9b0313d4636345c878463e7f7f9d8f02a7befb317c",
+      "sanitized": false,
+      "reference_sha256": "03f6a589f767897e194dbb9b0313d4636345c878463e7f7f9d8f02a7befb317c"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_skb.c",
+      "source_sha256": "8426d97af64edcf037f6a70b61d0688914f26130be2bc12fb480a75158aedea6",
+      "sanitized": false,
+      "reference_sha256": "8426d97af64edcf037f6a70b61d0688914f26130be2bc12fb480a75158aedea6"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_skb.h",
+      "source_sha256": "b6cb089f9f841b74db266d93d3ae427b8857917fac040662e6d14c1f4acd8a3b",
+      "sanitized": false,
+      "reference_sha256": "b6cb089f9f841b74db266d93d3ae427b8857917fac040662e6d14c1f4acd8a3b"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssv6x5x-generic-wlan.c",
+      "source_sha256": "0cb05e4251e01fdd4970ba09712c99c7a2699c4bfeaa648a11297d2e263274eb",
+      "sanitized": true,
+      "reference_sha256": "ccc65f0c42d773c0f1e5da322a8d3a8f54b9fff5ddc26ea97de5bd2e14bb710c"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssvdevice/ssv_cmd.c",
+      "source_sha256": "93617ec7b8733f6733f5efe1754597529092256fef1a610f237cbb2d3d3bcce9",
+      "sanitized": false,
+      "reference_sha256": "93617ec7b8733f6733f5efe1754597529092256fef1a610f237cbb2d3d3bcce9"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssvdevice/ssv_cmd.h",
+      "source_sha256": "df281ce7fdd643c47b3621b584ac0be7f1d8c3eb89175518cdbba77226e5b8bd",
+      "sanitized": false,
+      "reference_sha256": "df281ce7fdd643c47b3621b584ac0be7f1d8c3eb89175518cdbba77226e5b8bd"
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssvdevice/ssvdevice.c",
+      "source_sha256": "2547a359a8379e545457ed67423389f2253196e4b767995d8183c3f7190dee6a",
+      "sanitized": false,
+      "reference_sha256": "2547a359a8379e545457ed67423389f2253196e4b767995d8183c3f7190dee6a"
+    },
+    {
+      "path": "linux/patches/287-0001-clk-rockchip-rk3128-reset-like-the-rockchip-kernel.patch",
+      "source_sha256": "c58491f4842599f5a52441c9d37db8305bd8c8535c10e9f79816f62e134134c4",
+      "sanitized": true,
+      "reference_sha256": "cda08c584e303ec1edccf5d71d8e292e188d2adeac8a6c19203aa536bbe7d15f"
+    },
+    {
+      "path": "linux/patches/287-0002-arm-compressed-start-the-rk312x-watchdog-and-mark-ram.patch",
+      "source_sha256": "a219eb7b9ac0e3b072b30ec8909f58f278f0bbcd7c62058cc5583c93ac4cbcd7",
+      "sanitized": true,
+      "reference_sha256": "b4f44e8263c526b5772f76e394b8e370d312649d51e65a3898116d90b1762997"
+    },
+    {
+      "path": "linux/patches/287-0003-serial-earlycon-ramlog.patch",
+      "source_sha256": "7eff0d5d827850f07acd9f79066b12af9cb21074abc7f7985034f888521e09c6",
+      "sanitized": true,
+      "reference_sha256": "b4455afd2bfe45d683b174e34f4fb9191f68b86e955dc1b02098b2ff872968f5"
+    },
+    {
+      "path": "linux/patches/287-0004-arm-debug-ll-into-rk312x-ram-and-setup-arch-marks.patch",
+      "source_sha256": "144527fb959f82f3105ffbae920af9efc64c9645d6e6fedf6a789e6b32b0dffd",
+      "sanitized": true,
+      "reference_sha256": "3e3013e5a10d56b460281a658d4fdccba682c95c771c19c9db9bfc00561db450"
+    },
+    {
+      "path": "linux/patches/292-0001-dt-bindings-display-rockchip-lvds-Add-RK3128.patch",
+      "source_sha256": "390ff2c61570a1d4941ffc728ebc25fefaeb24d47aad490beb30d37e611fed80",
+      "sanitized": true,
+      "reference_sha256": "429dffce271cf1c8af47f606ff838e17133f2ae9a2c081696e48249bf58fd417"
+    },
+    {
+      "path": "linux/patches/292-0002-phy-rockchip-inno-dsidphy-Program-the-RK3128-LVDS-an.patch",
+      "source_sha256": "1ffe08ff9744196d34056f55a631e6ed736a1055fb45da4003858e5b0863e7ca",
+      "sanitized": true,
+      "reference_sha256": "c3787c927a30a4f5094b1f5f83c76bb8260a9515160c87cf3beb2b5f44d5a47f"
+    },
+    {
+      "path": "linux/patches/292-0003-drm-rockchip-lvds-Add-RK3128-support.patch",
+      "source_sha256": "ae884dfd18613bbbf75a61c85f0541f42f8c8af792b0253a59aad748282b0119",
+      "sanitized": true,
+      "reference_sha256": "34abec8985d45ff02fb77c16a5b55415a811b29d2b8d4ef248d30cc39a88eb99"
+    },
+    {
+      "path": "linux/patches/299-0001-soc-rockchip-grf-rk3128-vpu-hevc-bus-mux-to-vpu.patch",
+      "source_sha256": "8a7b3e4480b02a2c12b155f6e2c11712941433876eb44a7bc579b3703fa8a769",
+      "sanitized": false,
+      "reference_sha256": "8a7b3e4480b02a2c12b155f6e2c11712941433876eb44a7bc579b3703fa8a769"
+    },
+    {
+      "path": "linux/patches/301-0001-dt-bindings-media-rockchip-vdec-add-rk3128.patch",
+      "source_sha256": "c074c4d4dceea4e1e9cf2d9fe17cf59f3d2cfefa093dd7e695e2c96d2924a3fd",
+      "sanitized": true,
+      "reference_sha256": "bc50194808656247180ece652caff9eab6b83cad7122ec75dd7bf3a00e66575c"
+    },
+    {
+      "path": "linux/patches/301-0002-soc-rockchip-hevc-vpu-bus-arbiter.patch",
+      "source_sha256": "481dcc9c39773ac13dd875a852ac2a64439a966bd4b1b35842fd36976419b6ae",
+      "sanitized": true,
+      "reference_sha256": "27fdfdd79d8a9a770ad47ccbbef919bd8df2288e315305301a28696bb5a41fc1"
+    },
+    {
+      "path": "linux/patches/301-0003-iommu-rockchip-rk3128-shared-bus.patch",
+      "source_sha256": "696e28655a161bc26401d234876e3f1d062f8c16f7bd00ed1fe51d5e7ae746a5",
+      "sanitized": true,
+      "reference_sha256": "f6702db7f6ebf3fa6b992e69e1c43b1f94d9fed62e8565c9ea69d8a7e9ea4449"
+    },
+    {
+      "path": "linux/patches/301-0004-media-rkvdec-add-rk3128.patch",
+      "source_sha256": "5e84af5f101246080ed7c6bb3ec1c9831437cb5e6949ed477045157968673949",
+      "sanitized": true,
+      "reference_sha256": "853ddac2cfb743b74645618f919f0bb2f7d4d8d031738b8d2dc2352b9822195e"
+    },
+    {
+      "path": "linux/patches/301-0005-media-hantro-rk3128-shared-bus.patch",
+      "source_sha256": "20d7f83552a5a8079f89b46cc09ca7c57acb57c57d6b1f1c5c04ceaca1ea9115",
+      "sanitized": true,
+      "reference_sha256": "9634175e7a1dbeb864eae9be2c6b92c2a1adb89385c6ea246dee4125756ec567"
+    },
+    {
+      "path": "linux/patches/302-0001-cpufreq-dt-platdev-rk3128.patch",
+      "source_sha256": "e0cfb1f1f609809fa4808b2671e3674cb146a667f3efe4be1d4087dd1a1375a8",
+      "sanitized": true,
+      "reference_sha256": "10148d091220927f787fce6550543ee11704f7bda9c5d1a69103ebdbd33d0ca8"
+    },
+    {
+      "path": "linux/patches/302-0002-rc-keymap-rk3128-reference.patch",
+      "source_sha256": "91273c53b0c807687c550d42ff67c49c253d7d421e03c79719a9ff00126d6ccf",
+      "sanitized": true,
+      "reference_sha256": "0a40a4be5f144c07785f48a1c736abb8c15b23f6ad217d48ecad0f3303cfcbc7"
+    },
+    {
+      "path": "linux/patches/303-0001-dt-bindings-sound-add-rockchip-rk3128-codec.patch",
+      "source_sha256": "1f35b96ff6104c73f47d194408701b4bd54c0bbab1b60641d8e7e8db055a9ceb",
+      "sanitized": true,
+      "reference_sha256": "c13f96aad4201cdb2d19b014bbae5ba8183f97ee87a39ca7b68b7256e37ef1a5"
+    },
+    {
+      "path": "linux/patches/303-0002-ASoC-codecs-add-the-rk3128-internal-codec.patch",
+      "source_sha256": "5b00d10d2673b244568788b9d071d959dc6188701c11c4cc4b6a55fd9161905c",
+      "sanitized": false,
+      "reference_sha256": "5b00d10d2673b244568788b9d071d959dc6188701c11c4cc4b6a55fd9161905c"
+    },
+    {
+      "path": "linux/patches/379-0001-drm-rockchip-lvds-keep-the-panel-after-bind.patch",
+      "source_sha256": "f80c3cb03efabe4aef4dbff0db01a6b5e4f44560a3209cdf6fe4102a352d11c5",
+      "sanitized": true,
+      "reference_sha256": "08f898e55955d37984ce1b0871a5452287e32194ff08c0f1e2faaac25bece632"
+    },
+    {
+      "path": "linux/patches/379-0002-soc-rockchip-rk3128-ddr3-frequency-change.patch",
+      "source_sha256": "1469a66dfbf16fc71561f461d7e883835ec5182778e6eac3627a7328d8270397",
+      "sanitized": true,
+      "reference_sha256": "29ded1755ed3ea069ddf925f901af987860d6f839bbf9294ecc638d43f375676"
+    },
+    {
+      "path": "linux/patches/387-0001-clk-rockchip-rk3128-keep-pclk-pwm-on.patch",
+      "source_sha256": "f5c30f2db4411752f92bcb2c31018cb734edd589485baa3325a7182fb2a10543",
+      "sanitized": true,
+      "reference_sha256": "00cef7e4d4864c3fac32b1c0e41d67e58122fb1014fe9fb61c803f7ffa1ee4c0"
+    },
+    {
+      "path": "linux/patches/390-0001-power-reset-halt-and-wait-for-the-power-key.patch",
+      "source_sha256": "31b3ba10729a19762d728366e04a9340bf227ed893d29e7fcc60036909be3b52",
+      "sanitized": true,
+      "reference_sha256": "113a87c6c8dcd98d44cd6facfd748060da1a690065c1b1b33705886ec0332d09"
+    },
+    {
+      "path": "linux/patches/395-0001-media-verisilicon-g1-jpeg-decoder-rk3128.patch",
+      "source_sha256": "0d0cb0f12cb4cc7aa691b6ccd3129e0124e52d40167add386688490a23c8d7e0",
+      "sanitized": true,
+      "reference_sha256": "c19c03ba1e1cc441306c8bd28b2336d1382df6d3fb08b66782c5ea39fc8eebad"
+    },
+    {
+      "path": "linux/patches/395-0002-dma-direct-no-kernel-mapping-on-arch-dma-alloc.patch",
+      "source_sha256": "a621e63fb643d9421433e66e15c224424fd0f6574ceb5929113e70e2c3d3e773",
+      "sanitized": true,
+      "reference_sha256": "de8f90391e020a774af46594f8c3cde7cac0e654d9353b482d60109f6baf0056"
+    },
+    {
+      "path": "linux/patches/407-0001-drm-rockchip-vop-rk3126-lvds-dclk.patch",
+      "source_sha256": "96ed6f8ed373df560e4eca94af1b91aa3654a00808d34820b74c2ef2b817ed17",
+      "sanitized": true,
+      "reference_sha256": "851b04fe3686abc5c779aeeeb4266a8067d065491021d3f75e6296b9bc1c318d"
+    },
+    {
+      "path": "linux/patches/407-0002-phy-rockchip-inno-dsidphy-rk3128-lvds-sample-clock.patch",
+      "source_sha256": "a4c6a025dc8ba980ce475acc67a47ed0aee70db72a3a457ff61b7b0ca66831e2",
+      "sanitized": true,
+      "reference_sha256": "fcfea9956826f9a5424173753c1725e07a9cc95017f771af9252da26d85090cf"
+    },
+    {
+      "path": "linux/patches/421-0001-media-verisilicon-log-g1-frames-without-dec-rdy.patch",
+      "source_sha256": "0b33f321d3c82f6fd37a6fd5f83de9e6459c7b955a87184ef3fc8f53011005b3",
+      "sanitized": false,
+      "reference_sha256": "0b33f321d3c82f6fd37a6fd5f83de9e6459c7b955a87184ef3fc8f53011005b3"
+    },
+    {
+      "path": "linux/patches/421-0002-media-verisilicon-rk3128-complete-g1-h264-frames-ended-by-timeout.patch",
+      "source_sha256": "db22649feb18a462d39c145edc9f65fefe8f26d4fda9c644ae71f63256002e1b",
+      "sanitized": true,
+      "reference_sha256": "670c08efe5e2e40112dbd70851137f7fa7958c3ccd9fad269d0d8d3dbd6a62d1"
+    },
+    {
+      "path": "linux/patches/476-0001-media-verisilicon-postproc-fix-the-g1-input-height-extension.patch",
+      "source_sha256": "c5598e8e11d9b3fd9666dadc210a2977647c93e9464c1696e46cca2260260ef2",
+      "sanitized": true,
+      "reference_sha256": "c675fe4c5c7c27565c7cc705a067cec3071f427c9a64285f8afa88886259d11b"
+    },
+    {
+      "path": "linux/patches/478-0101-drm-lima-log-the-L2-MAX_READS-reset-value-and-make-i.patch",
+      "source_sha256": "b1e89e8279427031c463de746f934d47b2192ca8907f99bf17b95a773378fc64",
+      "sanitized": true,
+      "reference_sha256": "89db946c08579505dd3ab35744b4b564b45c416e14baad26e667839b4b92cf52"
+    },
+    {
+      "path": "linux/patches/478-0102-drm-lima-remember-which-page-directory-each-MMU-has-.patch",
+      "source_sha256": "ce60f570401a816d911991b503297f2ed3cccdf6216375780a3d5bd30b03ca86",
+      "sanitized": true,
+      "reference_sha256": "1af2e953099798a24b4b7cfddc6698b47aac4883ffcb1c65e65aabf9be33efe3"
+    },
+    {
+      "path": "linux/patches/478-0103-drm-lima-invalidate-the-L2-lines-of-page-tables-the-.patch",
+      "source_sha256": "89ce44e9b4317f41e41e97f455836f6660734a5d1f5227e793cb8b3bc38ed02f",
+      "sanitized": true,
+      "reference_sha256": "be0e1317ccbfc40b543e1dc0caf0ff5cc1ffaca7762fe9db26c0bc5aa432b6c2"
+    },
+    {
+      "path": "linux/patches/478-0104-drm-lima-invalidate-the-L2-only-when-the-vendor-driv.patch",
+      "source_sha256": "24e497bb9f9f7704dbfac249bd8b2426eb47d893998c57e74061acbe3cdb6a47",
+      "sanitized": true,
+      "reference_sha256": "3ab939e69eedcc0f54913234f07855bbd0a178d8095a6ab15017706f748db242"
+    },
+    {
+      "path": "linux/patches/478-0105-drm-lima-relaxed-register-writes-skipping-reset-valu.patch",
+      "source_sha256": "21ec7f51d19dcbddf11272e613400136b45bd8d86d67b829bcb75cede52fac59",
+      "sanitized": true,
+      "reference_sha256": "1640066c69339b2972868973d1aad1b55e178829b08221e28227b212478f2599"
+    },
+    {
+      "path": "linux/patches/478-0106-drm-lima-start-the-next-task-from-the-IRQ-handler.patch",
+      "source_sha256": "5f3a47c2e74c1197c858ea3d95050a01660776f2ae7a23454e8c5957a49cf10b",
+      "sanitized": true,
+      "reference_sha256": "58f1290e06658f0253168ae7d5aa0e896b0859b9d5b438e4320a1fd292cf1df7"
+    },
+    {
+      "path": "linux/patches/478-0107-drm-lima-run-drm_sched-s-work-on-a-high-priority-wor.patch",
+      "source_sha256": "5151813de315efc2f9991aeebd3e6b0e883ab051fa74c1965917e3a985fdd312",
+      "sanitized": true,
+      "reference_sha256": "5eae8797747127757ab7a43b97ec1d21bf727a3613c23bfd7575af94eaffdf08"
+    },
+    {
+      "path": "linux/patches/478-0108-drm-lima-per-task-GP-and-PP-hardware-performance-cou.patch",
+      "source_sha256": "099e49df7ccc3675e089f90116c936ffe4bc5cefca414cf8d79e4e7c47878de5",
+      "sanitized": true,
+      "reference_sha256": "358c4cf7bd88cf7094180c4121939c9503cc56293a22eaaead4fbc450e17e878"
+    },
+    {
+      "path": "linux/patches/478-0109-drm-lima-wait-for-every-L2-command-to-finish.patch",
+      "source_sha256": "f130f3c5b401a35eaa83b1a32c23579040410729499e3b9e28babf238cbc1687",
+      "sanitized": true,
+      "reference_sha256": "e29b5bc69510404aa98ad3311ffa3c95975d35ef32f1d7aa9ee7fa990199a097"
+    },
+    {
+      "path": "linux/patches/478-0110-drm-lima-start-a-deferred-task-before-the-one-after-it.patch",
+      "source_sha256": "5fceb19a4427c57dae843aed0a33d2fd41b50a87bf72f33b44b9ee9e3e9444bf",
+      "sanitized": false,
+      "reference_sha256": "5fceb19a4427c57dae843aed0a33d2fd41b50a87bf72f33b44b9ee9e3e9444bf"
+    },
+    {
+      "path": "linux/patches/478-0111-drm-lima-quiesce-deferred-starts-before-timeout-reset.patch",
+      "source_sha256": "5aecd2b8a0bba78d3fdfcae29cc9aea40abf737a0a47f54714e1c88852869b03",
+      "sanitized": false,
+      "reference_sha256": "5aecd2b8a0bba78d3fdfcae29cc9aea40abf737a0a47f54714e1c88852869b03"
+    },
+    {
+      "path": "linux/patches/521-0001-dt-bindings-display-panel-rk3128-reference.patch",
+      "source_sha256": "eb53451a84b2f6308e7c02cb11e055949fa6021ef4a8ab6f9e8c91f90b328f0b",
+      "sanitized": true,
+      "reference_sha256": "396156bc3054c778a5e152b84964a62ea136c372a2ad07d4ab2d3344c1ee21a5"
+    },
+    {
+      "path": "linux/patches/521-0002-drm-panel-rk3128-reference-power-sequence.patch",
+      "source_sha256": "04be1b510c3f85bc71f5474f70b702029a70eb756b87fb4a1574429f8f33f496",
+      "sanitized": true,
+      "reference_sha256": "d71997da4edb45dd0419811c4f586eb911418fda29fbe317ad45ab6a8734aad4"
+    },
+    {
+      "path": "linux/patches/522-0001-mmc-allow-board-cache-opt-out.patch",
+      "source_sha256": "29beaef5716ee698c448f4cfe34a933e2eeef4230d17b702e4cf9604a90078b1",
+      "sanitized": true,
+      "reference_sha256": "3ba74b005956fbe70fdc1bb912e7c988531c973902102a740a3d332c40e38ae9"
+    },
+    {
+      "path": "linux/patches/530-0001-drm-defer-passed-file-pid-release.patch",
+      "source_sha256": "9e2c2e5910e0b9d110f5289ba67c7758b3383dd525c7b9bb1c9fe5a55d520c37",
+      "sanitized": true,
+      "reference_sha256": "5b063e30cd526b0449a8f28d0e311d4a6ee3c274ff12e2b20eef3911b911e34b"
+    },
+    {
+      "path": "linux/patches/536-0001-drm-rockchip-release-boot-logo-after-takeover.patch",
+      "source_sha256": "9026dc4d2769c0eff9e851aa54dd22ab78c3699719659026b614f84e29d1fd21",
+      "sanitized": true,
+      "reference_sha256": "51075d8c365e962cbff8b17055986eabcbdd11bfccdf9986af82a12871cef183"
+    },
+    {
+      "path": "linux/patches/536-0002-dt-bindings-display-rockchip-describe-boot-logo.patch",
+      "source_sha256": "5e932f410a784e9e2822b4620d0d9e792a5acbaa1ca29f97dc882deb3fbb0dec",
+      "sanitized": true,
+      "reference_sha256": "0504a2460ee38f794168e2a333b5b2fd21bc2a7c6028bb1046c27b61be237230"
+    },
+    {
+      "path": "linux/patches/560-0001-drm-panel-rk3128-reference-restart-handoff.patch",
+      "source_sha256": "dcf496cb64bfe417be1f466bd06e12d5b4672324d24b15888cd597e139a5461e",
+      "sanitized": true,
+      "reference_sha256": "97d7f9b373c173399c0d30f29c8d7c7b64b35e2c3788e8172da64b0abba5cea4"
+    },
+    {
+      "path": "linux/patches/579-0001-input-silead-vendor-calibration.patch",
+      "source_sha256": "54652cf3ccd302ddcbfe5e75569282ed19ef46bd1712db3847a07764fc663504",
+      "sanitized": true,
+      "reference_sha256": "396cf565fbc1baf20e77dfe26d78f9a049d845a6590dfbd807510b654d3492aa"
+    },
+    {
+      "path": "linux/patches/587-0001-input-silead-rk3128-reference-point-algorithm.patch",
+      "source_sha256": "3b5497d76ab3101ff421084fb63e047fe0626f9d5942e459be05dc3fc6dc0f53",
+      "sanitized": true,
+      "reference_sha256": "009c0179878d4fecf64a8779cc02e21fdebd35dbfc7d9f7cc73bab4219d94925"
+    },
+    {
+      "path": "linux/patches/604-0001-drm-lima-report-client-engine-time-and-memory.patch",
+      "source_sha256": "f422077f30ed7a0d071386124f90cb976d2c275e6fe82c217b4b732967ce325d",
+      "sanitized": true,
+      "reference_sha256": "ee59d46c6510653c13f582a71d1fb644c6a832204851b280b08fddb9cc1a732e"
+    },
+    {
+      "path": "linux/patches/616-0001-drm-rockchip-rk3126-video-colour.patch",
+      "source_sha256": "c1d1134a83e0f03e740e816d4cb920ed94a54fecb07edfc8b0692ae381f9048c",
+      "sanitized": true,
+      "reference_sha256": "4aee5b4ea0375923d5a1f6e5b2ea21bfc3826ba04984ecdc4e92a72c1cb69d39"
+    },
+    {
+      "path": "linux/patches/619-0001-media-rockchip-rga1.patch",
+      "source_sha256": "c86654ee9a381f6c841c80b11092f931284fc0578709e470c7825b659a4a0614",
+      "sanitized": true,
+      "reference_sha256": "1062ec73b02de4248a9aac211ce8301df518f00a0eb1ae3a1f5a47ac5a80fbca"
+    },
+    {
+      "path": "linux/patches/619-0002-dt-bindings-rga1.patch",
+      "source_sha256": "79d98cfcca283953a6f8087897932dcb42183ada99ca4fc9756add502cfccc18",
+      "sanitized": true,
+      "reference_sha256": "23bc5fd0121ecd7d166b45a910e1c4140a463ca3720deaa2ba5d7bcf512ad91d"
+    },
+    {
+      "path": "linux/patches/620-0001-media-rockchip-iep.patch",
+      "source_sha256": "a7cf55a61da87ac7dc6231e51125e660976d5dcb5472809ba4f615315e65a9cd",
+      "sanitized": true,
+      "reference_sha256": "c3c21f29df48e8fefda23798ff423c93f7760639c6d99eec8d14f4f7329a8ab2"
+    },
+    {
+      "path": "linux/patches/620-0002-dt-bindings-media-rk3128-iep.patch",
+      "source_sha256": "1144d139c130ddd920354e7dcf6a82d1361d6d5ff2430dadc6258ab3bea204bc",
+      "sanitized": true,
+      "reference_sha256": "43b78b5e985eb57d1eeba417a3b4ff3810d6155149ce4a54083010721d0f373f"
+    },
+    {
+      "path": "linux/patches/623-0001-drm-rockchip-vop-rk3126-error-counters.patch",
+      "source_sha256": "cf5ad1763192375c21ebf59d8579cc98c19c2365e37a6ecaadaae524201b6bb6",
+      "sanitized": true,
+      "reference_sha256": "ea3df862497bc04eee102408a5108b9766fddef95cdf13207048b16e89a0e22e"
+    },
+    {
+      "path": "linux/patches/623-0002-dt-bindings-soc-rockchip-rk3128-qos.patch",
+      "source_sha256": "e6fb5121071f6213ef35332b1aae9fbd6bdb7d8cca8a09c981584f6dff05dd46",
+      "sanitized": true,
+      "reference_sha256": "e761f8c8ba94da802453a25571e7b7cecf64752447f9b31d2df026346f2d0172"
+    },
+    {
+      "path": "linux/patches/623-0003-pmdomain-rockchip-initialize-noc-priority.patch",
+      "source_sha256": "dde3529f1d45d29490144c33401cae8c8e00d6dbffe39ed5016897d4cf23e99d",
+      "sanitized": true,
+      "reference_sha256": "340bdab14da3613ab69bacf85c58ca38f5c906eac6eaf7023e39de90d97e2eec"
+    },
+    {
+      "path": "linux/patches/638-0001-cpufreq-dt-rk3128-busy-core-boost.patch",
+      "source_sha256": "216ad4b337cd08a5082566bf228cd354d96e5f854dc1312277e976b8f1f267ab",
+      "sanitized": true,
+      "reference_sha256": "df4f4273efeffa3b2cdad207394f92963852d8e53c07b3a0e6a40ebecec75d92"
+    },
+    {
+      "path": "linux/patches/666-0001-drm-lima-expose-buffer-memory-snapshot.patch",
+      "source_sha256": "22cfbb5ebda93c35bc0bb16b5e47d72f1a16c735c07abde0e6539b2bc1086803",
+      "sanitized": true,
+      "reference_sha256": "be01e902cb6f78b19449a62cc806ffc71757919cc20e8c6ff388cc261fdd6fc4"
+    },
+    {
+      "path": "linux/patches/734-crypto.patch",
+      "source_sha256": "f0cb69b90633ad9c935f25ef054c4f42fd506ec8a4d7a9d25a643f591efa8ea1",
+      "sanitized": true,
+      "reference_sha256": "06eb3be7211991aa163345e263b08ce3423613f58140e963ebbc3daa1439a195"
+    },
+    {
+      "path": "linux/patches/736-0001-hantro-h1-encode.patch",
+      "source_sha256": "09a5bae51b68a83641eaced53a982cf40788b9edd6b3d3b85cbc620fa85ef331",
+      "sanitized": true,
+      "reference_sha256": "4777a4a56baf1056e5f2c80faf3e4b4588a062a84ac50578597eb908f7673cb8"
+    },
+    {
+      "path": "linux/patches/750-rng.patch",
+      "source_sha256": "04f4be255c4505836e5c754b58655db298a7efc20a6fdf9c453588fa43aff9bd",
+      "sanitized": true,
+      "reference_sha256": "60c71ad6197c72ab342e4ff11cc456efab303f863f5dbac62c5c70dfae30527b"
+    },
+    {
+      "path": "linux/patches/758-crypto.patch",
+      "source_sha256": "1669accd0ea7f88ffbefd89c8ca702cedda25c7271f8a9e3c722fa7358a9c328",
+      "sanitized": true,
+      "reference_sha256": "52b594d4f6b64fa40fe6dedc0de15fcfccd6c4b172f791b68e2f2b31066daeec"
+    },
+    {
+      "path": "linux/patches/764-crypto-transition.patch",
+      "source_sha256": "70c318abce4a445a6e4cb6995c73b59f14953d8b6e5f1cf1c0c5d2cd95ed7e42",
+      "sanitized": true,
+      "reference_sha256": "30d077f188913e613a8514aa8d445d0bc045631f46625d1e8b1e9c63d2516f45"
+    },
+    {
+      "path": "linux/patches/zz-761-crypto-power.patch",
+      "source_sha256": "6d4598b60616d5b619a69e0da4189e0aa6a6d45b3f5e0a29b08ddead63ec05d4",
+      "sanitized": true,
+      "reference_sha256": "209cecad91b65eadc31a9f856242418d901028355376825b00bf324dda128446"
+    },
+    {
+      "path": "linux/tests/cpu/rk3128bench.c",
+      "source_sha256": "e6b481ad780c84b63c73e378867e9a512c206d7a416a7dcb2ed34b3ff04772ae",
+      "sanitized": true,
+      "reference_sha256": "d58bc154ec35ff9fb43615f0dc2ca935fda042ce6e8b7ef113b2efada27d37b1"
+    },
+    {
+      "path": "linux/tests/launch/drm_handoff_probe.c",
+      "source_sha256": "5529bfca2f2bdcf131fa9d7a6790931054107c2ba626d311c9b17c110ba4b154",
+      "sanitized": false,
+      "reference_sha256": "5529bfca2f2bdcf131fa9d7a6790931054107c2ba626d311c9b17c110ba4b154"
+    },
+    {
+      "path": "linux/tests/launch/shader_probe.c",
+      "source_sha256": "d210b927f4cbd999a6c07c25dfb94ba5060ad81be3ee29bfe5a05f0514ea212c",
+      "sanitized": true,
+      "adaptation": "Standalone GBM/EGL context replaces excluded product API; shader tests retained.",
+      "reference_sha256": "7903a808419777661672324942b6456d2847c264979ae2935900af71311e480a"
+    },
+    {
+      "path": "linux/tests/memory/ram-account.c",
+      "source_sha256": "9e2ac9eaa0b5c8a80b5d760a00082925b011276ccc9e242c72b82715d351b17d",
+      "sanitized": true,
+      "reference_sha256": "7364ae7cea140e0d489dafeafcdd645a2e4abcf566e74b08a0d8f0b17aea8069"
+    },
+    {
+      "path": "linux/upstream/292-0004-ARM-dts-rockchip-rk3128-Add-the-LVDS-transmitter.patch",
+      "source_sha256": "9ad791b0da7168e9417322692c867d6d4885db57b041b8af2d635a9be93eb1ee",
+      "sanitized": true,
+      "reference_sha256": "a0a184aa17027da12399f4bafec1d2ea728ec0310494ceb81676f8954d596a69"
+    },
+    {
+      "path": "linux/userspace/alsa-lib/0001-dmix-clear-the-sum-ring-behind-hw_ptr-never-read-the-slave-buffer.patch",
+      "source_sha256": "d43e5a7397a05f37e5298c7d635103ca5b45ff384f1f8308de451de0642df868",
+      "sanitized": true,
+      "reference_sha256": "4dd40754ccd65757fabae52ed15cffc717e627916aeb95bf51ff9fdcf64ebc0b"
+    },
+    {
+      "path": "linux/userspace/alsa-lib/0002-softvol-neon-loop-for-interleaved-stereo-s16.patch",
+      "source_sha256": "9887f9ee437f1013daec4933f8dbb26d291aea83f1d85de16399125472b061de",
+      "sanitized": true,
+      "reference_sha256": "03af58f47f12805dbc22201eefdbe7ce728dceb230844fff03fc6584cb04b3a6"
+    },
+    {
+      "path": "linux/userspace/alsa-lib/alsa-lib.env",
+      "source_sha256": "c60134ef57c50b3107e00c18e88ca4df018f9bdb91505b778e6de02ee7b660f5",
+      "sanitized": true,
+      "reference_sha256": "b99177d8ada1e179060b38eccebaafea5b881e0f403c11bd8039f6f7beb050a5"
+    },
+    {
+      "path": "linux/userspace/ffmpeg/ffmpeg.env",
+      "source_sha256": "52ee6b34eef850db80c0224114106331f35fd57b7b99b74ad7ffd335208ff1bc",
+      "sanitized": true,
+      "reference_sha256": "ab60cccb1ea625aef0a5362e1959ef5f82687d9d827e983d838566cba69bd6d0"
+    },
+    {
+      "path": "linux/userspace/gstreamer/0001-v4l2codecs-hevc-crop-meta.patch",
+      "source_sha256": "acabd4d77545beb42a429e99fdd1f463a99348dfbac83f251ee15d1867072e02",
+      "sanitized": true,
+      "reference_sha256": "a98d87308ea74738cbb88ac71a39f4a113a39b851fc02d69cfd8bd3f9c150913"
+    },
+    {
+      "path": "linux/userspace/gstreamer/0010-CVE-2026-119727-h265-sei-decoding-units.patch",
+      "source_sha256": "0908ae993066ae715bd08f5177c08e43aaeef6dcbadac8973f4f8667208fb278",
+      "sanitized": false,
+      "reference_sha256": "0908ae993066ae715bd08f5177c08e43aaeef6dcbadac8973f4f8667208fb278"
+    },
+    {
+      "path": "linux/userspace/gstreamer/0011-CVE-2026-53702-h265-sei-cpb-count.patch",
+      "source_sha256": "c7dfa9a9189437d1bbd094c4eabf43e89b8e92e706641efce1f226844ef9e036",
+      "sanitized": false,
+      "reference_sha256": "c7dfa9a9189437d1bbd094c4eabf43e89b8e92e706641efce1f226844ef9e036"
+    },
+    {
+      "path": "linux/userspace/gstreamer/616-0001-h264parse-preserve-independent-vui-range.patch",
+      "source_sha256": "a833b81225e478b2d48f7a3b07abbf0bb51405604c500045c8d7d7e8517de8cb",
+      "sanitized": true,
+      "reference_sha256": "8faede6ef31367b82b6b1f95f6a0b74f3470376b6f62967fad3db0d72e9b84ac"
+    },
+    {
+      "path": "linux/userspace/gstreamer/gstreamer.env",
+      "source_sha256": "c6936f86bc23fd40e4fe73cc6ae7d7b2c21b9479aab19504bc9d729a02631c41",
+      "sanitized": true,
+      "reference_sha256": "b4c138626ef9939cc76b251fbc245411263e1cbfd6c5dec6fa2516154089ffb4"
+    },
+    {
+      "path": "linux/userspace/mesa/0001-lima-prepare-for-FP16-varyings.patch",
+      "source_sha256": "f72a04219c579f3a348c568a439feae00774e8667d024c388938ccbc15f42cf9",
+      "sanitized": false,
+      "reference_sha256": "f72a04219c579f3a348c568a439feae00774e8667d024c388938ccbc15f42cf9"
+    },
+    {
+      "path": "linux/userspace/mesa/0002-lima-return-after-unreachable-varying-format.patch",
+      "source_sha256": "6a66535921bddea439247b82444739cc23bd657509abfcea1b71b7c573213639",
+      "sanitized": true,
+      "reference_sha256": "75719e22efd1d8db13d19fac4fb0ea93150c82d59481794217aba4c6b857eff0"
+    },
+    {
+      "path": "linux/userspace/mesa/0003-lima-split-load-input-vec.patch",
+      "source_sha256": "5fd2522fdcc6179dbd11f15839504e203bf9078c6c28b38e94daf66b70629bc2",
+      "sanitized": true,
+      "reference_sha256": "01731d632bb05af5a183e95c3b0ac4512669865a7ffca19426a4aa52684106db"
+    },
+    {
+      "path": "linux/userspace/mesa/0004-lima-pack-pp-uniforms.patch",
+      "source_sha256": "5dfa23d59ed2cc44951b914d7b1c1a302b9d7d162cce534bbdf14649cf7349f4",
+      "sanitized": true,
+      "reference_sha256": "2361d5528645596b2f89f5100cb93115ee5b3678cbc8d2b1e9578510bd434eb3"
+    },
+    {
+      "path": "linux/userspace/mesa/0005-lima-keep-aligned-fs-varyings.patch",
+      "source_sha256": "cbee1b04b60ecb73660493b1c8cf2fdd63c6c78754bb8ee36abd70aec24c5a4f",
+      "sanitized": true,
+      "reference_sha256": "6f5f491662085a0e211e4d475ae34f1ce0915d8874b619ba3abefa1422626975"
+    },
+    {
+      "path": "linux/userspace/mesa/0006-lima-rename-busy-buffer-on-partial-write.patch",
+      "source_sha256": "c5ab37e9dbb65006ce04a04644c6fd2cd92ab9e46b1f412697968109f6203721",
+      "sanitized": true,
+      "reference_sha256": "f599b7b63c8956df83d6812a06aaa399f5a7c35684464f27025940bac6b726ee"
+    },
+    {
+      "path": "linux/userspace/mesa/0007-lima-default-to-4-plbs.patch",
+      "source_sha256": "f95844f4dedbda0d82485853a77becf8a1644ac1a344b3ff91c6e56f8e80e148",
+      "sanitized": true,
+      "reference_sha256": "25847f881dbe8ceb595682929795d728c93fe0f949e92228d7992e5299293fb6"
+    },
+    {
+      "path": "linux/userspace/mesa/0010-lima-use-the-result-combiner-as-a-third-multiply-port.patch",
+      "source_sha256": "2c84321cbd8e644243f296a3299aed524bbb9b14b12f69226d6c080e5b705dff",
+      "sanitized": true,
+      "reference_sha256": "fa2a4cbb5850bb91ac079f1acaca52e25f0e7d0d654084666652a458f3fc5330"
+    },
+    {
+      "path": "linux/userspace/mesa/0011-nir-do-not-propagate-a-constant-into-part-of-an-fs-input-slot.patch",
+      "source_sha256": "9e913d98c2f4c9747772de37e9c3569818428e65003c05606a688cc60bb7138b",
+      "sanitized": true,
+      "reference_sha256": "fb314dcacebef4cd4dbf42701f65540e02bfd58e9930ac9899b0abaf53c7c8e0"
+    },
+    {
+      "path": "linux/userspace/mesa/0012-lima-store-mediump-varyings-fp16.patch",
+      "source_sha256": "3435d13dc5e9a52cb7351b210bc1846aa88c3999141fb476625d114e7d22a7b0",
+      "sanitized": true,
+      "reference_sha256": "718a526940fe99ec81910c6529480f50af33c5a0499a8d4b550d161b9776105c"
+    },
+    {
+      "path": "linux/userspace/mesa/0013-lima-pack-the-varying-stride-to-8.patch",
+      "source_sha256": "4c4846cdfa2e698555139917924fc9b6631ac1bfe53bb498402a2fbc4cc0ade0",
+      "sanitized": false,
+      "reference_sha256": "4c4846cdfa2e698555139917924fc9b6631ac1bfe53bb498402a2fbc4cc0ade0"
+    },
+    {
+      "path": "linux/userspace/mesa/0014-lima-gpir-one-cycle-of-critical-path-slack-when-picking-the-next-node.patch",
+      "source_sha256": "f762d1d183476f6a51710ceb5de47ef146c21242983f4ebddfa341ade4532dec",
+      "sanitized": true,
+      "reference_sha256": "b469e09d50dceb1ab3483a3874a4869cb79fdfce7e2d12e4eaceb8cb140298d6"
+    },
+    {
+      "path": "linux/userspace/mesa/0015-lima-let-more-than-one-unit-read-texture-in-the-texld-s-instruction.patch",
+      "source_sha256": "0fb47dc8ca24e10520764688e390fbcd26e31a83b854f1afe291f294ba8881d5",
+      "sanitized": true,
+      "reference_sha256": "e227b8f79d4ff4cc3e77483bc465393b608c2edda1924a4b7a48d405dcc510d1"
+    },
+    {
+      "path": "linux/userspace/mesa/0016-lazy-glsl-builtins-on-cache-hit.patch",
+      "source_sha256": "77ca05caa64b543fd272fb6c8577b612fa9dc35dcc454711202cd1a0ee3e6592",
+      "sanitized": true,
+      "reference_sha256": "5ba00514530ab1c57839b482e567472f680be928f519d4b01c172a1067ea9864"
+    },
+    {
+      "path": "linux/userspace/mesa/mesa.env",
+      "source_sha256": "92226a12c866d88dc4f99427aea1cf4a22b3f7c7d6ec7293e33e5de6eabdd399",
+      "sanitized": true,
+      "reference_sha256": "d8cf379e3a501b9e3883de43b5fb05dce8a539f2617e67ca96f10f94d144b846"
+    },
+    {
+      "path": "linux/userspace/rk3128-mem/rk3128-mem.c",
+      "source_sha256": "187fbb52b33104ca6e069dd71dc02c00f5d585473f393fe27aa335df458baed0",
+      "sanitized": true,
+      "reference_sha256": "d0eb8e2fa46cc46f7f20e33a1143c8b32268b27c041c359722e3c98e6f488c93"
+    },
+    {
+      "path": "linux/userspace/rk3128-mem/test.c",
+      "source_sha256": "e66b714e6f61fe1b562ea00265ae0f4093b73427706a1b785e8d5495e43e1b77",
+      "sanitized": false,
+      "reference_sha256": "e66b714e6f61fe1b562ea00265ae0f4093b73427706a1b785e8d5495e43e1b77"
+    },
+    {
+      "path": "linux/userspace/wpa/.gitattributes",
+      "source_sha256": "05ff0865ce9affdad7aac729be7a506c27f4f0f1a5c5fd03bf8bbce9e2fe33d1",
+      "sanitized": false,
+      "reference_sha256": "05ff0865ce9affdad7aac729be7a506c27f4f0f1a5c5fd03bf8bbce9e2fe33d1"
+    },
+    {
+      "path": "linux/userspace/wpa/0001-reconnect-previous-channel.patch",
+      "source_sha256": "5b73bfb4930dcafde60c9f290e51952da0632d7af8e4e981e70ad16eebf07bd9",
+      "sanitized": true,
+      "reference_sha256": "a762790fab138977a5c5e4d4fa55fa692d31b0ae5b616e6401009835bbb4b241"
+    },
+    {
+      "path": "linux/userspace/wpa/0002-default-to-24ghz.patch",
+      "source_sha256": "169e8b26fea15a18eac5bd658e910b15011c9297ead51d87ea701056d5e72870",
+      "sanitized": true,
+      "reference_sha256": "bb52e68d6781e56b6a1dbd765e8d1d333688d994bd8967fbf22e22fc5126a2b6"
+    },
+    {
+      "path": "linux/userspace/wpa/wpa.env",
+      "source_sha256": "40882a7822e162cf5e493458a43e95672c162135713797a39388d1d31d5767d6",
+      "sanitized": true,
+      "reference_sha256": "6dd0b15988b7cc5f8fa0e04f5d04dfed399f7f19c982a1581b3ca48ff24c261e"
+    },
+    {
+      "path": "research-tools/experiments/compiler/measured-native-kernel.patch",
+      "source_sha256": "fc27aee27cc5d9016bc9ec6089b12d43215de8cf432f634bae194747eb41d9d2",
+      "sanitized": true,
+      "reference_sha256": "dca4ebb1154a63757435d97bd7c0d85113ac3f2e43040ce46e27e87fff56af51"
+    },
+    {
+      "path": "research-tools/experiments/crypto-init/trace.patch",
+      "source_sha256": "dd690111e9c52cb5ff440c9b91577d35a9cc34d7a7ac8e00a231bb84c5e9be7f",
+      "sanitized": true,
+      "reference_sha256": "6dcbdeefe9cfbc9e5fe94aa76a9bbb0735cb1365f3f332874dc7fcfd9909480f"
+    },
+    {
+      "path": "research-tools/experiments/crypto-init/word-copy.patch",
+      "source_sha256": "561aa5732697f870bb27a6d5fc39b8aa9c414b607fedfeecd48ca9a8d8a098a3",
+      "sanitized": false,
+      "reference_sha256": "561aa5732697f870bb27a6d5fc39b8aa9c414b607fedfeecd48ca9a8d8a098a3"
+    },
+    {
+      "path": "research-tools/experiments/gpu-beat-blob/dot2-zero-addend.patch",
+      "source_sha256": "2552cbb76e59593b70fb544808aac241ccdc3cb4442b3e622946b90574e20f55",
+      "sanitized": true,
+      "reference_sha256": "323214bfeedc13ce5f80c1f542aaf8c4eca94176919a2c985f695fbb321cd9b1"
+    },
+    {
+      "path": "research-tools/experiments/gpu-beat-blob/never-dither.patch",
+      "source_sha256": "0cb4d6765f6493b4f36c7f5112b66015fa4a94996711036fcda106d6bdaa82ed",
+      "sanitized": true,
+      "reference_sha256": "edf8c7ef7746b0fa8520c793510fe5772ad9e47ab53ad41e350fa1cc289980a4"
+    },
+    {
+      "path": "research-tools/experiments/gpu-beat-blob/sum2add-op-0x12.patch",
+      "source_sha256": "84ab52c847afa75cb71a3744cd30fd55ad0fad4d96d3a6cef07002117a76e380",
+      "sanitized": true,
+      "reference_sha256": "e5c79852170e51e204411f9902925ec6beb1e8d834216c3d969e1c7836b096b9"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0101-drm-lima-log-the-L2-MAX_READS-reset-value-and-make-i.patch",
+      "source_sha256": "410021625775b463498c98f353f87935bb3bc2298e87c8735f5d3d0b1b243638",
+      "sanitized": true,
+      "reference_sha256": "2ebdc98af20b907b5d1ef79474de26a14aaad1f534b24ad076ef2b3a773c48f2"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0102-drm-lima-per-job-cache-maintenance-like-the-vendor-d.patch",
+      "source_sha256": "f18bc9e756dcfb1ba2c04c7353a6d8d74a38cd3815ea1b48a058092545ff56cc",
+      "sanitized": true,
+      "reference_sha256": "3e5901eeff86a18fa1cba4aeca9af9c624ace7533a33a58cf6d70d797e1638c6"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0103-drm-lima-start-the-next-task-from-the-IRQ-handler-up.patch",
+      "source_sha256": "c8f44cb9c8ad9cc77e3f2e32d87f2b363a617e13651feb4790f542a4584f6af5",
+      "sanitized": true,
+      "reference_sha256": "e0b975c0db737fd7556155586e1b1238c7b1b5a0c63649dc9bb960c91654c4a0"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0104-drm-lima-run-drm_sched-s-work-on-a-high-priority-wor.patch",
+      "source_sha256": "73940ff77d0c988596d9e843b6071cb21dcc98e1fe763924399a9a876fc5a0f8",
+      "sanitized": true,
+      "reference_sha256": "d18228996012af85b0500d09589d0f477cc0979663620fb70ff0870a9ca2cc78"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0105-drm-lima-runtime-switches-for-the-hardware-A-B-of-01.patch",
+      "source_sha256": "c9c6f1e38a876988d2d6a82230e64ab6ada09806569d106b795936515825335b",
+      "sanitized": true,
+      "reference_sha256": "b68d3d7cb7520515aa6f95b406237a2b65b69758a67226602049639bcc1805a2"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/midpass/x-472-experiment.patch",
+      "source_sha256": "df678a54ff312b07fd14e9e91105de7545965603a9ede98926f566d8b8548f21",
+      "sanitized": true,
+      "reference_sha256": "fc53764771ca6ae9519023b65e2a208330ef62de20edf7001fa855261976fd1c"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/reload/0004-lima-rename-busy-buffer-on-partial-write.patch",
+      "source_sha256": "c5ab37e9dbb65006ce04a04644c6fd2cd92ab9e46b1f412697968109f6203721",
+      "sanitized": true,
+      "reference_sha256": "f599b7b63c8956df83d6812a06aaa399f5a7c35684464f27025940bac6b726ee"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/shader/0005-lima-keep-aligned-fs-varyings.patch",
+      "source_sha256": "cbee1b04b60ecb73660493b1c8cf2fdd63c6c78754bb8ee36abd70aec24c5a4f",
+      "sanitized": true,
+      "reference_sha256": "46cd1afd7913711a9895c603b9bdc179204a36bcc68ebba3e1b9f7ad98ce5d9a"
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/sync/0002-lima-allow-8-plbs.patch",
+      "source_sha256": "f83b46137a7d505aaa51d903d6494cc1d3de47933ffe9d30086ffeee35646249",
+      "sanitized": false,
+      "reference_sha256": "f83b46137a7d505aaa51d903d6494cc1d3de47933ffe9d30086ffeee35646249"
+    },
+    {
+      "path": "research-tools/experiments/iep-620/tables-diagnostic.patch",
+      "source_sha256": "9fe3ebea7c8256771f437b5ee02815216fc517d747496be3535423f6b9d77955",
+      "sanitized": false,
+      "reference_sha256": "9fe3ebea7c8256771f437b5ee02815216fc517d747496be3535423f6b9d77955"
+    },
+    {
+      "path": "research-tools/hardware-proofs/fixtures/hwprep-quality.py",
+      "source_sha256": "0a5e464ff23cbcce8a6c157d0114e507b6948c2940e7ec035878d5d0692f8031",
+      "sanitized": false,
+      "reference_sha256": "0a5e464ff23cbcce8a6c157d0114e507b6948c2940e7ec035878d5d0692f8031"
+    },
+    {
+      "path": "research-tools/hardware-proofs/fixtures/photos-rga-fixtures.py",
+      "source_sha256": "0134eb8abf99bf0c4ec50d7ea477007b45b111e8eb1dcf7e8f50f2bcd45ad8ac",
+      "sanitized": false,
+      "reference_sha256": "0134eb8abf99bf0c4ec50d7ea477007b45b111e8eb1dcf7e8f50f2bcd45ad8ac"
+    },
+    {
+      "path": "research-tools/hardware-proofs/fixtures/photos-rga-quality.py",
+      "source_sha256": "1e96b7905ceaf92d8dacf541c2aa7c6eb89bc33da338f3e0496a0e568d7e3fa4",
+      "sanitized": false,
+      "reference_sha256": "1e96b7905ceaf92d8dacf541c2aa7c6eb89bc33da338f3e0496a0e568d7e3fa4"
+    },
+    {
+      "path": "research-tools/hardware-proofs/gpu/framehash.c",
+      "source_sha256": "3dec1f677e521ee3abdd88cd022cabdecdd7356609319970b091cd1e8b10088f",
+      "sanitized": true,
+      "reference_sha256": "d52c1d25c8dec72feb30eb65bf9b9b44d5ac0835ca41a484549e5f989f41f713"
+    },
+    {
+      "path": "research-tools/hardware-proofs/gpu/lima-trace.py",
+      "source_sha256": "5a5bcd08f5f4418e6300aa3a700a7a13129a80bdc1ddb4a8763774e6fd77972e",
+      "sanitized": true,
+      "reference_sha256": "124326e6866bf1d7740c85f62275fd9d294e86d43b20d9a1a0e0a1ce0ad0602c"
+    },
+    {
+      "path": "research-tools/hardware-proofs/gpu/pipesim.py",
+      "source_sha256": "b196309b96ec171fb8ad56652c39ef19911f006e3d7c1719d3103ede2b594933",
+      "sanitized": true,
+      "reference_sha256": "01f8965ad4f9ff807a1d694a0062bd29de783f5e67e4e4dc2d66a89588d44f6c"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/iep_controls_kunit.c",
+      "source_sha256": "966768ff8365d4f47e6ac0f2bf35cedeb1c8d946a96ffc7a67c859ce3e437d70",
+      "sanitized": false,
+      "reference_sha256": "966768ff8365d4f47e6ac0f2bf35cedeb1c8d946a96ffc7a67c859ce3e437d70"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/lima-timeout-sim.py",
+      "source_sha256": "6efb2dbed04d42b6f30fbb118c6a95dab4ef4f00257d84473be478a2ffa1c0d9",
+      "sanitized": true,
+      "reference_sha256": "0909bfea5657a7a467729fed5ae156748c136887fd81950b2e3d39c7100dac78"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/lima_timeout.c",
+      "source_sha256": "d754492f1411a6a440a35d4146e015860913640ca6d6f9599b38c3401c6d3034",
+      "sanitized": false,
+      "reference_sha256": "d754492f1411a6a440a35d4146e015860913640ca6d6f9599b38c3401c6d3034"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-colorimetry.py",
+      "source_sha256": "b241c427abaad6bda1925ef3ec795c54f51fcb6ea0410d6c39d4a3510f097c00",
+      "sanitized": false,
+      "reference_sha256": "b241c427abaad6bda1925ef3ec795c54f51fcb6ea0410d6c39d4a3510f097c00"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-irq.py",
+      "source_sha256": "1dac8d62e234fce3670270e2a0566b4a4a859299b887bda24413530bda2d3d96",
+      "sanitized": false,
+      "reference_sha256": "1dac8d62e234fce3670270e2a0566b4a4a859299b887bda24413530bda2d3d96"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-lifetime.py",
+      "source_sha256": "8d948286f7dafa99d1ffbb0202fb875f9c1e0c2422fecbf2f6e99dad17ecdd95",
+      "sanitized": false,
+      "reference_sha256": "8d948286f7dafa99d1ffbb0202fb875f9c1e0c2422fecbf2f6e99dad17ecdd95"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-mask.py",
+      "source_sha256": "ca59f0fed21b4bdd9583a92b21721a790d6d492d75e18d153f9277bb71cd6ebe",
+      "sanitized": false,
+      "reference_sha256": "ca59f0fed21b4bdd9583a92b21721a790d6d492d75e18d153f9277bb71cd6ebe"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-mmu.py",
+      "source_sha256": "42063e6ce32bc74f72b384db4b7920aab7eb93117a32efe709b256c87a3f289d",
+      "sanitized": false,
+      "reference_sha256": "42063e6ce32bc74f72b384db4b7920aab7eb93117a32efe709b256c87a3f289d"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-stream.py",
+      "source_sha256": "8fb187f215eff1e64da1262bbba835a157b71629c8d75a991de1c5eb59a75645",
+      "sanitized": false,
+      "reference_sha256": "8fb187f215eff1e64da1262bbba835a157b71629c8d75a991de1c5eb59a75645"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/ssv-scan-sim.sh",
+      "source_sha256": "ed1b36425de4c7e53b58f7034f7a49d99331f67364b591168792831b10a99d84",
+      "sanitized": true,
+      "reference_sha256": "fb516b26cf9c32af613c3d4476b7cef0d234f6556e2da04bab43d3b2940d47ad"
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/ssv-scan-test.c",
+      "source_sha256": "6222f50bbd12189d6b36036b8a9f552c09bd6492881ba097d147d73d74965fe4",
+      "sanitized": false,
+      "reference_sha256": "6222f50bbd12189d6b36036b8a9f552c09bd6492881ba097d147d73d74965fe4"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/analyze.py",
+      "source_sha256": "74bd9599d807aa12ac61d6c9f5e3f674877c057abd2c27d9525795ebc1e4eed9",
+      "sanitized": false,
+      "reference_sha256": "74bd9599d807aa12ac61d6c9f5e3f674877c057abd2c27d9525795ebc1e4eed9"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/exercise.c",
+      "source_sha256": "99e2691c17130d41d670faf446edda46dc6652e898fcc17d3fb245ad401f86a1",
+      "sanitized": true,
+      "reference_sha256": "2f3c001b441c67cf39027a4ac92337fdb1065db6945d83f5d20ece28ad06adb5"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/prepare-fixtures.py",
+      "source_sha256": "23eb4e2b7fa168e5ffa90c3659bcd642cdfab6d990bf2c548b6d9c65a2d94212",
+      "sanitized": false,
+      "reference_sha256": "23eb4e2b7fa168e5ffa90c3659bcd642cdfab6d990bf2c548b6d9c65a2d94212"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/readback.c",
+      "source_sha256": "707bb423747e7158f035b46121b497bd7e62128a44751da65dae9e72bd2117c1",
+      "sanitized": false,
+      "reference_sha256": "707bb423747e7158f035b46121b497bd7e62128a44751da65dae9e72bd2117c1"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/basis.py",
+      "source_sha256": "8e9f43830c58a4040195258335527f82119403b80d27f25538f781e6c0245c0d",
+      "sanitized": false,
+      "reference_sha256": "8e9f43830c58a4040195258335527f82119403b80d27f25538f781e6c0245c0d"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/exercise.c",
+      "source_sha256": "6090fdf81b20336586884a4dd015bced3a9a9dcc9d13c6686bec1972a9058128",
+      "sanitized": false,
+      "reference_sha256": "6090fdf81b20336586884a4dd015bced3a9a9dcc9d13c6686bec1972a9058128"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/identify.py",
+      "source_sha256": "f1fdde12758db320426e13c55705b5ac51958bd01a53ff04358ff0c18373a338",
+      "sanitized": false,
+      "reference_sha256": "f1fdde12758db320426e13c55705b5ac51958bd01a53ff04358ff0c18373a338"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/plot.py",
+      "source_sha256": "f8b4be544e8721eee7a9d702bc1f60da46b5c4a40e7c85deb36a2a33bedf3f21",
+      "sanitized": false,
+      "reference_sha256": "f8b4be544e8721eee7a9d702bc1f60da46b5c4a40e7c85deb36a2a33bedf3f21"
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/prepare.py",
+      "source_sha256": "6f93d4bff94fa85886fbe07ce09b69f41cab4c2e8dec964cba2620f7040eb3a1",
+      "sanitized": false,
+      "reference_sha256": "6f93d4bff94fa85886fbe07ce09b69f41cab4c2e8dec964cba2620f7040eb3a1"
+    },
+    {
+      "path": "research-tools/hardware-proofs/input/touchinj.c",
+      "source_sha256": "7f25732e0828314a9265660629aea13e513289b782a39016bbcaa5daa56cc784",
+      "sanitized": true,
+      "reference_sha256": "db07ef82fe7efd10b34b1587715e1bdf4d1cb6967da084be2d48bdac4e5eb9e2"
+    },
+    {
+      "path": "research-tools/hardware-proofs/rga1/725-dither-proof.py",
+      "source_sha256": "13921c93eb90493f1de4b2f6c09a817e682fdf1de23898fbb8959cacd2f88420",
+      "sanitized": true,
+      "reference_sha256": "0085b8df14db52c60dd153f62b2be5b0160e9af212b3ba39f65b1ca3ef7ce1a3"
+    },
+    {
+      "path": "research-tools/hardware-proofs/rga1/725-negative-proof.py",
+      "source_sha256": "624e248021fb34fbc00ea437580c1aff26ad321386d1ec322f56dbab256c98cb",
+      "sanitized": true,
+      "reference_sha256": "46fc2b52943f15a1b3a7c67b2d24344a797b62fd615ee30d6aed97ebb346d6ed"
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/point-oracle.py",
+      "source_sha256": "095fc897ac4042b9395b7e20a230cc4ff6a8c834d9241d7ddaacf15ac26cd4fe",
+      "sanitized": true,
+      "reference_sha256": "56581be096a8abdad8f14ae8a40fd2135eb705e6e3c18acefc0968f25222f1d3"
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/point-sim.sh",
+      "source_sha256": "313927179280370070fea8f02d36ae7ffef71d1418fbf8c399af810d45fbe5a6",
+      "sanitized": true,
+      "reference_sha256": "891a4a656752964d82f484279958d39c8a7e87fef92e414386651eb1485b33bc"
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/touch_algo_test.c",
+      "source_sha256": "3dec86c51ade2778e21169b1cbe27ce2a1b8b1cb72d3b658d5b4c2e0a6b12692",
+      "sanitized": true,
+      "reference_sha256": "85d11ce681301a8956bcffd8d0cb602733d002054cb2b2ed4e3ac13b93013025"
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/touch_gesture.c",
+      "source_sha256": "d4fb1a0c96fb1946d2af1d8ac9cff395629e7ad0aa232f4fea4b4b5595cc92bf",
+      "sanitized": false,
+      "reference_sha256": "d4fb1a0c96fb1946d2af1d8ac9cff395629e7ad0aa232f4fea4b4b5595cc92bf"
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/touch_gesture.h",
+      "source_sha256": "e5cfa12eb6e3bdab0dfdc83e09b952d9f77f4081aabc0ab4577b46eaee02a9b9",
+      "sanitized": false,
+      "reference_sha256": "e5cfa12eb6e3bdab0dfdc83e09b952d9f77f4081aabc0ab4577b46eaee02a9b9"
+    },
+    {
+      "path": "research-tools/hardware-proofs/wifi/analyze-capture.py",
+      "source_sha256": "70a08ffea6f6883b26e657619e2ca3dc25dc82106dc94c9bdb13b7095a131514",
+      "sanitized": true,
+      "reference_sha256": "3d18873c21b475ca9e8fda6d2298202b087f3081f8386aaf553b017802b87037"
+    },
+    {
+      "path": "research-tools/malitrace/baseline.py",
+      "source_sha256": "ed9101c2549dc802a0a7b1efb5610ffac4a7d1cc303e4392d4c7e962e55cbcd2",
+      "sanitized": true,
+      "reference_sha256": "3e871c45e3db122585b86db3c68f380507e2b3701a1d81ab6a5ddfb94b656b59"
+    },
+    {
+      "path": "research-tools/malitrace/compare.py",
+      "source_sha256": "1c3ba65b04a7bb53316e493dd2d826ebb99bb961d9c19f73d0a97f53f3351cbf",
+      "sanitized": true,
+      "reference_sha256": "67153a65fddef97f6ef9ed37036a3a8b5afe1ffd72dbeb32adced6c48a6ad681"
+    },
+    {
+      "path": "research-tools/malitrace/decode.py",
+      "source_sha256": "83f7c53700063326441cd80a46b6fd17b1b915be44db4eae59da7762a3945e6a",
+      "sanitized": true,
+      "reference_sha256": "014ba14fad366386ba0bc8d4a5a2f6ccf4450d06b070a23ca34f6add7fc7dfdf"
+    },
+    {
+      "path": "research-tools/malitrace/limacompile.c",
+      "source_sha256": "cf99cac6fd3adb897c9af5cff90f1456810e210c33ef113b5a9f3225f395dad2",
+      "sanitized": true,
+      "reference_sha256": "6d4756901ecbc3bb24182f3990fc9fb2e167df27d51700773e34f26a057909f8"
+    },
+    {
+      "path": "research-tools/malitrace/limaparse.c",
+      "source_sha256": "03be64157e1d96ad9f0d47ecde72c80ceb71583a8134547a18587659a7bbf4b8",
+      "sanitized": true,
+      "reference_sha256": "571327fe7a5ee1d244ef8a1ff40ed8305c430372bd2cfa131c56ee0d7a8d33c9"
+    },
+    {
+      "path": "research-tools/malitrace/malitrace.c",
+      "source_sha256": "de48f927144d3b9214617ff22f5d0d11d4b90c177b93ce495b2e02ba724c70c9",
+      "sanitized": true,
+      "reference_sha256": "b53fe84f12b139a62e2cd2086ee9d0d99b2a5c333fc1fa191e943aa11f8fd7d2"
+    },
+    {
+      "path": "tools/audio_tone.py",
+      "source_sha256": "4a149d67e8a68511328d7053b47f3e43fed4dfb3aace2b92e637120ce029cb90",
+      "sanitized": true,
+      "reference_sha256": "762e6f7b69a02406941825647993a8efecb2f423092baab4cb5c2e99bd83583e"
+    },
+    {
+      "path": "tools/calibration-oracle.py",
+      "source_sha256": "7a37621147e898d2441ba942cded474400e4d0779306e6c492809046d5253439",
+      "sanitized": true,
+      "reference_sha256": "d7d55a53adb895e7a3b04edece301dfbec5f1c85660578576d85c6c937d30634"
+    },
+    {
+      "path": "tools/crypto-kernel-test.c",
+      "source_sha256": "47982e5a8bcd783cd003fcb5df256a10ed5c8209c2523f5bf074501c5103040f",
+      "sanitized": false,
+      "reference_sha256": "47982e5a8bcd783cd003fcb5df256a10ed5c8209c2523f5bf074501c5103040f"
+    },
+    {
+      "path": "tools/crypto-probe.c",
+      "source_sha256": "72abb55bf11a305adb832e3b8bdce6615f02d595e79e842da894e7d1119380b7",
+      "sanitized": true,
+      "reference_sha256": "24fa932b958469d2f74625faf6779936931d7a71148b9e68a9e2362a1c6e8136"
+    },
+    {
+      "path": "tools/crypto-rng-entropy.py",
+      "source_sha256": "21ae097db6c4b9368f1c1485e8e021b8869a93ab8e095ac89f649feeb59fb06b",
+      "sanitized": false,
+      "reference_sha256": "21ae097db6c4b9368f1c1485e8e021b8869a93ab8e095ac89f649feeb59fb06b"
+    },
+    {
+      "path": "tools/crypto-rng-health.py",
+      "source_sha256": "1e3d7ed24bef77570ead136571ecdf41b27a6cc6ebb1da600e8c3d74ff05ddec",
+      "sanitized": false,
+      "reference_sha256": "1e3d7ed24bef77570ead136571ecdf41b27a6cc6ebb1da600e8c3d74ff05ddec"
+    },
+    {
+      "path": "tools/crypto-test.c",
+      "source_sha256": "5beea87a3364d3088947e78cf680bd293bac969e28522b6afd73fa20445bcb7e",
+      "sanitized": false,
+      "reference_sha256": "5beea87a3364d3088947e78cf680bd293bac969e28522b6afd73fa20445bcb7e"
+    },
+    {
+      "path": "tools/crypto-transition-matrix.c",
+      "source_sha256": "ae116334254fd05a246c7b8bee018516a4e2fccd2bbc11c2b776a6b0eb6a66e9",
+      "sanitized": false,
+      "reference_sha256": "ae116334254fd05a246c7b8bee018516a4e2fccd2bbc11c2b776a6b0eb6a66e9"
+    },
+    {
+      "path": "tools/crypto-transition-selftest.c",
+      "source_sha256": "2d8d059246dd3547354ae0432607cde2557a24d622f87b5d740616549a52b3fe",
+      "sanitized": false,
+      "reference_sha256": "2d8d059246dd3547354ae0432607cde2557a24d622f87b5d740616549a52b3fe"
+    },
+    {
+      "path": "tools/crypto-transition-test.c",
+      "source_sha256": "b204066c78f5a85e773a50994eefdbca361283ce7998a08cadf7005a7f805c81",
+      "sanitized": false,
+      "reference_sha256": "b204066c78f5a85e773a50994eefdbca361283ce7998a08cadf7005a7f805c81"
+    },
+    {
+      "path": "tools/crypto-vectors.py",
+      "source_sha256": "14977c29f43206e2a2cd6940029b82f223053314d1b0d63aabd072bac76f084f",
+      "sanitized": false,
+      "reference_sha256": "14977c29f43206e2a2cd6940029b82f223053314d1b0d63aabd072bac76f084f"
+    },
+    {
+      "path": "tools/fdt.py",
+      "source_sha256": "7751de89243923c8ed9864de2b02cdfe4ada294fc460218e057d3bbbbf57a904",
+      "sanitized": true,
+      "reference_sha256": "4029716436ea611bb5174fbe0979f0ea2f2d602d213c8d396e939176e3943141"
+    },
+    {
+      "path": "tools/gsl_fw_extract.py",
+      "source_sha256": "7bb1fead3e611242cbba226a1ede1656a644c54ea98c92fce7a368dde2ddc941",
+      "sanitized": true,
+      "reference_sha256": "c2c8955614a65ed48933622cfaf2b6727455f48f665e3001ddad0ac19b83a432"
+    },
+    {
+      "path": "tools/iep-gpu-bench.c",
+      "source_sha256": "7b8e66b54248e1764ade679eb40d6097eb365f096029fb1be10c3e7ae0f2e1d5",
+      "sanitized": true,
+      "reference_sha256": "7df291c8f053f8b197dc4b1e991b791b9d7b9b4cd59625ce95858ba51e370ddb"
+    },
+    {
+      "path": "tools/iep-test.c",
+      "source_sha256": "9acd4a70abd390721ef15586090bcba5d4bd105fa639ef788fa8d30fef5dcfb9",
+      "sanitized": false,
+      "reference_sha256": "9acd4a70abd390721ef15586090bcba5d4bd105fa639ef788fa8d30fef5dcfb9"
+    },
+    {
+      "path": "tools/ramoops_decode.py",
+      "source_sha256": "18d2c6b52bf7bc6fa45df5ca404d05d2387e21f4051371a0cbb10873342e902f",
+      "sanitized": true,
+      "reference_sha256": "2db11d2687c95418cd5a0a9106fb22ef2b4bcd7881cbd0a5451452506e177a37"
+    },
+    {
+      "path": "tools/rga1-controls.h",
+      "source_sha256": "11bbdb429f826a303e330ee08fa2e296083e821a2c4b07a2bc00770d3abdd208",
+      "sanitized": false,
+      "reference_sha256": "11bbdb429f826a303e330ee08fa2e296083e821a2c4b07a2bc00770d3abdd208"
+    },
+    {
+      "path": "tools/rga1-probe.c",
+      "source_sha256": "548dfe62858a0d26c0a8243748575b2b5ce029c86f2248f28fdce89ad849e957",
+      "sanitized": false,
+      "reference_sha256": "548dfe62858a0d26c0a8243748575b2b5ce029c86f2248f28fdce89ad849e957"
+    },
+    {
+      "path": "tools/rga1-rest.c",
+      "source_sha256": "a41d1a0ff5f251f5a9cf10d5ce6327d05bf7bb250fdf9f66b607a05a0928f1d6",
+      "sanitized": false,
+      "reference_sha256": "a41d1a0ff5f251f5a9cf10d5ce6327d05bf7bb250fdf9f66b607a05a0928f1d6"
+    },
+    {
+      "path": "tools/rga1-test.c",
+      "source_sha256": "45cb5fba86a32feb11a37daa6f01acf006b870452ba2e3f45a4e2f2ee6f54326",
+      "sanitized": false,
+      "reference_sha256": "45cb5fba86a32feb11a37daa6f01acf006b870452ba2e3f45a4e2f2ee6f54326"
+    },
+    {
+      "path": "tools/rk3128_board_dts_check.py",
+      "source_sha256": "9f025244cf12c9a94776eb95682bda78081f33bc0df781ffb03002ce2b577718",
+      "sanitized": true,
+      "reference_sha256": "e2a06418b3ba3579f0edd69e60e915e30254d62a5bf908516fb3a7cb079d16f4"
+    },
+    {
+      "path": "tools/rk3128_ir_keymap.py",
+      "source_sha256": "617cba12cf94af53e8b0a73ce94dedbdb8ce1ef8425865e55d8ad8c55278c004",
+      "sanitized": true,
+      "reference_sha256": "1089a7c67ea5e4e18ff02290fcf0cb7c7b242eb5aa139e015afff7b33f345e69"
+    },
+    {
+      "path": "tools/rk3128_pmic_dts_check.py",
+      "source_sha256": "dd849ea002c46fb48c61c2dc9c64ef75cd6c1ffd4671e5fb0a8f54a4c1f0bb4d",
+      "sanitized": true,
+      "reference_sha256": "eeffd5122efd331ba1babf5a43253d6bb44188e835d1d27f5298208101793c9f"
+    },
+    {
+      "path": "tools/rk312x_codec_trace.py",
+      "source_sha256": "da9f4873a238d34efbe27ddbeb8094b7f683a73145bdc4938ff26b31c26d98f6",
+      "sanitized": true,
+      "reference_sha256": "da7574c897d309a28176e6949949cb8cca14cf53c5b2271d06f4170d3179b5a3"
+    },
+    {
+      "path": "tools/rkbootimg.py",
+      "source_sha256": "227dd227d65daf00edea85b471ae32e0a90f0564b9b0fb4a0434196852c744b7",
+      "sanitized": true,
+      "reference_sha256": "7e59099d4c2de1fa127136f6f21005c04bd3cc19678220981ce2be52fefa2073"
+    },
+    {
+      "path": "tools/rkusb.py",
+      "source_sha256": "46a01aed481d1cfdd2939ea26a886baab86be503aa530a9b4ea7fd1984b31540",
+      "sanitized": true,
+      "reference_sha256": "4c5df50b23cbc1be9c9fb958134a227b5973c6fef73ee204399422d6ffcfd758"
+    },
+    {
+      "path": "tools/touch-algorithm-test.py",
+      "source_sha256": "095fc897ac4042b9395b7e20a230cc4ff6a8c834d9241d7ddaacf15ac26cd4fe",
+      "sanitized": true,
+      "reference_sha256": "56581be096a8abdad8f14ae8a40fd2135eb705e6e3c18acefc0968f25222f1d3"
+    },
+    {
+      "path": "tools/vepu-encode.c",
+      "source_sha256": "97e8946bbee5d464da951a61894cb48c910dc0316ea451264ecd9c218470220d",
+      "sanitized": false,
+      "reference_sha256": "97e8946bbee5d464da951a61894cb48c910dc0316ea451264ecd9c218470220d"
+    },
+    {
+      "path": "tools/vepu-verify.py",
+      "source_sha256": "b206afb88f26365ced0ab300fdd898f96a4d97983ab3203cb68221397c131b78",
+      "sanitized": true,
+      "reference_sha256": "413b89925eddfa87cc0ee99f5a9e60a6d2d0eed8abc8e556955bc58b3db58c55"
+    },
+    {
+      "path": "tools/vop-colour-module.S",
+      "source_sha256": "2e1f3956b7bab7bca18ef24321b812a353a89cccd96e40a7e52ca0224231b27c",
+      "sanitized": false,
+      "reference_sha256": "2e1f3956b7bab7bca18ef24321b812a353a89cccd96e40a7e52ca0224231b27c"
+    },
+    {
+      "path": "tools/vop-colour-read.c",
+      "source_sha256": "b462871c96cea661f5faab36c67dbde5382735604842189a4a366f32e85ba2c1",
+      "sanitized": true,
+      "reference_sha256": "02e556df0196735f1ad09aeed443abaf3338d320b07983d50a2a85dbcfc54bb6"
+    }
+  ]
+}

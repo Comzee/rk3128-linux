@@ -1,0 +1,45 @@
+From: w478 <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 11:45:00 -0600
+Subject: [PATCH] drm/lima: start a deferred task before the one after it
+
+478-0106 lets drm_sched hand lima a second task while one runs (credit
+limit 2). When the IRQ handler cannot start the parked task itself (its
+page directory is not loaded, or lima.irq_start=N), it queues start_work
+and signals the finished task at once, which frees a credit: drm_sched can
+then call run_job for the task after the parked one before start_work has
+run, find the pipe idle and start it first. Two tasks of one pipe then ran
+out of order, and the Demo's frozen pictures were wrong in three of six
+scenes with irq_start=N (boot 478-3: irq_start=N alone gave the wrong
+bytes, every other switch alone the right ones).
+
+In run_job, start the parked task first and park the new one behind it.
+The IRQ handler's own path and start_work are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -406,7 +406,22 @@
+ 		pipe->task_prepare(pipe, task);
+ 
+ 	spin_lock_irqsave(&pipe->hw_lock, flags);
+-	if (!pipe->current_task) {
++	if (!pipe->current_task && pipe->next_task) {
++		/*
++		 * The IRQ handler deferred the parked task to start_work
++		 * (its page directory was not loaded, or irq_start=N) and
++		 * signalled the finished one, so drm_sched may hand us the
++		 * task after it before start_work has run. The parked one
++		 * goes first: starting this one now would run two tasks of
++		 * the pipe out of order (the Demo's frozen pictures were
++		 * wrong in three of six scenes with irq_start=N, boot 478-3).
++		 * start_work finds the pipe busy and does nothing.
++		 */
++		struct lima_sched_task *first = pipe->next_task;
++
++		pipe->next_task = task;
++		old = lima_sched_hw_start(pipe, first);
++	} else if (!pipe->current_task) {
+ 		old = lima_sched_hw_start(pipe, task);
+ 	} else {
+ 		/* the IRQ handler of the running task will start it */

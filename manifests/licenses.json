@@ -1,0 +1,1988 @@
+{
+  "format": 1,
+  "scope_note": "Per-file/source-section notices prevail. Patch context follows upstream target licenses; see NOTICE.md and notices/.",
+  "files": [
+    {
+      "path": ".gitignore",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSE",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/BSD-2-Clause.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/BSD-3-Clause.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/GPL-2.0-only.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/GPL-3.0-or-later.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/LGPL-2.0-or-later.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/LGPL-2.1-or-later.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/Linux-syscall-note.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "LICENSES/MIT.txt",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "NOTICE.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "README.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "assets/images/fastfetch-rk3128.png",
+      "scope": "GPL-2.0-only original documentation screenshot",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/CPU-MEMORY.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/CRYPTO.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/DISPLAY.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/GPU.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/KERNEL.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/MEDIA.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/PERIPHERALS.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/PROVENANCE.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/TOOLS.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/TOUCH.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "docs/VALIDATION.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "examples/audio/asound.conf",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg.h",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg_linux.c",
+      "scope": "GPL-2.0-only original portions; MIT stb_image adaptations",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg_rga.h",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "examples/hantro-jpeg/rk3128_jpeg_rga_linux.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "examples/usb/rk3128-usb-gadget",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "linux/bases/mainline-7.3.env",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/audio.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/board.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/boot.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/cgroups.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/coredump.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/dmc.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/emmc.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/hardening.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/hevc.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/iep.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/crypto-diag.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/crypto-full.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/crypto-hash-pio.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/crypto-module.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/crypto-rng.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/crypto.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/diagnostics.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/display-lvds.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/qemu.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/root.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/usb-debug.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/knobs/vop-trace.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/memory.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/pmic.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/power.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/reboot.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/rescue.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/rga.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/rk3128.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/time.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/usb.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/vepu.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/vpu.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/config/wifi.config",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/dts/rk3128-audio.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-board.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-boot.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-cpu-boost.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-crypto.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-display-lvds.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-dmc.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-emmc.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-hevc.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-iep.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-inputs.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-memory.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-pmic.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-reboot.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-reference.dts",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-rga.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-scanout-qos.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-usb.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-vepu.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-vpu.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/dts/rk3128-wifi.dtsi",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/fbtest/fbtest.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/Kbuild",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": [
+        "GPL-2.0 OR BSD-3-Clause"
+      ]
+    },
+    {
+      "path": "linux/modules/ssv6x5x/LICENSE",
+      "scope": "license-text",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/firmware/ssv6x5x-wifi.cfg",
+      "scope": "GPL-2.0-only original supplemental example",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hci/hctrl.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hci/ssv_hci.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hci/ssv_hci.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/hwif.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/sdio/sdio.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/sdio/sdio.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/sdio/sdio_def.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/hwif/usb/usb.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/hal.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/linux_80211.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6200.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6200_common.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6200_configuration.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv6xxx_common.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_cfg.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_chip_id.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_data_struct.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_firmware_version.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/include/ssv_version.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ampdu.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ampdu.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ap.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ap.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/dev.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/dev.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/dev_tbl.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/drv_comm.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/efuse.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/efuse.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/hal.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006C_aux.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006C_mac.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006C_reg.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_cfg.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_common.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_common.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_mac.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_phy.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_priv.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_priv_normal.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_priv_safe.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/ssv6006_turismoC.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismoC_rf_reg.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismoC_wifi_phy_reg.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismo_common.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/hal/ssv6006c/turismo_common.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/init.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/init.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/lib.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/lib.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/p2p.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/scan.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": [
+        "GPL-2.0 OR BSD-3-Clause"
+      ]
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/sec.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_cli.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_ht_rc.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_pm.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_pm.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_common.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel_ht.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_rc_minstrel_ht.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_reg_acc.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_skb.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/smac/ssv_skb.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssv6x5x-generic-wlan.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": [
+        "GPL-2.0-or-later"
+      ]
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssvdevice/ssv_cmd.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssvdevice/ssv_cmd.h",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/modules/ssv6x5x/ssvdevice/ssvdevice.c",
+      "scope": "per-file grant (GPL-3.0-or-later vendor default where not separately marked)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/287-0001-clk-rockchip-rk3128-reset-like-the-rockchip-kernel.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/287-0002-arm-compressed-start-the-rk312x-watchdog-and-mark-ram.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/287-0003-serial-earlycon-ramlog.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/patches/287-0004-arm-debug-ll-into-rk312x-ram-and-setup-arch-marks.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/patches/292-0001-dt-bindings-display-rockchip-lvds-Add-RK3128.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/292-0002-phy-rockchip-inno-dsidphy-Program-the-RK3128-LVDS-an.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/292-0003-drm-rockchip-lvds-Add-RK3128-support.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/299-0001-soc-rockchip-grf-rk3128-vpu-hevc-bus-mux-to-vpu.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/301-0001-dt-bindings-media-rockchip-vdec-add-rk3128.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/301-0002-soc-rockchip-hevc-vpu-bus-arbiter.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/patches/301-0003-iommu-rockchip-rk3128-shared-bus.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/301-0004-media-rkvdec-add-rk3128.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/301-0005-media-hantro-rk3128-shared-bus.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/302-0001-cpufreq-dt-platdev-rk3128.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/302-0002-rc-keymap-rk3128-reference.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/patches/303-0001-dt-bindings-sound-add-rockchip-rk3128-codec.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "(GPL-2.0-only OR BSD-2-Clause)"
+      ]
+    },
+    {
+      "path": "linux/patches/303-0002-ASoC-codecs-add-the-rk3128-internal-codec.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/379-0001-drm-rockchip-lvds-keep-the-panel-after-bind.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/379-0002-soc-rockchip-rk3128-ddr3-frequency-change.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/patches/387-0001-clk-rockchip-rk3128-keep-pclk-pwm-on.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/390-0001-power-reset-halt-and-wait-for-the-power-key.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/395-0001-media-verisilicon-g1-jpeg-decoder-rk3128.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "linux/patches/395-0002-dma-direct-no-kernel-mapping-on-arch-dma-alloc.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/407-0001-drm-rockchip-vop-rk3126-lvds-dclk.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/407-0002-phy-rockchip-inno-dsidphy-rk3128-lvds-sample-clock.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/421-0001-media-verisilicon-log-g1-frames-without-dec-rdy.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/421-0002-media-verisilicon-rk3128-complete-g1-h264-frames-ended-by-timeout.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/476-0001-media-verisilicon-postproc-fix-the-g1-input-height-extension.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0101-drm-lima-log-the-L2-MAX_READS-reset-value-and-make-i.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0102-drm-lima-remember-which-page-directory-each-MMU-has-.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0103-drm-lima-invalidate-the-L2-lines-of-page-tables-the-.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0104-drm-lima-invalidate-the-L2-only-when-the-vendor-driv.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0105-drm-lima-relaxed-register-writes-skipping-reset-valu.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0106-drm-lima-start-the-next-task-from-the-IRQ-handler.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0107-drm-lima-run-drm_sched-s-work-on-a-high-priority-wor.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0108-drm-lima-per-task-GP-and-PP-hardware-performance-cou.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0109-drm-lima-wait-for-every-L2-command-to-finish.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0110-drm-lima-start-a-deferred-task-before-the-one-after-it.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/478-0111-drm-lima-quiesce-deferred-starts-before-timeout-reset.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/521-0001-dt-bindings-display-panel-rk3128-reference.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "(GPL-2.0-only OR BSD-2-Clause)"
+      ]
+    },
+    {
+      "path": "linux/patches/521-0002-drm-panel-rk3128-reference-power-sequence.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0+"
+      ]
+    },
+    {
+      "path": "linux/patches/522-0001-mmc-allow-board-cache-opt-out.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/530-0001-drm-defer-passed-file-pid-release.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/536-0001-drm-rockchip-release-boot-logo-after-takeover.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/536-0002-dt-bindings-display-rockchip-describe-boot-logo.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/560-0001-drm-panel-rk3128-reference-restart-handoff.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/579-0001-input-silead-vendor-calibration.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/587-0001-input-silead-rk3128-reference-point-algorithm.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/604-0001-drm-lima-report-client-engine-time-and-memory.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/616-0001-drm-rockchip-rk3126-video-colour.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/619-0001-media-rockchip-rga1.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only",
+        "GPL-2.0 WITH Linux-syscall-note"
+      ]
+    },
+    {
+      "path": "linux/patches/619-0002-dt-bindings-rga1.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "(GPL-2.0-only OR BSD-2-Clause)"
+      ]
+    },
+    {
+      "path": "linux/patches/620-0001-media-rockchip-iep.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only",
+        "GPL-2.0 WITH Linux-syscall-note"
+      ]
+    },
+    {
+      "path": "linux/patches/620-0002-dt-bindings-media-rk3128-iep.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "(GPL-2.0-only OR BSD-2-Clause)"
+      ]
+    },
+    {
+      "path": "linux/patches/623-0001-drm-rockchip-vop-rk3126-error-counters.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/623-0002-dt-bindings-soc-rockchip-rk3128-qos.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "(GPL-2.0-only OR BSD-2-Clause)"
+      ]
+    },
+    {
+      "path": "linux/patches/623-0003-pmdomain-rockchip-initialize-noc-priority.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/638-0001-cpufreq-dt-rk3128-busy-core-boost.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/666-0001-drm-lima-expose-buffer-memory-snapshot.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/734-crypto.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only",
+        "GPL-2.0",
+        "(GPL-2.0-only OR BSD-2-Clause)"
+      ]
+    },
+    {
+      "path": "linux/patches/736-0001-hantro-h1-encode.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0",
+        "BSD-3-Clause"
+      ]
+    },
+    {
+      "path": "linux/patches/750-rng.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/758-crypto.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/patches/764-crypto-transition.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/patches/zz-761-crypto-power.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/tests/cpu/rk3128bench.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/tests/launch/drm_handoff_probe.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/tests/launch/shader_probe.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "linux/tests/memory/ram-account.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "linux/upstream/292-0004-ARM-dts-rockchip-rk3128-Add-the-LVDS-transmitter.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/alsa-lib/0001-dmix-clear-the-sum-ring-behind-hw_ptr-never-read-the-slave-buffer.patch",
+      "scope": "LGPL-2.1-or-later",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/alsa-lib/0002-softvol-neon-loop-for-interleaved-stereo-s16.patch",
+      "scope": "LGPL-2.1-or-later",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/alsa-lib/alsa-lib.env",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/alsa-lib/series",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/ffmpeg/ffmpeg.env",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/gstreamer/0001-v4l2codecs-hevc-crop-meta.patch",
+      "scope": "LGPL-2.0-or-later",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/gstreamer/0010-CVE-2026-119727-h265-sei-decoding-units.patch",
+      "scope": "LGPL-2.0-or-later",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/gstreamer/0011-CVE-2026-53702-h265-sei-cpb-count.patch",
+      "scope": "LGPL-2.0-or-later",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/gstreamer/616-0001-h264parse-preserve-independent-vui-range.patch",
+      "scope": "LGPL-2.0-or-later",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/gstreamer/gstreamer.env",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/gstreamer/series",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0001-lima-prepare-for-FP16-varyings.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0002-lima-return-after-unreachable-varying-format.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0003-lima-split-load-input-vec.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0004-lima-pack-pp-uniforms.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0005-lima-keep-aligned-fs-varyings.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0006-lima-rename-busy-buffer-on-partial-write.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0007-lima-default-to-4-plbs.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0010-lima-use-the-result-combiner-as-a-third-multiply-port.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0011-nir-do-not-propagate-a-constant-into-part-of-an-fs-input-slot.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0012-lima-store-mediump-varyings-fp16.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0013-lima-pack-the-varying-stride-to-8.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0014-lima-gpir-one-cycle-of-critical-path-slack-when-picking-the-next-node.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0015-lima-let-more-than-one-unit-read-texture-in-the-texld-s-instruction.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/0016-lazy-glsl-builtins-on-cache-hit.patch",
+      "scope": "MIT",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/mesa.env",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/mesa/series",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/rk3128-mem/rk3128-mem.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/rk3128-mem/test.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/wpa/.gitattributes",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/wpa/0001-reconnect-previous-channel.patch",
+      "scope": "BSD-3-Clause",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/wpa/0002-default-to-24ghz.patch",
+      "scope": "BSD-3-Clause",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/wpa/series",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "linux/userspace/wpa/wpa.env",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "manifests/SHA256SUMS",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "manifests/kernel-historical.series",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "manifests/kernel.series",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "manifests/source-map.json",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "notices/kernel-targets.txt",
+      "scope": "upstream-notice; see original grants",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "notices/stb-image.txt",
+      "scope": "upstream-notice; see original grants",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "notices/userspace-upstream.txt",
+      "scope": "upstream-notice; see original grants",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "notices/wpa-supplicant.txt",
+      "scope": "upstream-notice; see original grants",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/README.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/README.md",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/compiler/measured-native-kernel.patch",
+      "scope": "mixed: SSV target-file grants and GPL-2.0-only original configuration",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/crypto-init/trace.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/crypto-init/word-copy.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-beat-blob/dot2-zero-addend.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-beat-blob/never-dither.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-beat-blob/sum2add-op-0x12.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0101-drm-lima-log-the-L2-MAX_READS-reset-value-and-make-i.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0102-drm-lima-per-job-cache-maintenance-like-the-vendor-d.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0103-drm-lima-start-the-next-task-from-the-IRQ-handler-up.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0104-drm-lima-run-drm_sched-s-work-on-a-high-priority-wor.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/kernel/375-0105-drm-lima-runtime-switches-for-the-hardware-A-B-of-01.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/midpass/x-472-experiment.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/reload/0004-lima-rename-busy-buffer-on-partial-write.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/shader/0005-lima-keep-aligned-fs-varyings.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/gpu-demo-gap/sync/0002-lima-allow-8-plbs.patch",
+      "scope": "MIT (Mesa target-file grants, including original changes)",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/experiments/iep-620/tables-diagnostic.patch",
+      "scope": "target-file licenses and embedded section grants; GPL-2.0-only for original standalone kernel files unless marked otherwise",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/fixtures/hwprep-quality.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/fixtures/photos-rga-fixtures.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/fixtures/photos-rga-quality.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/gpu/framehash.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/gpu/lima-trace.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/gpu/pipesim.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/iep_controls_kunit.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/lima-timeout-sim.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/lima_timeout.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-colorimetry.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-irq.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-lifetime.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-mask.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-mmu.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/rga1-stream.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/ssv-scan-sim.sh",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/host/ssv-scan-test.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/analyze.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/exercise.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/prepare-fixtures.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-620/readback.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/basis.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/exercise.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/identify.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/plot.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/iep-721/prepare.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/input/touchinj.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/rga1/725-dither-proof.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/rga1/725-negative-proof.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/point-oracle.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/point-sim.sh",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/touch_algo_test.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/touch_gesture.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/touch/touch_gesture.h",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/hardware-proofs/wifi/analyze-capture.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/malitrace/baseline.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/malitrace/compare.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/malitrace/decode.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/malitrace/limacompile.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/malitrace/limaparse.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "research-tools/malitrace/malitrace.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "scripts/prepare-dts.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/audio_tone.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/calibration-oracle.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/crypto-kernel-test.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "tools/crypto-probe.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/crypto-rng-entropy.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/crypto-rng-health.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/crypto-test.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/crypto-transition-matrix.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "tools/crypto-transition-selftest.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "tools/crypto-transition-test.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0-only"
+      ]
+    },
+    {
+      "path": "tools/crypto-vectors.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/fdt.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/gsl_fw_extract.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/iep-gpu-bench.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/iep-test.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/ramoops_decode.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/rga1-controls.h",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0 WITH Linux-syscall-note"
+      ]
+    },
+    {
+      "path": "tools/rga1-probe.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/rga1-rest.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/rga1-test.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "MIT"
+      ]
+    },
+    {
+      "path": "tools/rk3128_board_dts_check.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/rk3128_ir_keymap.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/rk3128_pmic_dts_check.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/rk312x_codec_trace.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/rkbootimg.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/rkusb.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/touch-algorithm-test.py",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/vepu-encode.c",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "tools/vepu-verify.py",
+      "scope": "per-file SPDX identifiers",
+      "explicit_identifiers": [
+        "GPL-2.0"
+      ]
+    },
+    {
+      "path": "tools/vop-colour-module.S",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    },
+    {
+      "path": "tools/vop-colour-read.c",
+      "scope": "GPL-2.0-only original supplemental material",
+      "explicit_identifiers": []
+    }
+  ]
+}

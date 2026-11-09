@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * First boot on the board (development record #287, docs/RK3128-LINUX.md "First boot").
+ * Included by scripts/linux-build.sh after the board file (#298 fragment convention).
+ */
+
+/*
+ * ramoops unbuffered (mem-type 1: device memory, as the RAM early console of patch 287-0003 maps
+ * its part of the region): every record is in DRAM when the store retires, so a watchdog or
+ * panic reset keeps the last line. The layout stays the board file's (and the decoder's):
+ * 3 records of 64 KiB, console 256 KiB at +0x30000, pmsg 64 KiB at +0x70000. The third record
+ * zone (+0x20000) carries the decompressor's marks at +0x10 and the early console at +0x80;
+ * ramoops only rewrites its 12-byte header there until a third oops/panic record is written.
+ */
+&ramoops {
+	mem-type = <1>;
+};
+
+/*
+ * The ramoops region (0x7f100000, 512 KiB, no-map) sits in lowmem and is 1 MiB but not 2 MiB
+ * aligned. ARM's 2-level page tables pair two 1 MiB sections per PMD: map_lowmem maps the section
+ * below the region (0x7f000000) as a section, then needs a page table for 0x7f180000-0x7f1fffff in
+ * the same PMD, finds the PMD not empty and stops at BUG_ON(pmd_bad()) in arm_pte_alloc (attempt 4
+ * of #287: the last mark was "paging_init: prepare_page_table done"). Two more no-map blocks pad the
+ * hole out to whole PMDs (2 MiB): 0x7f000000-0x7f200000, 1.5 MiB of RAM lost. The pads follow the
+ * RK3128_RAMOOPS_ADDR/SIZE knobs; an already aligned edge gets no pad.
+ */
+#define RK3128_PMD		0x200000
+#define RK3128_RAMOOPS_END	(RK3128_RAMOOPS_ADDR + RK3128_RAMOOPS_SIZE)
+#define RK3128_PAD_LO		(RK3128_RAMOOPS_ADDR & ~(RK3128_PMD - 1))
+#define RK3128_PAD_HI_END	((RK3128_RAMOOPS_END + RK3128_PMD - 1) & ~(RK3128_PMD - 1))
+
+/ {
+	reserved-memory {
+#if (RK3128_RAMOOPS_ADDR & (RK3128_PMD - 1)) != 0
+		ramoops-pad-low {
+			reg = <RK3128_PAD_LO (RK3128_RAMOOPS_ADDR - RK3128_PAD_LO)>;
+			no-map;
+		};
+#endif
+#if (RK3128_RAMOOPS_END & (RK3128_PMD - 1)) != 0
+		ramoops-pad-high {
+			reg = <RK3128_RAMOOPS_END (RK3128_PAD_HI_END - RK3128_RAMOOPS_END)>;
+			no-map;
+		};
+#endif
+	};
+};

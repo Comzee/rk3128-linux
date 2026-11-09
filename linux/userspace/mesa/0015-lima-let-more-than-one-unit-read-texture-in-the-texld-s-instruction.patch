@@ -1,0 +1,315 @@
+lima/ppir: let more than one unit read ^texture in the texld's instruction
+
+The Mali blob draws the Demo's tint quad (capture prog 40; the GLSL is
+capture/demo/decoded/glsl/prog-40.frag:
+
+  vec4 t = texture2D(u_tex, v_uv);
+  gl_FragColor = vec4(t.rgb * u_gain, t.a);
+
+) in ONE instruction, @0 of capture/demo/compare-26.2.6/prog-40.blob.pp.txt:
+
+  load.v ^discard 0.xy, texld 0, load.u 1.x,
+  mov.s1 $0.w ^texture.w, mul.s2 $0.xyz ^uniform.x ^texture.xyzz, sync, stop
+
+The sampler pipeline register is read TWICE in the instruction that issues the
+texld: ^texture.w by the float accumulator and ^texture.xyz by the result
+combiner.
+
+lima spent two instructions.  ppir_lower_texture() only turned the texture
+load's dest into ^texture when the load had exactly one successor; with a
+successor per use it fell back to copying ^texture into a work register, so the
+texld needed an instruction of its own and every reader then addressed the copy:
+
+  load.v ^discard.xy 0.xy, texld 0, mov.v1 $1 ^texture, sync
+  load.u 0, mov.s1 $0.w $1.w, mul.s2 $0.xyz ^uniform.x $1.xyzx, stop
+
+Allow the pipeline register whenever every reader is an ALU node of the same
+block, and decide in node_to_instr: a pipeline register is read in the
+instruction that writes it, so the texld can only join the readers if they all
+landed in ONE instruction, which ppir_do_node_to_instr_try_insert() now checks
+(it compared nothing before - a pipeline dest was asserted to have a single
+reader).  When they did not, ppir_do_one_node_to_instr() inserts the copy
+exactly as the lowering pass used to, now over every reader instead of the
+first one; that fallback is what keeps the pass honest and it is the common
+case (5 of the 10 shaders in beat-shader3/stress/glsl take it).
+ppir_node_score()'s walk down a pipeline chain follows the first reader, since
+every reader gives the same chain length.
+
+Where the blob's decision lives: its PP backend is about 0x000d4120-0x000eb1f0
+in libGLES_mali.so (r6p0-01rel1) and the fragment register allocator is the
+function at 0x000e38a0, which reports "%s register allocation failed for
+fragment shader." from 0x000e3be8.  I did not isolate its predicate; the
+evidence for what the hardware allows is the blob's emitted code, which the
+capture decodes in full.  Across the Demo, Games and Photos programs the blob
+reads ^texture from the vec4 multiply ("mul.v0 ^texture.xyzz $0.xyzz"), the
+float multiply ("mul.s0 $0.w ^uniform.w ^texture.w", 3 programs), the vec4
+accumulator ("add.v1 $2 ^texture $0"), the float accumulator and the result
+combiner (prog 40 above) - every ALU unit.  It also reads one pipeline register
+from two units of a single instruction in 12 instructions, 10 of them with one
+reader in the multiply stage and one in the accumulate/combine stage (e.g.
+"mul.v0 $1.xyz ^const0.wwww $0.xyzz, mul.s2 $0.xyz ^texture.w ^const0.xyzz").
+beat-shader3/pipecross.py counts them from any disassembly.
+
+Counts (one limacompile process per program, PP instructions, base = Mesa
+26.2.6 + the image's 0001-0007 then 0010-0015, then 0016 and 0017):
+  Demo prog 40  (the tint quad, horizon)              2 -> 1  = the blob's 1
+  Demo prog 16  (the tunnel's textured sprite)        3 -> 2  under the blob's 3
+  reference UI prog 12  (Home's textured rounded rect)       12 -> 11
+  Demo total 44 -> 42 (blob 45), words 270 -> 264; Home 33 -> 32
+  Games, Photos and Clock unchanged; every GP count unchanged (the patch is
+  ir/pp only); the other 65 of the 68 captured shaders disassemble byte for
+  byte as before; no shader spills (0:0 spills:fills for all 68).
+
+Predicted GPU time: fill-weighted against the blob's own per-job PP counter
+(beat-shader3/fillest.py, cycles per instruction kept at the blob's) the Demo's
+horizon scene goes from 13.38 ms of PP a frame to 13.24 = the blob's 13.24
+(x1.01 -> x1.00); prog 40 alone is 0.285 -> 0.143 ms there (horizon.py).  Tunnel
+gains more but less precisely, 12.33 ms -> an interval of 10.0..12.5, because
+prog 16 sits inside the part of the counter the model cannot split.  Home's
+prog 12 is 2 draws a frame, so under 0.1 ms.  No other scene moves.
+
+Picture risk: BIT-IDENTICAL.  The patch changes no arithmetic.  In each of the
+three programs every ALU unit keeps its opcode, its operand order, its swizzle
+and its output modifier; the only change is the ADDRESS of one operand - the
+work register that held a copy of the sampler result becomes the ^texture it was
+copied from - plus the register numbers regalloc then picks and one fewer
+instruction.  The copy that disappears was exact: ppir_node_insert_mov() builds
+a 4-component mov with no modifier, no saturate and no negate/absolute, and
+^texture and the work registers are the same fp16 format, so the register held
+^texture bit for bit and reading ^texture under the reader's unchanged swizzle
+delivers the same bits to the same unit.  Side by side, prog 40:
+
+  before  mov.s1 $0.w $1.w,       mul.s2 $0.xyz ^uniform.x $1.xyzx
+  after   mov.s1 $0.w ^texture.w, mul.s2 $0.xyz ^uniform.x ^texture.xyzx
+
+Depends on one hardware behaviour, named because it is not an arithmetic risk:
+the sampler pipeline register can be read by more than one ALU unit of the
+instruction that issues the texld.  The blob's prog 40 proves two readers are
+legal (float accumulator + combiner - that instruction is exactly what this
+patch reproduces), and the blob reads ^texture from each of the five ALU units
+somewhere in the captures.  What no captured blob program does is read ^texture
+from a multiply unit and an accumulate unit at once, which lima's new prog 16
+does ("mul.v0 ^texture.wwwx ^const0.xyzx, add.v1 $1.xyz ^v0 ^texture.xyzx").
+Two things cover that: the blob reads ^const0 and ^uniform across those two
+stages in 10 instructions, so it is a property of the operand network and not of
+^texture; and the 0001-0015 build measured on the board at boot 478-1 already
+emits the same shape for ^uniform - reference UI program 6, the polygon edge fill of the
+Games, Clock and Home screens, has 4 instructions of
+"mul.v0 ^uniform.xyxx $0.xyxx, sum2add.v1 $0.z ^v0.xyyy ^uniform.zzzz" (0014's
+op 0x12 fuse) and renders.  A failure costs the instruction back rather than the
+picture everywhere except that cross-stage case: if it does not hold, prog 16's
+tunnel sprite colour is wrong.
+
+Check on the board: render shots must be BYTE-IDENTICAL to the 0001-0017 build
+in every Demo scene and on Home.  Watch horizon (prog 40) and the tunnel (prog
+16) first; a wrong tunnel sprite with a correct horizon is exactly the
+cross-stage read above, and dropping prog 16 then means restricting
+ppir_texture_readers_can_pipeline() to readers in the accumulate and combine
+slots, which keeps prog 40 and Home's prog 12.
+---
+diff --git a/src/gallium/drivers/lima/ir/pp/lower.c b/src/gallium/drivers/lima/ir/pp/lower.c
+index 8315b93..2391046 100644
+--- a/src/gallium/drivers/lima/ir/pp/lower.c
++++ b/src/gallium/drivers/lima/ir/pp/lower.c
+@@ -160,20 +160,55 @@ static bool ppir_lower_ddxy(ppir_block *block, ppir_node *node)
+    return true;
+ }
+ 
++/* More than one unit of an instruction can read the sampler pipeline register
++ * it writes, so a texture load with several readers does not need a copy as
++ * long as all of them end up in the instruction that issues the texld.
++ *
++ * All the readers have to be ALU nodes of this block: only the ALU units take
++ * a pipeline register as a source, and a pipeline register does not survive
++ * past its instruction.  node_to_instr checks that the readers really did land
++ * in one instruction and falls back to the copy when they did not.
++ */
++static bool ppir_texture_readers_can_pipeline(ppir_node *node)
++{
++   if (node->succ_different_block)
++      return false;
++
++   unsigned readers = 0;
++   ppir_node_foreach_succ(node, dep) {
++      /* Lowering runs before the ordering and write-after-read deps are
++       * added, so every dep should be a source here; be conservative. */
++      if (dep->type != ppir_dep_src)
++         return false;
++      ppir_node *succ = dep->succ;
++      if (succ->type != ppir_node_type_alu)
++         return false;
++      readers++;
++   }
++
++   return readers > 0;
++}
++
+ static bool ppir_lower_texture(ppir_block *block, ppir_node *node)
+ {
+    ppir_dest *dest = ppir_node_get_dest(node);
+ 
+-   if (ppir_node_has_single_succ(node) && dest->type == ppir_target_ssa) {
+-      ppir_node *succ = ppir_node_first_succ(node);
++   if (dest->type == ppir_target_ssa &&
++       (ppir_node_has_single_succ(node) ||
++        ppir_texture_readers_can_pipeline(node))) {
+       dest->type = ppir_target_pipeline;
+       dest->pipeline = ppir_pipeline_reg_sampler;
+ 
+-      for (int i = 0; i < ppir_node_get_src_num(succ); i++) {
+-         ppir_src *src = ppir_node_get_src(succ, i);
+-         if (src && src->node == node) {
+-            src->type = ppir_target_pipeline;
+-            src->pipeline = ppir_pipeline_reg_sampler;
++      ppir_node_foreach_succ(node, dep) {
++         ppir_node *succ = dep->succ;
++
++         /* a single succ can still have multiple references to this node */
++         for (int i = 0; i < ppir_node_get_src_num(succ); i++) {
++            ppir_src *src = ppir_node_get_src(succ, i);
++            if (src && src->node == node) {
++               src->type = ppir_target_pipeline;
++               src->pipeline = ppir_pipeline_reg_sampler;
++            }
+          }
+       }
+       return true;
+diff --git a/src/gallium/drivers/lima/ir/pp/node.c b/src/gallium/drivers/lima/ir/pp/node.c
+index d65c4e3..c4a6aa0 100644
+--- a/src/gallium/drivers/lima/ir/pp/node.c
++++ b/src/gallium/drivers/lima/ir/pp/node.c
+@@ -797,6 +797,20 @@ ppir_node *ppir_node_insert_mov(ppir_node *old)
+    return move;
+ }
+ 
++/* The first successor that reads this node's value.  A node can also have
++ * successors that only order it (ppir_dep_sequence, ppir_dep_write_after_read)
++ * and do not reference it as a source.
++ */
++ppir_node *ppir_node_first_src_succ(ppir_node *node)
++{
++   ppir_node_foreach_succ(node, dep) {
++      if (dep->type == ppir_dep_src)
++         return dep->succ;
++   }
++
++   return NULL;
++}
++
+ bool ppir_node_has_single_src_succ(ppir_node *node)
+ {
+    if (ppir_node_has_single_succ(node) &&
+diff --git a/src/gallium/drivers/lima/ir/pp/node_to_instr.c b/src/gallium/drivers/lima/ir/pp/node_to_instr.c
+index a028846..f1663ed 100644
+--- a/src/gallium/drivers/lima/ir/pp/node_to_instr.c
++++ b/src/gallium/drivers/lima/ir/pp/node_to_instr.c
+@@ -40,8 +40,12 @@ static bool create_new_instr(ppir_block *block, ppir_node *node)
+ /*
+  * If a node has a pipeline dest, schedule it in the same instruction as its
+  * successor.
+- * Since it has a pipeline dest, it must have only one successor and since we
+- * schedule nodes backwards, its successor must have already been scheduled.
++ * A pipeline register is read in the instruction that writes it, so every
++ * reader has to be in that one instruction; since we schedule nodes backwards,
++ * the readers have already been scheduled.  Most pipeline dests have exactly
++ * one reader, but ^texture can have several (see ppir_lower_texture()), and
++ * then they must all have landed in the same instruction - if they did not,
++ * give up here and let ppir_do_one_node_to_instr() insert the copy.
+  * Load varyings can't output to a pipeline register but are also potentially
+  * trivial to insert and save an instruction if they have a single successor.
+  */
+@@ -50,12 +54,22 @@ static bool ppir_do_node_to_instr_try_insert(ppir_block *block, ppir_node *node)
+    ppir_dest *dest = ppir_node_get_dest(node);
+ 
+    if (dest && dest->type == ppir_target_pipeline) {
+-      assert(ppir_node_has_single_src_succ(node));
+-      ppir_node *succ = ppir_node_first_succ(node);
+-      assert(succ);
+-      assert(succ->instr);
++      ppir_instr *instr = NULL;
+ 
+-      return ppir_instr_insert_node(succ->instr, node);
++      ppir_node_foreach_succ(node, dep) {
++         /* an ordering or write-after-read succ does not read the value */
++         if (dep->type != ppir_dep_src)
++            continue;
++         ppir_node *succ = dep->succ;
++         assert(succ->instr);
++         if (!instr)
++            instr = succ->instr;
++         else if (instr != succ->instr)
++            return false;
++      }
++      assert(instr);
++
++      return ppir_instr_insert_node(instr, node);
+    }
+ 
+    if (ppir_node_has_single_succ(node) &&
+@@ -157,23 +171,27 @@ static bool ppir_do_one_node_to_instr(ppir_block *block, ppir_node *node)
+          break;
+       }
+ 
+-      /* Load cannot be pipelined, likely slot is already taken. Create a mov */
+-      assert(ppir_node_has_single_src_succ(node));
++      /* Load cannot be pipelined - the slot is already taken, or a texture
++       * load's readers did not all land in one instruction. Create a mov */
+       ppir_dest *dest = ppir_node_get_dest(node);
+       assert(dest->type == ppir_target_pipeline);
+       ppir_pipeline pipeline_reg = dest->pipeline;
+ 
+-      /* Turn dest back to SSA, so we can update predecessors */
+-      ppir_node *succ = ppir_node_first_succ(node);
+-
+-      /* Single succ can still have multiple references to this node */
+-      for (int i = 0; i < ppir_node_get_src_num(succ); i++) {
+-         ppir_src *src = ppir_node_get_src(succ, i);
+-         if (src && src->node == node) {
+-            /* Can consume uniforms directly */
+-            dest->type = ppir_target_ssa;
+-            dest->ssa.index = -1;
+-            ppir_node_target_assign(src, node);
++      /* Turn dest back to SSA, so we can update predecessors.  A texture load
++       * can have several readers, and a single reader can still have multiple
++       * references to this node. */
++      ppir_node_foreach_succ(node, dep) {
++         if (dep->type != ppir_dep_src)
++            continue;
++         ppir_node *succ = dep->succ;
++         for (int i = 0; i < ppir_node_get_src_num(succ); i++) {
++            ppir_src *src = ppir_node_get_src(succ, i);
++            if (src && src->node == node) {
++               /* Can consume uniforms directly */
++               dest->type = ppir_target_ssa;
++               dest->ssa.index = -1;
++               ppir_node_target_assign(src, node);
++            }
+          }
+       }
+ 
+@@ -264,8 +282,11 @@ static unsigned int ppir_node_score(ppir_node *node)
+    ppir_dest *dest = ppir_node_get_dest(n);
+    while (dest && dest->type == ppir_target_pipeline) {
+       pipeline++;
+-      assert(ppir_node_has_single_src_succ(n));
+-      n = ppir_node_first_succ(n);
++      /* ^texture can have several readers; any of them gives the same
++       * chain length, so follow the first one. */
++      n = ppir_node_first_src_succ(n);
++      if (!n)
++         break;
+       dest = ppir_node_get_dest(n);
+    }
+    assert(pipeline < 4);
+diff --git a/src/gallium/drivers/lima/ir/pp/ppir.h b/src/gallium/drivers/lima/ir/pp/ppir.h
+index a9c2d56..54a4018 100644
+--- a/src/gallium/drivers/lima/ir/pp/ppir.h
++++ b/src/gallium/drivers/lima/ir/pp/ppir.h
+@@ -494,6 +494,7 @@ static inline bool ppir_node_has_single_succ(ppir_node *node)
+ }
+ 
+ bool ppir_node_has_single_src_succ(ppir_node *node);
++ppir_node *ppir_node_first_src_succ(ppir_node *node);
+ 
+ static inline ppir_node *ppir_node_first_succ(ppir_node *node)
+ {

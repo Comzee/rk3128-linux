@@ -1,0 +1,42 @@
+lima: let lima_nir_split_load_input split a vecN of consecutive components of one load, not only a mov.
+Ours (development record #345 found it, #366 carries it; docs/RK3128-LINUX.md "GPU: blob baseline", finding 1).
+
+lima_nir_split_load_input only splits a `mov` of a packed varying load. The texture coordinate of a packed varying
+(two vec2 varyings in one vec4 slot) reaches it as `vec2 %load.z, %load.w`, so the pass never fires: ppir then loads
+the whole vec4, moves .zw into a register and samples from the register (load_coords_reg), one extra PP instruction per
+such fetch. This lets the pass split a vecN whose sources are consecutive components of one load_input too; the split
+load then feeds the texture directly (ppir_emit_tex promotes it to load_coords, which the hardware encodes as
+`load.v ^discard 1.zw`, exactly what the Mali blob emits). Measured on our Demo's 17 programs with
+tools/malitrace/lima-compare.sh: PP instructions 76 -> 63 (blob 45); the 5-tap blur 11 -> 7 (blob 6).
+Applies after 0001-0002 to 26.2.6 and, unchanged, to Mesa main (an upstream candidate once checked on the board).
+
+diff --git a/src/gallium/drivers/lima/ir/lima_nir_split_load_input.c b/src/gallium/drivers/lima/ir/lima_nir_split_load_input.c
+index 8881c5c..49d0ec4 100644
+--- a/src/gallium/drivers/lima/ir/lima_nir_split_load_input.c
++++ b/src/gallium/drivers/lima/ir/lima_nir_split_load_input.c
+@@ -35,7 +35,8 @@ lima_nir_split_load_input_instr(nir_builder *b,
+       return false;
+ 
+    nir_alu_instr *alu = nir_instr_as_alu(instr);
+-   if (alu->op != nir_op_mov)
++   bool is_vec = nir_op_is_vec(alu->op) && alu->op != nir_op_mov;
++   if (alu->op != nir_op_mov && !is_vec)
+       return false;
+ 
+    nir_def *ssa = alu->src[0].src.ssa;
+@@ -49,9 +50,13 @@ lima_nir_split_load_input_instr(nir_builder *b,
+    uint8_t swizzle = alu->src[0].swizzle[0];
+    int i;
+ 
+-   for (i = 1; i < alu->def.num_components; i++)
+-      if (alu->src[0].swizzle[i] != (swizzle + i))
++   for (i = 1; i < alu->def.num_components; i++) {
++      unsigned s = is_vec ? i : 0;
++      if (is_vec && alu->src[i].src.ssa != ssa)
+          break;
++      if (alu->src[s].swizzle[is_vec ? 0 : i] != (swizzle + i))
++         break;
++   }
+ 
+    if (i != alu->def.num_components)
+       return false;

@@ -1,0 +1,305 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:53:45 -0600
+Subject: [PATCH] drm/lima: per-task GP and PP hardware performance counters
+
+lima has no access to the Utgard performance counters, so there is no way to
+compare it against the blob's own capture on the same terms. The blob
+capture used MALITRACE_PPCNT 0,37 (per PP core: active cycles, instruction
+words completed) and MALITRACE_GPCNT 1,0.
+
+Program them exactly as the vendor driver does:
+
+  mali_gp_job_start  0xc038b9a8  if (src0 != -1) { PERF_CNT_0_SRC (0x44) =
+                                 src0; PERF_CNT_0_ENABLE (0x3c) = 1; }
+                                 same for src1 (0x48 / 0x40), with full
+                                 barriers (_mali_osk_mem_iowrite32), before
+                                 the CMD writes
+  mali_pp_job_start  0xc038c2ac  PERF_CNT_0_SRC (0x1084) = src0;
+                                 PERF_CNT_0_ENABLE (0x1080) = 1; same for
+                                 src1 (0x10a4 / 0x10a0); relaxed, then one
+                                 write memory barrier and START_RENDERING.
+                                 Called once per physical core, so the two
+                                 counters are per core per sub-job.
+  mali_gp_update_performance_counters 0xc038badc  reads VALUE0 (0x4c) and
+                                 VALUE1 (0x50), from mali_group_complete_gp
+                                 before mali_gp_reset_async
+  mali_pp_update_performance_counters 0xc038c35c  reads VALUE0 (0x108c) and
+                                 VALUE1 (0x10ac) per sub-job, from
+                                 mali_group_complete_pp before
+                                 mali_pp_reset_async
+
+Nothing zeroes the value registers: the per-task core reset is what does it
+(the vendor's mali_pp_reset_async/mali_gp_reset_async, lima's
+lima_pp_task_fini/lima_gp_task_fini), and the counter restarts when ENABLE
+is written at the next task start. So a value read at completion is that
+task's count, which is the capture method the blob's numbers come from.
+The L2 counters are the one exception on the vendor side:
+mali_l2_cache_core_set_counter_src (0xc0394bf4) writes the value register
+(0x24 / 0x2c) to zero itself and keeps a software base, because those
+counters are free-running and shared.
+
+lima's values go out on a new static tracepoint, lima:lima_task_perf_cnt
+(context, seqno, pipe, core, cnt0, cnt1), next to lima:lima_task_run - the
+reference kernel has event tracing but no kprobes and no function tracer, so a
+static tracepoint is the only thing kernel/scripts/lima-trace.py can read.
+
+New parameters, all 0644 and all -1 (off) by default, so this costs nothing
+unless it is turned on: lima.gp_cnt_src0, lima.gp_cnt_src1,
+lima.pp_cnt_src0, lima.pp_cnt_src1. To match the blob capture:
+
+  echo 1 > /sys/module/lima/parameters/gp_cnt_src0
+  echo 0 > /sys/module/lima/parameters/gp_cnt_src1
+  echo 0 > /sys/module/lima/parameters/pp_cnt_src0
+  echo 37 > /sys/module/lima/parameters/pp_cnt_src1
+
+Risk to pictures: none.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_drv.c   | 13 ++++++++
+ drivers/gpu/drm/lima/lima_drv.h   |  4 +++
+ drivers/gpu/drm/lima/lima_gp.c    | 34 ++++++++++++++++++++-
+ drivers/gpu/drm/lima/lima_pp.c    | 51 +++++++++++++++++++++++++++++++
+ drivers/gpu/drm/lima/lima_trace.h | 32 +++++++++++++++++++
+ 5 files changed, 133 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index 8148373..a398c31 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -26,6 +26,10 @@ bool lima_mmu_zap_tlb = true;
+ bool lima_l2_flush_always;
+ bool lima_reg_skip_reset = true;
+ bool lima_irq_start = true;
++int lima_gp_cnt_src0 = -1;
++int lima_gp_cnt_src1 = -1;
++int lima_pp_cnt_src0 = -1;
++int lima_pp_cnt_src1 = -1;
+ 
+ MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+@@ -45,6 +49,15 @@ module_param_named(l2_max_reads, lima_l2_max_reads, int, 0444);
+ MODULE_PARM_DESC(l2_flush_always, "invalidate the whole L2 before every task (lima's old behaviour) instead of the vendor driver's conditional invalidate (default N)");
+ module_param_named(l2_flush_always, lima_l2_flush_always, bool, 0644);
+ 
++MODULE_PARM_DESC(gp_cnt_src0, "GP hardware performance counter 0 source, -1 = off (the vendor's MALITRACE_GPCNT first value; default -1)");
++module_param_named(gp_cnt_src0, lima_gp_cnt_src0, int, 0644);
++MODULE_PARM_DESC(gp_cnt_src1, "GP hardware performance counter 1 source, -1 = off (default -1)");
++module_param_named(gp_cnt_src1, lima_gp_cnt_src1, int, 0644);
++MODULE_PARM_DESC(pp_cnt_src0, "PP hardware performance counter 0 source, per core, -1 = off (the vendor's MALITRACE_PPCNT first value, 0 = active cycles; default -1)");
++module_param_named(pp_cnt_src0, lima_pp_cnt_src0, int, 0644);
++MODULE_PARM_DESC(pp_cnt_src1, "PP hardware performance counter 1 source, per core, -1 = off (37 = instruction words completed; default -1)");
++module_param_named(pp_cnt_src1, lima_pp_cnt_src1, int, 0644);
++
+ MODULE_PARM_DESC(irq_start, "start the next queued task from the IRQ handler, like the vendor driver's upper-half scheduling; N starts it from a high-priority work item instead (default Y)");
+ module_param_named(irq_start, lima_irq_start, bool, 0644);
+ 
+diff --git a/drivers/gpu/drm/lima/lima_drv.h b/drivers/gpu/drm/lima/lima_drv.h
+index f842b04..0ec446a 100644
+--- a/drivers/gpu/drm/lima/lima_drv.h
++++ b/drivers/gpu/drm/lima/lima_drv.h
+@@ -16,6 +16,10 @@ extern bool lima_mmu_zap_tlb;
+ extern bool lima_l2_flush_always;
+ extern bool lima_reg_skip_reset;
+ extern bool lima_irq_start;
++extern int lima_gp_cnt_src0;
++extern int lima_gp_cnt_src1;
++extern int lima_pp_cnt_src0;
++extern int lima_pp_cnt_src1;
+ extern uint lima_max_error_tasks;
+ extern uint lima_job_hang_limit;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_gp.c b/drivers/gpu/drm/lima/lima_gp.c
+index 73551e8..0f5dbb4 100644
+--- a/drivers/gpu/drm/lima/lima_gp.c
++++ b/drivers/gpu/drm/lima/lima_gp.c
+@@ -14,6 +14,7 @@
+ #include "lima_regs.h"
+ #include "lima_gem.h"
+ #include "lima_vm.h"
++#include "lima_trace.h"
+ 
+ #define gp_write(reg, data) writel(data, ip->iomem + reg)
+ #define gp_read(reg) readl(ip->iomem + reg)
+@@ -174,6 +175,21 @@ static void lima_gp_task_run(struct lima_sched_pipe *pipe,
+ 	/* before any hw ops, wait last success task async soft reset */
+ 	lima_gp_soft_reset_async_wait(ip);
+ 
++	/*
++	 * mali_gp_job_start (0xc038b9a8): source register first, then
++	 * ENABLE=1, both with a full barrier, before the frame registers'
++	 * start command. The counters read zero at this point because
++	 * lima_gp_task_fini() soft-reset the core after the last task.
++	 */
++	if (lima_gp_cnt_src0 >= 0) {
++		gp_write(LIMA_GP_PERF_CNT_0_SRC, lima_gp_cnt_src0);
++		gp_write(LIMA_GP_PERF_CNT_0_ENABLE, 1);
++	}
++	if (lima_gp_cnt_src1 >= 0) {
++		gp_write(LIMA_GP_PERF_CNT_1_SRC, lima_gp_cnt_src1);
++		gp_write(LIMA_GP_PERF_CNT_1_ENABLE, 1);
++	}
++
+ 	/*
+ 	 * mali_gp_job_start (0xc038b950) writes the six frame registers and
+ 	 * the UPDATE_PLBU_ALLOC command with _mali_osk_mem_iowrite32_relaxed
+@@ -240,7 +256,23 @@ static int lima_gp_hard_reset(struct lima_ip *ip)
+ 
+ static void lima_gp_task_fini(struct lima_sched_pipe *pipe)
+ {
+-	lima_gp_soft_reset_async(pipe->processor[0]);
++	struct lima_ip *ip = pipe->processor[0];
++
++	/*
++	 * mali_gp_update_performance_counters (0xc038badc), called from
++	 * mali_group_complete_gp (0xc0392358) before mali_gp_reset_async:
++	 * read the value registers of whichever counters were enabled. The
++	 * soft reset below is what zeroes them for the next task.
++	 */
++	if (pipe->current_task &&
++	    (lima_gp_cnt_src0 >= 0 || lima_gp_cnt_src1 >= 0))
++		trace_lima_task_perf_cnt(pipe->current_task, 0,
++			lima_gp_cnt_src0 >= 0 ?
++				gp_read(LIMA_GP_PERF_CNT_0_VALUE) : 0,
++			lima_gp_cnt_src1 >= 0 ?
++				gp_read(LIMA_GP_PERF_CNT_1_VALUE) : 0);
++
++	lima_gp_soft_reset_async(ip);
+ }
+ 
+ static void lima_gp_task_error(struct lima_sched_pipe *pipe)
+diff --git a/drivers/gpu/drm/lima/lima_pp.c b/drivers/gpu/drm/lima/lima_pp.c
+index fd34815..5161139 100644
+--- a/drivers/gpu/drm/lima/lima_pp.c
++++ b/drivers/gpu/drm/lima/lima_pp.c
+@@ -15,6 +15,7 @@
+ #include "lima_bcast.h"
+ #include "lima_vm.h"
+ #include "lima_regs.h"
++#include "lima_trace.h"
+ 
+ #define pp_write(reg, data) writel(data, ip->iomem + reg)
+ #define pp_read(reg) readl(ip->iomem + reg)
+@@ -204,6 +205,27 @@ static void lima_pp_write_frame(struct lima_ip *ip, u32 *frame, u32 *wb)
+ 	}
+ }
+ 
++/*
++ * mali_pp_job_start (0xc038c2ac): source register, then ENABLE=1, for each
++ * counter whose source is not -1, immediately before the write memory
++ * barrier and START_RENDERING. Each physical core is programmed with the
++ * same sources by its own mali_pp_job_start call, so the two counters are
++ * per core, per sub-job.
++ */
++static void lima_pp_write_perf_cnt(struct lima_ip *ip)
++{
++	if (lima_pp_cnt_src0 >= 0) {
++		writel_relaxed(lima_pp_cnt_src0,
++			       ip->iomem + LIMA_PP_PERF_CNT_0_SRC);
++		writel_relaxed(1, ip->iomem + LIMA_PP_PERF_CNT_0_ENABLE);
++	}
++	if (lima_pp_cnt_src1 >= 0) {
++		writel_relaxed(lima_pp_cnt_src1,
++			       ip->iomem + LIMA_PP_PERF_CNT_1_SRC);
++		writel_relaxed(1, ip->iomem + LIMA_PP_PERF_CNT_1_ENABLE);
++	}
++}
++
+ static int lima_pp_bus_stop_poll(struct lima_ip *ip)
+ {
+ 	return !!(pp_read(LIMA_PP_STATUS) & LIMA_PP_STATUS_BUS_STOPPED);
+@@ -418,6 +440,7 @@ static void lima_pp_task_run(struct lima_sched_pipe *pipe,
+ 			pp_write(LIMA_PP_STACK, frame->fragment_stack_address[i]);
+ 			if (!frame->use_dlbu)
+ 				pp_write(LIMA_PP_FRAME, frame->plbu_array_address[i]);
++			lima_pp_write_perf_cnt(ip);
+ 		}
+ 
+ 		pp_write(LIMA_PP_CTRL, LIMA_PP_CTRL_START_RENDERING);
+@@ -438,14 +461,42 @@ static void lima_pp_task_run(struct lima_sched_pipe *pipe,
+ 			lima_pp_soft_reset_async_wait(ip);
+ 
+ 			lima_pp_write_frame(ip, frame->frame, frame->wb);
++			lima_pp_write_perf_cnt(ip);
+ 
+ 			pp_write(LIMA_PP_CTRL, LIMA_PP_CTRL_START_RENDERING);
+ 		}
+ 	}
+ }
+ 
++/*
++ * mali_pp_update_performance_counters (0xc038c35c), called per sub-job from
++ * mali_group_complete_pp (0xc03921d8) before mali_pp_reset_async: read the
++ * value registers of the enabled counters. The soft reset below zeroes them
++ * for the next task.
++ */
++static void lima_pp_read_perf_cnt(struct lima_sched_pipe *pipe)
++{
++	int i;
++
++	if (!pipe->current_task ||
++	    (lima_pp_cnt_src0 < 0 && lima_pp_cnt_src1 < 0))
++		return;
++
++	for (i = 0; i < pipe->num_processor; i++) {
++		struct lima_ip *ip = pipe->processor[i];
++
++		trace_lima_task_perf_cnt(pipe->current_task, i,
++			lima_pp_cnt_src0 >= 0 ?
++				pp_read(LIMA_PP_PERF_CNT_0_VALUE) : 0,
++			lima_pp_cnt_src1 >= 0 ?
++				pp_read(LIMA_PP_PERF_CNT_1_VALUE) : 0);
++	}
++}
++
+ static void lima_pp_task_fini(struct lima_sched_pipe *pipe)
+ {
++	lima_pp_read_perf_cnt(pipe);
++
+ 	if (pipe->bcast_processor)
+ 		lima_pp_soft_reset_async(pipe->bcast_processor);
+ 	else {
+diff --git a/drivers/gpu/drm/lima/lima_trace.h b/drivers/gpu/drm/lima/lima_trace.h
+index 98a7fb2..e1947e9 100644
+--- a/drivers/gpu/drm/lima/lima_trace.h
++++ b/drivers/gpu/drm/lima/lima_trace.h
+@@ -40,6 +40,38 @@ DEFINE_EVENT(lima_task, lima_task_run,
+ 	     TP_ARGS(task)
+ );
+ 
++/*
++ * Per-task hardware performance counters, the same two counters per core the
++ * vendor driver captures (MALITRACE_PPCNT / MALITRACE_GPCNT): see
++ * lima.gp_cnt_src0/1 and lima.pp_cnt_src0/1 in lima_drv.c.
++ */
++TRACE_EVENT(lima_task_perf_cnt,
++	TP_PROTO(struct lima_sched_task *task, unsigned int core,
++		 u32 cnt0, u32 cnt1),
++	TP_ARGS(task, core, cnt0, cnt1),
++	TP_STRUCT__entry(
++		__field(unsigned int, context)
++		__field(unsigned int, seqno)
++		__field(unsigned int, core)
++		__field(u32, cnt0)
++		__field(u32, cnt1)
++		__string(pipe, task->base.sched->name)
++		),
++
++	TP_fast_assign(
++		__entry->context = task->base.s_fence->finished.context;
++		__entry->seqno = task->base.s_fence->finished.seqno;
++		__entry->core = core;
++		__entry->cnt0 = cnt0;
++		__entry->cnt1 = cnt1;
++		__assign_str(pipe);
++		),
++
++	TP_printk("context=%u seqno=%u pipe=%s core=%u cnt0=%u cnt1=%u",
++		  __entry->context, __entry->seqno, __get_str(pipe),
++		  __entry->core, __entry->cnt0, __entry->cnt1)
++);
++
+ #endif
+ 
+ /* This part must be outside protection */

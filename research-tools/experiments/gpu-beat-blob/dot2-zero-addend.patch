@@ -1,0 +1,227 @@
+lima/ppir: dot2 with nothing to add is sum2add with a zero addend
+
+reference UI's rounded rect (capture prog 3, 181 draws a frame on the Games screen)
+computes length(max(q,0.0)).  The Mali blob does the square, the horizontal sum
+and the square root in ONE instruction, @8 of capture/games/compare-26.2.6/
+prog-3.blob.pp.txt:
+
+  mul.v0 $0.xy $0.zwww $0.zwww, max.s0 $0.z $0.x $0.y,
+  add.s1 $0.w $0.x $0.y, sqrt.s2 $0.w $0.w
+
+lima needed three.  lima_nir_lower_fdot() turns fdot2 into fsum2(fmul) and then
+lowers every fsum2 that no fadd consumes into a scalar fadd of the product's two
+components; nir_opt_algebraic fuses the .x half of that fadd back into an fmad,
+which recomputes the first product in the float multiply unit so the float
+accumulator can add it to the second.  The result is a vec4 multiply of the pair
+whose .x result is then dead, a scalar multiply that duplicates it, and the add:
+
+  mul.v0 $0.zw $0.xxxy $0.xxxy
+  mul.s0 $0.x $0.x, add.s1 $1.z ^s0 $0.w, sqrt.s2 $1.w $1.z
+
+The vec4 accumulator's op 0x12 (sum2add, arg0.x + arg0.y + arg1.x; the
+accumulator opcode mapper at 0x000e56e0 in libGLES_mali.so emits it for exactly
+this horizontal sum) does the whole sum with arg1 = 0.0, reading the product
+straight out of ^vmul, so the product, the sum and the root are one instruction:
+
+  mul.v0 $0.xyxx $0.xyxx, sum2add.v1 $0.z ^v0.xyyy ^const0.xxxx,
+  sqrt.s2 $0.w $0.z, const0 0.000000 ...
+
+lima_nir_fsum2_is_sum2add() in ir/lima_ir.h is the shape test, shared by
+lima_nir_lower_fdot()'s "lower what ppir cannot fuse" rule and by ppir's emit,
+so the pass and the backend cannot disagree about which fsum2 survives.
+
+Counts (one limacompile process per program, PP instructions):
+  reference UI rounded rect, Games/Clock prog 3   14 -> 13 (blob 12 total, ~9 executed)
+  reference UI rounded rect, Photos prog 6        14 -> 13
+  reference UI textured rounded rect, Home prog 12  13 -> 12
+  Games total 22 -> 21, Photos 16 -> 15, Clock 22 -> 21, Home 35 -> 33
+  Demo unchanged (44), all GP counts unchanged.
+
+Predicted GPU time: Games draws the rounded rect 181 times a frame over about
+2.01 M covered pixels, so one instruction a pixel is 2.01 M instructions, about
+1.7 ms of PP a frame on the Games screen; Home about 0.9 ms (prog 3 and prog 12
+together), Clock about 0.5 ms, Photos about 0.1 ms, the Demo 0.
+
+Picture risk: BIT-IDENTICAL.  Both forms multiply the same two pairs of operands
+at the same precision, round each product into a pipeline register, and add the
+two products once.  arg1 = +0.0 cannot change the result: the infinitely precise
+value of (a + b + 0) is the value of (a + b), so whether the accumulator rounds
+that sum once or twice it lands on the same number, and a + b here is a sum of
+two squares, so the -0 + 0 = +0 case cannot arise.  Shots must be byte-identical
+to the 0001-0015 build; any difference is a bug in the swizzle of arg0.
+
+Depends on one hardware behaviour: the result combiner reads the register the
+vec4 accumulator wrote in the SAME instruction (sqrt.s2 $0.w $0.z above).  lima
+already relies on that for the FLOAT accumulator - the shipped Games prog 6 ends
+with "add.sat.s1 $1.z ^s0 ^const0.x, mul.s2 $0.w ^uniform.w $1.zzzz" and renders
+correctly - and the blob's @8 above does the same, but no captured program, blob
+or lima, does it from the VEC4 accumulator.  The two accumulators are the same
+pipeline stage, so this should hold; the forwarding test (case D of
+a separate finite arithmetic test) checks it on the board, and
+if it fails the saving disappears (the rounded rect goes back to 14) rather than
+turning into a wrong picture, because ppir would simply put the sqrt in the next
+instruction.
+
+diff --git a/src/gallium/drivers/lima/ir/lima_ir.h b/src/gallium/drivers/lima/ir/lima_ir.h
+index 4538946..0a96054 100644
+--- a/src/gallium/drivers/lima/ir/lima_ir.h
++++ b/src/gallium/drivers/lima/ir/lima_ir.h
+@@ -48,6 +48,59 @@
+    fprintf(stderr, "ppir: " __VA_ARGS__)
+ 
+ 
++/* True when ppir turns this fsum2 into one vec4-accumulator sum2add (op 0x12,
++ * arg0.x + arg0.y + arg1.x): its two components have to come from a
++ * two-component fmul in the same block that nothing else reads, so the product
++ * can be read straight out of ^vmul.
++ *
++ * Shared by lima_nir_lower_fdot()'s "lower the fsum2 ppir cannot fuse" rule and
++ * by ppir's nir->ppir emit, so the two cannot disagree: if the rule lowered an
++ * fsum2 that ppir could have fused the shader gets an extra instruction, and if
++ * it kept one ppir cannot fuse it gets two.
++ */
++static inline bool
++lima_nir_fsum2_is_sum2add(const nir_alu_instr *fsum2)
++{
++   if (fsum2->op != nir_op_fsum2 || fsum2->def.num_components != 1)
++      return false;
++
++   /* arg0 reads components 0 and 1 of the product, in that order */
++   if (fsum2->src[0].swizzle[0] != 0 || fsum2->src[0].swizzle[1] != 1)
++      return false;
++
++   nir_instr *parent = nir_def_instr(fsum2->src[0].src.ssa);
++   if (parent->type != nir_instr_type_alu || parent->block != fsum2->instr.block)
++      return false;
++
++   const nir_alu_instr *fmul = nir_instr_as_alu(parent);
++
++   return fmul->op == nir_op_fmul && fmul->def.num_components == 2 &&
++          list_is_singular(&fmul->def.uses);
++}
++
++/* nir_algebraic condition: lower this fsum2 into a scalar fadd of its two
++ * components, because ppir can fuse neither shape of sum2add out of it. */
++static inline bool
++lima_nir_fsum2_must_lower(const nir_alu_instr *instr)
++{
++   /* every use an fadd: ppir fuses the fsum2 into it, that fadd's other
++    * source becoming sum2add's arg1 */
++   bool only_fadd = true;
++   nir_foreach_use(use, &instr->def) {
++      const nir_instr *user = nir_src_use_instr(use);
++      if (user->type != nir_instr_type_alu ||
++          nir_instr_as_alu(user)->op != nir_op_fadd) {
++         only_fadd = false;
++         break;
++      }
++   }
++   if (only_fadd)
++      return false;
++
++   /* no such fadd, but sum2add with arg1 = 0.0 is still one instruction */
++   return !lima_nir_fsum2_is_sum2add(instr);
++}
++
+ struct ra_regs;
+ struct lima_vs_compiled_shader;
+ struct lima_fs_compiled_shader;
+diff --git a/src/gallium/drivers/lima/ir/lima_nir_algebraic.py b/src/gallium/drivers/lima/ir/lima_nir_algebraic.py
+index 7d0336b..744c458 100644
+--- a/src/gallium/drivers/lima/ir/lima_nir_algebraic.py
++++ b/src/gallium/drivers/lima/ir/lima_nir_algebraic.py
+@@ -42,9 +42,13 @@ lower_fdot = [
+    (('fdot2', 'a', 'b'), ('fsum2', ('fmul', 'a', 'b'))),
+    (('fdot3', 'a', 'b'), ('fsum3', ('fmul', 'a', 'b'))),
+    (('fdot4', 'a', 'b'), ('fsum4', ('fmul', 'a', 'b'))),
+-   # An fsum2 whose only users are fadds stays: ppir fuses fadd(fsum2(a), b)
+-   # into the vec4 accumulator's sum2add (op 0x12), one instruction.
+-   (('fsum2(is_not_only_used_by_fadd)', 'a'), ('fadd', 'a.x', 'a.y')),
++   # An fsum2 ppir can fuse into the vec4 accumulator's sum2add (op 0x12) stays
++   # one instruction, so it is not lowered: either every user is an fadd, whose
++   # other source becomes sum2add's arg1, or the two components come out of a
++   # two-component fmul ppir reads from ^vmul and arg1 is 0.0.
++   # lima_nir_fsum2_must_lower() (ir/lima_ir.h) is the same test ppir's emit
++   # makes, so the pass and the backend cannot disagree.
++   (('fsum2(lima_nir_fsum2_must_lower)', 'a'), ('fadd', 'a.x', 'a.y')),
+ ]
+ 
+ # PP fuse clamp_positive. Shared with Midgard/Bifrost
+diff --git a/src/gallium/drivers/lima/ir/pp/nir.c b/src/gallium/drivers/lima/ir/pp/nir.c
+index f87187a..98348ec 100644
+--- a/src/gallium/drivers/lima/ir/pp/nir.c
++++ b/src/gallium/drivers/lima/ir/pp/nir.c
+@@ -295,6 +295,62 @@ static bool ppir_emit_sum2(ppir_block *block, nir_alu_instr *instr,
+    return true;
+ }
+ 
++/* dot(a.xy, b.xy) with nothing to add to it: the vec4 accumulator's sum2add
++ * with arg1 = 0.0, which is arg0.x + arg0.y + 0.0 in one instruction.
++ *
++ * What lima did instead: lower_fdot turned the fsum2 into fadd(p.x, p.y) and
++ * nir then refused nothing, so nir_opt_algebraic fused the .x half back into an
++ * fmad. That costs two instructions - the vec4 multiply of the pair, plus a
++ * scalar multiply recomputing p.x into ^fmul so the float accumulator can add
++ * it to p.y - and leaves the vec4 multiply's .x result dead. The Mali blob's
++ * reference UI rounded rect does it the sum2add way: @8's "mul.v0 $0.xy $0.zwww
++ * $0.zwww" feeds "add.s1 $0.w $0.x $0.y" in the same instruction, and the
++ * accumulator opcode mapper at 0x000e56e0 in libGLES_mali.so emits op 0x12 for
++ * exactly this horizontal sum.
++ *
++ * Bit-exact: both forms multiply the same two pairs of operands in the same
++ * precision, round each product into a pipeline register and add the two
++ * products once. arg1 = +0.0 cannot change the sum - the infinitely precise
++ * value of (a + b + 0) is the value of (a + b), so one rounding or two of it
++ * give the same result, and a + b here is a sum of two squares, never -0.
++ */
++static bool ppir_emit_sum2_zero(ppir_block *block, nir_alu_instr *instr)
++{
++   nir_def *def = &instr->def;
++   ppir_alu_node *node = ppir_node_create_dest(block, ppir_op_sum2add, def, 0x1);
++   if (!node)
++      return false;
++
++   ppir_const_node *zero = ppir_node_create(block, ppir_op_const, -1, 0);
++   if (!zero)
++      return false;
++
++   zero->constant.value[0].f = 0.0f;
++   zero->constant.num = 1;
++   zero->dest.type = ppir_target_pipeline;
++   zero->dest.pipeline = ppir_pipeline_reg_const0;
++   zero->dest.ssa.num_components = 1;
++   zero->dest.write_mask = 0x01;
++   list_addtail(&zero->node.list, &block->node_list);
++
++   nir_alu_src *sum_src = instr->src;
++   ppir_src *ps = node->src;
++   node->num_src = 2;
++
++   /* arg0 reads two components, the rest repeating the last, as the blob
++    * encodes it */
++   for (int i = 0; i < 4; i++)
++      ps[0].swizzle[i] = sum_src->swizzle[MIN2(i, 1)];
++   ppir_node_add_src(block->comp, &node->node, ps, &sum_src->src, 0b0011);
++
++   memset(ps[1].swizzle, 0, sizeof(ps[1].swizzle));
++   ppir_node_target_assign(ps + 1, &zero->node);
++   ppir_node_add_dep(&node->node, &zero->node, ppir_dep_src);
++
++   list_addtail(&node->node.list, &block->node_list);
++   return true;
++}
++
+ static bool ppir_emit_alu(ppir_block *block, nir_instr *ni)
+ {
+    nir_alu_instr *instr = nir_instr_as_alu(ni);
+@@ -316,6 +372,10 @@ static bool ppir_emit_alu(ppir_block *block, nir_instr *ni)
+       int i = fadd ? ppir_fadd_fused_src(fadd) : -1;
+       if (i >= 0 && fadd->src[i].src.ssa == &instr->def)
+          return true;
++      /* no fadd to fuse, but sum2add with a zero addend is still one
++       * instruction when the product can be read from ^vmul */
++      if (lima_nir_fsum2_is_sum2add(instr))
++         return ppir_emit_sum2_zero(block, instr);
+       return ppir_emit_sum2(block, instr, instr, NULL);
+    }
+ 

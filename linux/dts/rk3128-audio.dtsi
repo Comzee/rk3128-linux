@@ -1,0 +1,68 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Audio of the RK3128 reference board (development record #303, docs/RK3128-LINUX.md "Audio").
+ *
+ * Included after the board file by scripts/linux-build.sh. Translated from the stock tree's
+ * `codec@20030000` (rk312x-codec), `i2s1@10200000` and `audio-rk312x` nodes:
+ *
+ *   - the codec is the RK3128 internal one at 0x20030000, on the 8-channel I2S controller at
+ *     0x10200000 (the stock tree calls it i2s1, mainline's rk3128.dtsi i2s_8ch);
+ *   - the speaker amplifier is enabled by GPIO3_C1 (stock `spk_ctl_io = <&gpio3 17 0>`: pin 17 of
+ *     bank 3 is C1, flags 0 is active high), after a 200 ms depop delay (stock
+ *     `spk-mute-delay = <200>`), and the vendor driver drives only that pin: `hp_ctl_io` is absent,
+ *     there is no headphone jack and no jack detection (`codec_hp_det = <0>`);
+ *   - the stock volume is 26 (0 dB) for the speaker, which is the driver's default.
+ *
+ * The card is simple-audio-card (the vendor machine driver `audio-rk312x` has no mainline
+ * counterpart), with mclk-fs 256: 11.2896 MHz at 44.1 kHz, the master clock the codec driver sets
+ * up and the rate Android's mixer runs at. The I2S controller provides bit and frame clocks and
+ * the codec follows them (the vendor machine driver's codec-slave link).
+ */
+
+/ {
+	speaker_amp: speaker-amplifier {
+		compatible = "simple-audio-amplifier";
+		sound-name-prefix = "Speaker Amp";
+		enable-gpios = <&gpio3 RK_PC1 GPIO_ACTIVE_HIGH>;
+	};
+
+	acodec: audio-codec@20030000 {
+		compatible = "rockchip,rk3128-codec";
+		reg = <0x20030000 0x4000>;
+		clocks = <&cru PCLK_ACODEC>, <&cru SCLK_I2S0>;
+		clock-names = "pclk", "mclk";
+		rockchip,grf = <&grf>;
+		spk-depop-time-ms = <200>;
+		#sound-dai-cells = <0>;
+		status = "okay";
+	};
+
+	sound: sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "RK_RK312X";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,bitclock-master = <&dai_cpu>;
+		simple-audio-card,frame-master = <&dai_cpu>;
+		simple-audio-card,widgets = "Speaker", "Speaker";
+		simple-audio-card,routing =
+			"Speaker Amp INL", "HPOUTL",
+			"Speaker Amp INR", "HPOUTR",
+			"Speaker", "Speaker Amp OUTL",
+			"Speaker", "Speaker Amp OUTR";
+		simple-audio-card,pin-switches = "Speaker";
+		simple-audio-card,aux-devs = <&speaker_amp>;
+
+		dai_cpu: simple-audio-card,cpu {
+			sound-dai = <&i2s_8ch>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&acodec>;
+		};
+	};
+};
+
+&i2s_8ch {
+	status = "okay";
+};

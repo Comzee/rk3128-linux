@@ -1,0 +1,73 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * Wi-Fi: the board's iComm SSV6006C0 SDIO chip (development record #293, docs/RK3128-LINUX.md "Wi-Fi").
+ * Included by scripts/linux-build.sh after the board file; it only adds to it (#298 fragment convention).
+ *
+ * Numbers from the stock rk-kernel.dtb (`tools/dtb_patch.py show boot.img.orig /wireless-wlan`, `/rksdmmc@10218000`):
+ *   WIFI,poweren_gpio = <&gpio3 27 0>   the 3.10 "123" is bank 3 * 32 + 27: GPIO3_D3, active high
+ *   WIFI,host_wake_irq = <&gpio0 25 0>  the 3.10 "25" is bank 0, pin 25: GPIO0_D1
+ *   rksdmmc@10218000: bus-width 4, pinctrl clk + cmd + 4 data lines, clock-freq-min-max 200 kHz .. 37.5 MHz,
+ *   supports-highspeed, cap-sdio-irq, keep-power-in-suspend, non-removable by the rfkill driver's rescan.
+ * The vendor's rockchip_wifi_power() (net/rfkill/rfkill-wlan.c) switches that GPIO off, waits ~100 ms, switches it on,
+ * then rescans the host: the SDIO card appears 0.37 s after power-on (vendor log, board-inventory.txt). mmc-pwrseq-simple
+ * does the same at host start-up, so the card enumerates at boot and ssv6x5x.ko binds to it whenever it is loaded.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/rockchip.h>
+
+/ {
+	/*
+	 * reset-gpios is the pwrseq's only GPIO knob; wired ACTIVE_LOW it means "chip powered while released":
+	 * power-on drives GPIO3_D3 high, power-off drives it low. The delays bracket the vendor's 100 ms off time
+	 * and give the chip's boot ROM the time the vendor driver spent between rockchip_wifi_power(1) and the rescan.
+	 */
+	sdio_pwrseq: sdio-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&gpio3 RK_PD3 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <250>;
+		power-off-delay-us = <200000>;
+	};
+};
+
+&sdio {
+	bus-width = <4>;
+	non-removable;
+	disable-wp;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	keep-power-in-suspend;
+	/*
+	 * The card clock limit (RK3128_SDIO_MAX_HZ, scripts/linux-build.sh): the vendor caps it at 37.5 MHz; the driver asks for
+	 * 25 MHz first, then 50 MHz, and gets min(50 MHz, this). docs/RK3128-LINUX.md "Wi-Fi throughput (#426)".
+	 */
+	max-frequency = <RK3128_SDIO_MAX_HZ>;
+	mmc-pwrseq = <&sdio_pwrseq>;
+#if RK3128_SDIO_DMA
+	/* RK3128_SDIO=dma: rk3128.dtsi's dmas = <&pdma 11> (the PL330, as the vendor ran it) stays: dw_mmc's external DMA */
+#else
+	/* RK3128_SDIO=pio: no DMA channel, so dw_mmc moves every byte through its FIFO by CPU (the 6.6 fork's setting) */
+	/delete-property/ dmas;
+	/delete-property/ dma-names;
+#endif
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdio_clk &sdio_cmd &sdio_bus4>;
+	/* no sdio_pwren: the vendor does not mux it for this host, and GPIO0_D6 is the backlight enable */
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	/*
+	 * SDIO function 1 (vendor 0x3030, device 0x3030). ssv6x5x.ko binds by SDIO id, not by this node; the node only
+	 * records the host-wake line (GPIO0_D1) that the vendor tree passes as WIFI,host_wake_irq. The in-band SDIO
+	 * interrupt (cap-sdio-irq) is what the driver uses; the polarity of the out-of-band line is unverified and
+	 * nothing claims it.
+	 */
+	wifi@1 {
+		reg = <1>;
+		compatible = "icomm,ssv6006c";
+		interrupt-names = "host-wake";
+		interrupts-extended = <&gpio0 RK_PD1 IRQ_TYPE_LEVEL_HIGH>;
+	};
+};

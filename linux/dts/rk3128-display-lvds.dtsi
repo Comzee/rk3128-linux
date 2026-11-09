@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * RK3128_DISPLAY=lvds addendum to rk3128-reference.dts (per-topic fragment, scripts/linux-build.sh includes it
+ * after the board file; development record #292, docs/RK3128-LINUX.md "LVDS port").
+ */
+
+/*
+ * VOP -> LVDS (the combo PHY in LVDS mode) -> the RK3128 reference board panel assembly. The `lvds` node and the
+ * third VOP endpoint are defined here, not in rk3128.dtsi (#298: no ticket patches the shared dtsi);
+ * linux/upstream/292-0004 is the same pair of nodes as an rk3128.dtsi patch for sending upstream (not
+ * applied by the build: the labels would clash). They are joined to the `rk3128_panel` node of the board
+ * file. The vendor timing stays (51 Hz, 118.8 MHz): never 60 Hz (MODS.md 12). The panel's lcd_rst/lcd_en
+ * GPIOs are owned by panel-rk3128-reference (#521): both active low, reset deasserted
+ * before enable with 10 ms after each. Probe preserves the lit u-boot handover.
+ */
+#if RK3128_DISPLAY_LVDS
+&vop_out {
+	vop_out_lvds: endpoint@2 {
+		reg = <2>;
+		remote-endpoint = <&lvds_in_vop>;
+	};
+};
+
+&grf {
+	lvds: lvds {
+		compatible = "rockchip,rk3128-lvds";
+		phys = <&dphy>;
+		phy-names = "dphy";
+		rockchip,grf = <&grf>;
+		rockchip,output = "lvds";
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			lvds_in: port@0 {
+				reg = <0>;
+
+				lvds_in_vop: endpoint {
+					remote-endpoint = <&vop_out_lvds>;
+				};
+			};
+
+			lvds_out: port@1 {
+				reg = <1>;
+
+				lvds_out_panel: endpoint {
+					remote-endpoint = <&panel_in_lvds>;
+				};
+			};
+		};
+	};
+};
+
+&display_subsystem {
+	status = "okay";
+};
+
+/*
+ * post-init-providers: the graph makes vop, lvds and the panel suppliers of each other, which fw_devlink can
+ * only break by guessing; the working RK3128 LVDS board (KING JIM DM250, jcs/linux-dm250) marks them this way.
+ */
+&vop {
+	post-init-providers = <&lvds>;
+	status = "okay";
+};
+
+&dphy {
+	status = "okay";
+};
+
+&rk3128_panel {
+	compatible = "rockchip,rk3128-reference-panel";
+	reset-gpios = <&gpio0 RK_PA2 GPIO_ACTIVE_LOW>;
+	enable-gpios = <&gpio0 RK_PB4 GPIO_ACTIVE_LOW>;
+	post-init-providers = <&lvds>;
+	status = "okay";
+
+	port {
+		panel_in_lvds: endpoint {
+			remote-endpoint = <&lvds_out_panel>;
+		};
+	};
+};
+#endif

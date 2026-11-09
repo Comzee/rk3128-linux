@@ -1,0 +1,149 @@
+nir/opt_varyings: propagate a constant into a fragment shader only when the whole slot goes away
+
+Blob evidence. The Demo's star shader (program 13) has `v_uv = vec2(0.5, a_corner.y * 0.5 + 0.5)` in
+its vertex shader and samples `texture2D(u_tex, v_uv)` in its fragment shader. The blob keeps the
+whole vec2 in the varying and samples straight out of the loaded slot, two instructions in total
+(capture/demo/compare-26.2.6/prog-13.blob.pp.txt):
+    load.v $0.xyz 0
+    load.v ^discard 1.xy, texld 0, mov.s1 $0.w ^const0.y,
+    mul.s2 $0.xyz ^texture.w $0.xyzz, const0 0 1 0 0, sync, stop
+Its varying descriptor for that program is stride 16 over 2 vec4 slots, i.e. it does write the
+constant component out of the vertex shader rather than fold it into the fragment shader.
+
+What lima did. nir_opt_varyings' propagate_uniform_expressions() moved the 0.5 into the fragment
+shader and dropped that component of the slot. The slot is still loaded for v_uv.y, so the texture
+coordinate can no longer be the loaded varying: lima had to materialize 0.5 and move both components
+into a register first, two extra instructions on every fragment:
+    mov.s1 $1.x ^const0.x, const0 0.5 ...
+    load.v $0.xy 0.xy, mov.s1 $1.y $0.y
+    load.v $2.xyz 1
+    load.v ^discard. $1.xyxx, texld 0, mul.v0 ..., mov.s1 $0.w ^const0.x, sync, stop
+
+This patch adds the io_option nir_io_dont_propagate_partial_fs_inputs: with it set on the fragment
+shader, a scalar slot is propagated only when every scalar slot of its vec4 slot that the fragment
+shader still loads would be propagated too, so the optimization keeps its win (the whole slot
+disappears) and loses the pessimization (the slot stays and a component has to be rebuilt). The
+candidate test in the pre-pass is a superset of the main loop's, so no component that would have been
+propagated before is skipped now. lima's fragment options set the flag.
+
+Effect. Demo program 13: 4 -> 2 PP instructions, the blob's count; Demo total 46 -> 44 (the blob is
+45), 278 -> 270 code words. Its vertex shader goes 66 -> 64 GP instructions, so the Demo's GP total
+falls 589 -> 587 as well. Fill-weighted against the blob's counters: ignition 7.06 -> 6.53 ms per
+frame (x1.14 -> x1.00 of the blob; program 13 covers the stars, 25 200 vertices a frame), and the
+other scenes move only through programs 4 and 43, already counted under 0010. reference UI counts unchanged.
+Note the vertex shader now writes the constant component again: +0 varying slots, so no extra varying
+bytes per vertex.
+
+Pictures: expected identical, with one dependency worth naming. The fragment shader reads an
+interpolated varying whose value is the same at all three vertices instead of a literal 0.5. The PP's
+interpolator evaluates a*dx + b*dy + c with a = b = 0 for a constant varying, so it returns the
+stored 0.5 exactly; the blob's own picture depends on the same property. If the interpolator were to
+perturb a constant varying, the texture coordinate would move by that amount, so the frozen-shot
+compare below is the check.
+
+Applies to Mesa 26.2.6 + 0001-0011.
+diff --git a/src/compiler/nir/nir_opt_varyings.c b/src/compiler/nir/nir_opt_varyings.c
+index 542add2..dc9c0bb 100644
+--- a/src/compiler/nir/nir_opt_varyings.c
++++ b/src/compiler/nir/nir_opt_varyings.c
+@@ -2890,11 +2890,61 @@ propagate_uniform_expressions(struct linkage_info *linkage,
+                               bool *consumer_progress)
+ {
+    unsigned i;
++   BITSET_DECLARE(whole_slot_only, NUM_SCALAR_SLOTS);
++
++   /* nir_io_dont_propagate_partial_fs_inputs: find the scalar slots that could
++    * be propagated, so the loop below can tell whether propagating one of them
++    * removes the whole vec4 slot from the fragment shader or only part of it.
++    * The test here is deliberately a superset of the loop's (it leaves out the
++    * color and texcoord restrictions), so a slot is never skipped for a
++    * component that would have been propagated anyway.
++    */
++   BITSET_ZERO(whole_slot_only);
++   if (linkage->consumer_stage == MESA_SHADER_FRAGMENT &&
++       linkage->consumer_builder.shader->options->io_options &
++       nir_io_dont_propagate_partial_fs_inputs) {
++      BITSET_DECLARE(candidate, NUM_SCALAR_SLOTS);
++      BITSET_ZERO(candidate);
++
++      BITSET_FOREACH_SET(i, linkage->output_equal_mask, NUM_SCALAR_SLOTS) {
++         if (!can_optimize_varying(linkage, vec4_slot(i)).propagate_uniform_expr)
++            continue;
++
++         struct is_uniform_expr_state state = {
++            .linkage = linkage,
++            .cost = 0,
++         };
++
++         nir_shader_clear_pass_flags(linkage->producer_builder.shader);
++         if (is_uniform_expression(nir_def_instr(linkage->slot[i].producer.value.def),
++                                   &state) &&
++             state.cost <= linkage->max_varying_expression_cost)
++            BITSET_SET(candidate, i);
++      }
++
++      /* A candidate is only propagated if every scalar slot of its vec4 slot
++       * that the fragment shader still loads is a candidate too.
++       */
++      BITSET_FOREACH_SET(i, candidate, NUM_SCALAR_SLOTS) {
++         unsigned base = i & ~0x7u;
++
++         for (unsigned j = base; j < base + 8; j++) {
++            if (j != i && !BITSET_TEST(candidate, j) &&
++                !list_is_empty(&linkage->slot[j].consumer.loads)) {
++               BITSET_SET(whole_slot_only, i);
++               break;
++            }
++         }
++      }
++   }
+ 
+    /* Find uniform expressions. If there are multiple stores, they should all
+     * store the same value. That's guaranteed by output_equal_mask.
+     */
+    BITSET_FOREACH_SET(i, linkage->output_equal_mask, NUM_SCALAR_SLOTS) {
++      if (BITSET_TEST(whole_slot_only, i))
++         continue;
++
+       if (!can_optimize_varying(linkage, vec4_slot(i)).propagate_uniform_expr)
+          continue;
+ 
+diff --git a/src/compiler/nir/nir_shader_compiler_options.h b/src/compiler/nir/nir_shader_compiler_options.h
+index 9de8a4f..8066100 100644
+--- a/src/compiler/nir/nir_shader_compiler_options.h
++++ b/src/compiler/nir/nir_shader_compiler_options.h
+@@ -241,6 +241,20 @@ typedef enum {
+     */
+    nir_io_dont_compact_fs_inputs = BITFIELD_BIT(14),
+ 
++   /**
++    * Set in a fragment shader's options: nir_opt_varyings propagates
++    * a constant or uniform expression into the fragment shader only when that
++    * removes the whole vec4 slot. Propagating one component of a slot the
++    * fragment shader still loads is a pessimization on hardware that loads a
++    * varying one vec4 slot at a time and can feed a texture coordinate
++    * straight out of the loaded slot (Mali-400 PP): the slot is loaded
++    * anyway, and the propagated component now has to be materialized in
++    * a register and moved next to the components that stayed, which costs
++    * instructions on every fragment. The Mali blob keeps such a component in
++    * the varying.
++    */
++   nir_io_dont_propagate_partial_fs_inputs = BITFIELD_BIT(15),
++
+    /* Options affecting the GLSL compiler or Gallium are below. */
+ 
+    /**
+diff --git a/src/gallium/drivers/lima/lima_program.c b/src/gallium/drivers/lima/lima_program.c
+index 42907c0..7639fa0 100644
+--- a/src/gallium/drivers/lima/lima_program.c
++++ b/src/gallium/drivers/lima/lima_program.c
+@@ -87,7 +87,8 @@ static const nir_shader_compiler_options fs_nir_options = {
+    .max_varying_expression_cost = 2,
+    /* the PP loads a varying one vec4 slot at a time: keep the linker's
+     * aligned layout (prefer_pot_aligned_varyings), as the blob does */
+-   .io_options = nir_io_dont_compact_fs_inputs,
++   .io_options = nir_io_dont_compact_fs_inputs |
++                 nir_io_dont_propagate_partial_fs_inputs,
+ };
+ 
+ const void *

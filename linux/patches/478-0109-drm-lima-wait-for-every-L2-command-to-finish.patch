@@ -1,0 +1,44 @@
+From: w478 <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 11:10:00 -0600
+Subject: [PATCH] drm/lima: wait for every L2 command to finish
+
+478-0104 issued an L2 invalidate the vendor's way, waiting for the previous
+command but not for this one. With the invalidate before every task
+(l2_flush_always=Y, lima's old behaviour) the Demo's frozen pictures were
+wrong in three of six scenes on the board (boots 478-1 and 478-2), while
+lima's own order (the command, then a wait for it) was right in every run.
+Wait after the command too; with the conditional invalidate (the default)
+the wait is paid only on the rare task that needs one.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+--- a/drivers/gpu/drm/lima/lima_l2_cache.c
++++ b/drivers/gpu/drm/lima/lima_l2_cache.c
+@@ -31,10 +31,14 @@
+ }
+ 
+ /*
+- * mali_l2_cache_send_command (0xc0394810): wait for the previous command to
+- * drain, then issue this one and return. It does not wait for the
+- * invalidate itself to finish; the core cannot see a half-invalidated cache
+- * because the L2 holds its own accesses off while the command runs.
++ * mali_l2_cache_send_command (0xc0394810) waits for the previous command to
++ * drain, issues this one and returns without waiting for it. On the board
++ * that is not safe for lima: with an invalidate before every task and no
++ * wait for it (l2_flush_always=Y), the Demo's frozen pictures came out wrong
++ * in three of six scenes (boots 478-1 and 478-2), where lima's own order,
++ * the command then a wait for it to finish, gave the right bytes in every
++ * run. So wait both before and after; with the conditional invalidate the
++ * wait is paid only on the rare task that needs an invalidate.
+  */
+ static int lima_l2_cache_command(struct lima_ip *ip, u32 reg, u32 val)
+ {
+@@ -44,7 +48,7 @@
+ 		return err;
+ 
+ 	l2_cache_write(reg, val);
+-	return 0;
++	return lima_l2_cache_wait_idle(ip);
+ }
+ 
+ int lima_l2_cache_flush(struct lima_ip *ip)

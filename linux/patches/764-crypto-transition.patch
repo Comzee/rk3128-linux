@@ -1,0 +1,435 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] crypto: clear RK3128 shared block state after TRNG use
+
+Close each TRNG transaction with the vendor hiword clear and acknowledge
+oscillator disable before releasing the shared lock. Withhold startup bits
+on every restart while preserving continuous health history. Retain live
+resources and refuse all access after an unacknowledged close/stop.
+Clear shared block FIFO/FSM state with the documented timed flush, also
+selectively keeping cipher DMA disabled in the shipping hash/PIO profile.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/crypto/Kconfig b/drivers/crypto/Kconfig
+--- a/drivers/crypto/Kconfig
++++ b/drivers/crypto/Kconfig
+@@ -700,6 +700,15 @@
+ 	  Uses private coherent DMA buffers, bounded hardware deadlines and
+ 	  a serialized crypto engine. Streaming hashes use software fallback.
+ 
++config CRYPTO_DEV_RK3128_HASH_PIO
++	bool "Restrict RK3128 ciphers to low-priority PIO"
++	depends on CRYPTO_DEV_RK3128
++	help
++	  Keep MD5/SHA1/SHA256 DMA and the health-tested oscillator, but
++	  reject cipher DMA. AES/DES/3DES wrappers use the accepted PIO
++	  primitive at priority 1, below CPU implementations. Diagnostic
++	  parameters cannot enable cipher DMA in this configuration.
++
+ config CRYPTO_DEV_ROCKCHIP_DEBUG
+ 	bool "Enable Rockchip crypto stats"
+ 	depends on CRYPTO_DEV_ROCKCHIP
+diff --git a/drivers/crypto/rockchip/rk3128-crypto.c b/drivers/crypto/rockchip/rk3128-crypto.c
+index 3487dca..52b610b 100644
+--- a/drivers/crypto/rockchip/rk3128-crypto.c
++++ b/drivers/crypto/rockchip/rk3128-crypto.c
+@@ -42,14 +42,18 @@
+ #define RK_NHASH 3
+ 
+ /* No DMA on module load without an explicit diagnostic request. */
+-static bool cipher_pio;
++static unsigned int trace_writes;
++module_param(trace_writes, uint, 0600);
++MODULE_PARM_DESC(trace_writes, "Bounded pre-MMIO breadcrumbs, offsets only (0..8192)");
++static bool cipher_pio = IS_ENABLED(CONFIG_CRYPTO_DEV_RK3128_HASH_PIO);
+ module_param(cipher_pio, bool, 0400);
+ MODULE_PARM_DESC(cipher_pio, "Diagnostic PIO fallback; normal operation uses accepted native DMA");
+ static unsigned int fallback_bytes = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128) ? 1024 : 0;
+ module_param(fallback_bytes, uint, 0400);
+ MODULE_PARM_DESC(fallback_bytes,
+ 	"Base CPU cutoff; measured floors apply; zero forces DMA diagnostics");
+-static bool des_dma = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128);
++static bool des_dma = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128) &&
++		      !IS_ENABLED(CONFIG_CRYPTO_DEV_RK3128_HASH_PIO);
+ module_param(des_dma, bool, 0400);
+ MODULE_PARM_DESC(des_dma, "Use separate private DMA buffers for DES/EDE; AES remains PIO");
+ static bool enable_rng = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128);
+@@ -127,13 +131,14 @@ struct rk3128_dev {
+ 	struct crypto_engine *engine;
+ 	struct completion done;
+ 	int irq;
++	atomic_t trace_count;
+ 	u32 irq_status;
+ 	void *in, *out;
+ 	void *pio_in, *pio_out;
+ 	unsigned int pio_used, dma_in_used, dma_out_used;
+ 	dma_addr_t in_dma, out_dma;
+ 	bool broken, irq_enabled, dma_started;
+-	bool rng_failed, rng_registered, lifetime_ref;
++	bool rng_failed, rng_registered, lifetime_ref, rng_started;
+ 	struct hwrng rng;
+ 	struct rk_rng_health health;
+ 	unsigned int nc, nh;
+@@ -159,48 +164,111 @@ struct rk3128_hash_req {
+ 	struct ahash_request fallback;
+ };
+ 
++static void rk_write(struct rk3128_dev *d, u32 off, u32 val);
++static int rk_abort(struct rk3128_dev *d, int err);
++static void rk_irq_off(struct rk3128_dev *d);
++static void rk_irq_on(struct rk3128_dev *d);
++static void rk_flush(struct rk3128_dev *d, u32 mask);
++
++/* Caller holds the same lock as the DMA worker. The oscillator is enabled
++ * only inside an RNG transaction, never while a cipher/hash owns the device.
++ */
+ static int rk_rng_sample(struct rk3128_dev *r, u8 data[RK_RNG_BYTES])
+ {
+ 	u32 ctrl;
+ 	unsigned int i;
+-	int err;
++	int err, close_err;
+ 
+-	writel(RK_RNG_START << 16 | RK_RNG_START, r->reg + RK_RNG_CTRL);
++	if (!r->rng_started) {
++		/* Like DMA, a TRNG start makes this static binding reboot-only.
++		 * An unacknowledged close must never free/gate live resources.
++		 */
++		__module_get(THIS_MODULE);
++		pm_runtime_get_noresume(r->dev);
++		WRITE_ONCE(r->rng_started, true);
++	}
++	rk_write(r, RK_RNG_CTRL, RK_RNG_START << 16 | RK_RNG_START);
+ 	err = readl_poll_timeout(r->reg + RK_RNG_CTRL, ctrl,
+ 				 !(ctrl & RK_RNG_START), 50, 20000);
++	if (!err)
++		for (i = 0; i < RK_RNG_BYTES; i += 4)
++			put_unaligned_le32(readl(r->reg + RK_RNG_DATA + i), data + i);
++	/* Vendor v1 closes even a timed-out sample; START self-clear alone
++	 * does not replace the explicit masked close transaction.
++	 */
++	rk_write(r, RK_RNG_CTRL, RK_RNG_START << 16);
++	close_err = readl_poll_timeout(r->reg + RK_RNG_CTRL, ctrl,
++				       !(ctrl & RK_RNG_START), 1, 1000);
++	if (close_err) {
++		r->rng_failed = true;
++		return rk_abort(r, close_err);
++	}
+ 	if (err)
+ 		return err;
+-	for (i = 0; i < RK_RNG_BYTES; i += 4)
+-		put_unaligned_le32(readl(r->reg + RK_RNG_DATA + i), data + i);
+ 	if (rk_rng_health_block(&r->health, data))
+ 		return -EIO;
+ 	return 0;
+ }
+ 
++/* Shared BR/BT FIFO/FSM initialization; caller owns the hardware lock. */
++static int rk_block_clear(struct rk3128_dev *d)
++{
++	u32 value;
++	bool irq_enabled = d->irq_enabled;
++	int err;
++
++	rk_irq_off(d);
++	rk_write(d, RK_CRYPTO_INTENA, 0);
++	synchronize_irq(d->irq);
++	value = readl(d->reg + RK_CRYPTO_CTRL);
++	if (value & (GENMASK(4, 0) | RK_RNG_START))
++		return -EBUSY;
++	rk_write(d, RK_CRYPTO_CONF, 0);
++	rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
++	/* Documented >=20-cycle BLOCK_FLUSH; rk_flush holds it for 1us. */
++	rk_flush(d, RK_CRYPTO_BLOCK_FLUSH);
++	err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, value,
++				 !(value & RK_CRYPTO_BLOCK_FLUSH), 1, 1000);
++	if (!err && irq_enabled)
++		rk_irq_on(d);
++	return err;
++}
++
++static int rk_rng_stop(struct rk3128_dev *r)
++{
++	u32 value;
++	int err;
++
++	rk_write(r, RK_RNG_OSC, 0);
++	err = readl_poll_timeout(r->reg + RK_RNG_OSC, value,
++				 !(value & RK_RNG_ENABLE), 1, 1000);
++	if (!err)
++		err = rk_block_clear(r);
++	if (err) {
++		r->rng_failed = true;
++		return rk_abort(r, err);
++	}
++	return 0;
++}
++
+ static void rk_rng_fail(struct rk3128_dev *r)
+ {
+ 	r->rng_failed = true;
+-	writel(0, r->reg + RK_RNG_OSC);
+-	dev_err_ratelimited(r->dev, "TRNG timeout/health failure; output latched off until driver removal\n");
++	if (!r->broken)
++		rk_rng_stop(r);
++	dev_err_ratelimited(r->dev, "TRNG timeout/health failure; output latched off until reboot\n");
+ }
+ 
+-static int rk_rng_init(struct hwrng *rng)
++static int rk_rng_start(struct rk3128_dev *r)
+ {
+-	struct rk3128_dev *r = container_of(rng, struct rk3128_dev, rng);
+ 	u8 discard[RK_RNG_BYTES];
+ 	unsigned int i;
+ 	int err = 0;
+ 
+-	mutex_lock(&r->lock);
+-	if (r->rng_failed || r->broken) {
+-		err = -EIO;
+-		goto out;
+-	}
+-	/* The oscillator is independent of the crypto clocks and flush signals.
+-	 * Keep it on while selected. Withhold/test 1024 startup bits (90B 4.3).
+-	 * Preserve continuous-test history across source selection as well.
++	rk_write(r, RK_RNG_OSC, RK_RNG_ENABLE | RK_RNG_PERIOD);
++	/* Withhold/test 1024 startup bits after EVERY oscillator restart.
++	 * Continuous RCT/APT/repetition history and failure latches persist.
+ 	 */
+-	writel(RK_RNG_ENABLE | RK_RNG_PERIOD, r->reg + RK_RNG_OSC);
+ 	for (i = 0; i < 4; i++) {
+ 		err = rk_rng_sample(r, discard);
+ 		if (err) {
+@@ -209,7 +277,22 @@ static int rk_rng_init(struct hwrng *rng)
+ 		}
+ 	}
+ 	memzero_explicit(discard, sizeof(discard));
+-out:
++	return err;
++}
++
++static int rk_rng_init(struct hwrng *rng)
++{
++	struct rk3128_dev *r = container_of(rng, struct rk3128_dev, rng);
++	int err;
++
++	mutex_lock(&r->lock);
++	if (r->rng_failed || r->broken) {
++		err = -EIO;
++	} else {
++		err = rk_rng_start(r);
++		if (!err)
++			err = rk_rng_stop(r);
++	}
+ 	mutex_unlock(&r->lock);
+ 	return err;
+ }
+@@ -220,7 +303,7 @@ static void rk_rng_cleanup(struct hwrng *rng)
+ 
+ 	mutex_lock(&r->lock);
+ 	if (!r->broken)
+-		writel(0, r->reg + RK_RNG_OSC);
++		rk_rng_stop(r);
+ 	mutex_unlock(&r->lock);
+ }
+ 
+@@ -238,12 +321,18 @@ static int rk_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
+ 		err = -EIO;
+ 		goto out;
+ 	}
++	err = rk_rng_start(r);
++	if (err)
++		goto clear;
+ 	err = rk_rng_sample(r, data);
+ 	if (err) {
+ 		rk_rng_fail(r);
+ 		goto clear;
+ 	}
+-	/* Never expose any part of a sample that failed either health test. */
++	err = rk_rng_stop(r);
++	if (err)
++		goto clear;
++	/* No output before health checks AND acknowledged oscillator stop. */
+ 	memcpy(buf, data, n);
+ 	err = n;
+ clear:
+@@ -253,12 +342,43 @@ out:
+ 	return err;
+ }
+ 
++/* Log before touching MMIO, so ramoops can retain the last attempted write.
++ * Never print key, IV, random output or request data. Bulk I/O keeps the
++ * original access implementation; record its complete register range first.
++ */
++static void rk_trace_write(struct rk3128_dev *d, u32 off, unsigned int bytes)
++{
++	unsigned int limit = min_t(unsigned int, READ_ONCE(trace_writes), 8192);
++	int n;
++
++	if (!limit)
++		return;
++	n = atomic_read(&d->trace_count);
++	do {
++		if (n >= (int)limit)
++			return;
++	} while (!atomic_try_cmpxchg(&d->trace_count, &n, n + 1));
++	dev_emerg(d->dev, "MMIO %u: write +%03x bytes=%u\n", (unsigned int)n + 1, off, bytes);
++}
+ 
+ static void rk_write(struct rk3128_dev *d, u32 off, u32 val)
+ {
++	rk_trace_write(d, off, 4);
+ 	writel(val, d->reg + off);
+ }
+ 
++static void rk_copy(struct rk3128_dev *d, u32 off, const void *src, unsigned int bytes)
++{
++	rk_trace_write(d, off, bytes);
++	memcpy_toio(d->reg + off, src, bytes);
++}
++
++static void rk_clear(struct rk3128_dev *d, u32 off, unsigned int bytes)
++{
++	rk_trace_write(d, off, bytes);
++	memset_io(d->reg + off, 0, bytes);
++}
++
+ /* TRM: block flush >=20 cycles; hash flush >=10. Read back before delay. */
+ static void rk_flush(struct rk3128_dev *d, u32 mask)
+ {
+@@ -310,8 +430,8 @@ static int rk_suspend(struct device *dev)
+ 	struct rk3128_dev *d = dev_get_drvdata(dev);
+ 	int err;
+ 
+-	/* Once DMA starts, even a failed diagnostic must stay powered to reboot. */
+-	if (READ_ONCE(d->dma_started))
++	/* Once DMA/RNG starts, even a failed probe stays powered to reboot. */
++	if (READ_ONCE(d->dma_started) || READ_ONCE(d->rng_started))
+ 		return -EBUSY;
+ 	rk_irq_off(d);
+ 	err = reset_control_assert(d->reset);
+@@ -340,6 +460,13 @@ static irqreturn_t rk_irq(int irq, void *arg)
+ /* Called with d->lock and runtime PM held, before the first start write. */
+ static void rk_dma_start(struct rk3128_dev *d, u32 start)
+ {
++	if (trace_writes && atomic_read(&d->trace_count) < min(trace_writes, 8192U))
++		dev_emerg(d->dev, "START mask=%x CTRL=%x CONF=%x HASH_STS=%x IRQ=%x/%x AES=%x TDES=%x OSC=%x\n",
++			  start, readl(d->reg + RK_CRYPTO_CTRL),
++			  readl(d->reg + RK_CRYPTO_CONF), readl(d->reg + RK_CRYPTO_HASH_STS),
++			  readl(d->reg + RK_CRYPTO_INTENA), readl(d->reg + RK_CRYPTO_INTSTS),
++			  readl(d->reg + RK_CRYPTO_AES_CTRL), readl(d->reg + RK_CRYPTO_TDES_CTRL),
++			  readl(d->reg + RK_RNG_OSC));
+ 	if (!d->dma_started) {
+ 		/* No safe post-DMA power transition is known. No matching puts:
+ 		 * this diagnostic is reboot-only, on success as well as failure.
+@@ -436,12 +563,12 @@ static void rk_end(struct rk3128_dev *d, bool pio)
+ 			 flush << 16 | flush);
+ 		readl(d->reg + RK_CRYPTO_CTRL);
+ 		udelay(1);
+-		memset_io(d->reg + RK_CRYPTO_AES_KEY_0, 0, 32);
+-		memset_io(d->reg + RK_CRYPTO_AES_IV_0, 0, 16);
+-		memset_io(d->reg + RK_CRYPTO_AES_CNT_0, 0, 16);
+-		memset_io(d->reg + RK_CRYPTO_TDES_KEY1_0, 0, 24);
+-		memset_io(d->reg + RK_CRYPTO_TDES_IV_0, 0, 8);
+-		memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++		rk_clear(d, RK_CRYPTO_AES_KEY_0, 32);
++		rk_clear(d, RK_CRYPTO_AES_IV_0, 16);
++		rk_clear(d, RK_CRYPTO_AES_CNT_0, 16);
++		rk_clear(d, RK_CRYPTO_TDES_KEY1_0, 24);
++		rk_clear(d, RK_CRYPTO_TDES_IV_0, 8);
++		rk_clear(d, RK_CRYPTO_HASH_DOUT_0, 32);
+ 		rk_write(d, RK_CRYPTO_CTRL,
+ 			 flush << 16);
+ 		rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
+@@ -656,6 +783,10 @@ static int rk_cipher_run(struct crypto_engine *engine, void *async_req)
+ 		if (ctx->keylen == 32)
+ 			mode |= RK_CRYPTO_AES_256BIT_key;
+ 	}
++	if (trace_writes && atomic_read(&d->trace_count) < min(trace_writes, 8192U))
++		dev_emerg(d->dev, "cipher %s key=%u mode=%x bytes=%u src=%pad dst=%pad\n",
++			  alg->alg.base.base.cra_name, ctx->keylen, mode, req->cryptlen,
++			  &d->in_dma, &d->out_dma);
+ 	for (off = 0; off < req->cryptlen; off += n) {
+ 		n = min_t(unsigned int, RK_CHUNK, req->cryptlen - off);
+ 		bytes = round_up(n, block);
+@@ -673,14 +804,14 @@ static int rk_cipher_run(struct crypto_engine *engine, void *async_req)
+ 		d->dma_out_used = max(d->dma_out_used, bytes);
+ 		if (rctx->decrypt && !alg->ctr)
+ 			memcpy(nextiv, d->in + n - block, block);
+-		memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0),
+-			    ctx->key, ctx->keylen);
++		rk_copy(d, alg->des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0,
++			ctx->key, ctx->keylen);
+ 		rk_write(d, alg->des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL, mode);
+ 		if (crypto_skcipher_ivsize(tfm))
+-			memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_IV_0 : RK_CRYPTO_AES_IV_0),
+-				    iv, block);
++			rk_copy(d, alg->des ? RK_CRYPTO_TDES_IV_0 : RK_CRYPTO_AES_IV_0,
++				iv, block);
+ 		if (alg->ctr)
+-			memcpy_toio(d->reg + RK_CRYPTO_AES_CNT_0, iv, AES_BLOCK_SIZE);
++			rk_copy(d, RK_CRYPTO_AES_CNT_0, iv, AES_BLOCK_SIZE);
+ 		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_BTFIFO |
+ 			 RK_CRYPTO_BYTESWAP_BRFIFO | (alg->des ? RK_CRYPTO_DESSEL : 0));
+ 		rk_arm(d, RK_CRYPTO_BCDMA_ERR_ENA | RK_CRYPTO_BCDMA_DONE_ENA);
+@@ -820,8 +951,11 @@ static int rk_hash_run(struct crypto_engine *engine, void *async_req)
+ 	rk_trace_once(d, "worker: power result %d\n", err);
+ 	if (err)
+ 		goto finish;
++	if (trace_writes && atomic_read(&d->trace_count) < min(trace_writes, 8192U))
++		dev_emerg(d->dev, "hash %s bytes=%u src=%pad\n",
++			  ctx->alg->alg.base.halg.base.cra_name, req->nbytes, &d->in_dma);
+ 	rk_flush(d, RK_CRYPTO_HASH_FLUSH);
+-	memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++	rk_clear(d, RK_CRYPTO_HASH_DOUT_0, 32);
+ 	rk_write(d, RK_CRYPTO_HASH_CTRL, ctx->alg->mode | RK_CRYPTO_HASH_SWAP_DO);
+ 	rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_HRFIFO);
+ 	rk_write(d, RK_CRYPTO_HASH_MSG_LEN, req->nbytes);
+@@ -919,7 +1053,7 @@ static void rk_unregister(struct rk3128_dev *d, unsigned int nc, unsigned int nh
+ 		crypto_engine_unregister_skcipher(&d->ciphers[nc].alg);
+ }
+ 
+-/* Failed post-DMA probe must bind: returning an error would free devm DMA. */
++/* A failed post-START probe must bind and retain every live resource. */
+ static int rk_probe_failed(struct rk3128_dev *d, unsigned int nc,
+ 			   unsigned int nh, int err)
+ {
+@@ -927,7 +1061,7 @@ static int rk_probe_failed(struct rk3128_dev *d, unsigned int nc,
+ 
+ 	/* Serialize with the worker and refuse queued work before unregistering. */
+ 	mutex_lock(&d->lock);
+-	started = d->dma_started;
++	started = d->dma_started || d->rng_started;
+ 	if (started)
+ 		rk_abort(d, err);
+ 	else
+@@ -1495,7 +1629,7 @@ static int rk_hash_probe(struct rk3128_dev *d)
+ 		if (err)
+ 			break;
+ 		rk_flush(d, RK_CRYPTO_HASH_FLUSH);
+-		memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++		rk_clear(d, RK_CRYPTO_HASH_DOUT_0, 32);
+ 		rk_write(d, RK_CRYPTO_HASH_CTRL, RK_CRYPTO_HASH_SHA256 | RK_CRYPTO_HASH_SWAP_DO);
+ 		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_HRFIFO);
+ 		rk_write(d, RK_CRYPTO_HASH_MSG_LEN, probe_bytes);
+@@ -1538,6 +1672,12 @@ static int rk_probe(struct platform_device *pdev)
+ 	unsigned int nc = 0, nh = 0;
+ 	int err;
+ 
++	if (IS_ENABLED(CONFIG_CRYPTO_DEV_RK3128_HASH_PIO) &&
++	    (!cipher_pio || des_dma || native_dma_probe || block_probe ||
++	     des_map_probe))
++		return dev_err_probe(dev, -EPERM, "cipher DMA disabled by shipping profile\n");
++	if (trace_writes > 8192)
++		return -EINVAL;
+ 	err = rk3128_crypto_ensure_active(dev);
+ 	if (err)
+ 		return err;
+@@ -1757,7 +1896,7 @@ static void rk_remove(struct platform_device *pdev)
+ 	if (d->rng_registered)
+ 		hwrng_unregister(&d->rng);
+ 	rk_unregister(d, d->nc, d->nh);
+-	/* A DMA start permanently pins this module; only pre-DMA removal is possible. */
++	/* DMA/TRNG start pins this module; removal is possible only before either. */
+ 	crypto_engine_stop(d->engine);
+ 	pm_runtime_disable(d->dev);
+ 	if (d->lifetime_ref) {

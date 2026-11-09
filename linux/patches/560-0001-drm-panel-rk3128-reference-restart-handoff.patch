@@ -1,0 +1,62 @@
+From: Comzee <117947104+Comzee@users.noreply.github.com>
+Subject: [PATCH] drm/panel: preserve RK3128 reference board GPIO handoff on restart
+
+The shipped u-boot panel initializer requires the legacy rockchip,rk-fb,
+lcdc alias and power_ctr DT entries. Our mainline DT has none. Returning
+from the GPIO-owning driver to an older confirmed/rescue kernel using
+panel-lvds otherwise leaves reset asserted and panel enable inactive.
+The old kernel drives a healthy DRM scanout into an electrically off panel.
+
+Keep the active GPIO levels across restart, including either DRM/platform
+shutdown order. Userspace can have unprepared the panel before reboot, so
+platform shutdown reestablishes the vendor active sequence unconditionally.
+Runtime disable, driver removal, halt and poweroff retain the vendor inverse
+sequence. There is no change to GPIO acquisition or vendor delays.
+
+References: shipped Image rk_disp_pwr_enable 0xc02fe508, disable 0xc02fe630;
+shipped u-boot LCD init 0x6001e268, legacy parser 0x6001de64, GPIO power
+list 0x6001dcd0/0x6001de20. See docs/research/black-panel.md.
+
+Signed-off-by: Comzee <117947104+Comzee@users.noreply.github.com>
+---
+--- a/drivers/gpu/drm/panel/panel-rk3128-reference.c
++++ b/drivers/gpu/drm/panel/panel-rk3128-reference.c
+@@ -7,6 +7,7 @@
+  */
+ #include <linux/delay.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+@@ -59,6 +60,10 @@
+ static int rk3128_reference_panel_unprepare(struct drm_panel *panel)
+ {
+ 	struct rk3128_reference_panel *reference = to_rk3128_reference_panel(panel);
++
++	/* A reboot must hand an active panel to kernels without GPIO ownership. */
++	if (system_state == SYSTEM_RESTART)
++		return 0;
+ 
+ 	/* Vendor disable uses the same order, inverted levels, no delays. */
+ 	gpiod_set_value_cansleep(reference->reset, 1);
+@@ -146,6 +151,19 @@
+ {
+ 	struct rk3128_reference_panel *reference = platform_get_drvdata(pdev);
+ 
++	/*
++	 * The shipped bootloader cannot reinitialize panel GPIOs from our
++	 * mainline DT. Older confirmed/rescue kernels use panel-lvds and leave
++	 * these lines untouched. Restore the vendor active sequence even if
++	 * userspace unprepared us before SYSTEM_RESTART, then leave it active.
++	 * The unprepare guard also covers a later DRM consumer shutdown.
++	 */
++	if (system_state == SYSTEM_RESTART) {
++		if (rk3128_reference_panel_prepare(&reference->panel))
++			dev_err(&pdev->dev, "failed to hand off active panel on restart\n");
++		return;
++	}
++
+ 	/* The DRM consumer may already have disabled/unprepared us. */
+ 	if (reference->panel.enabled)
+ 		drm_panel_disable(&reference->panel);

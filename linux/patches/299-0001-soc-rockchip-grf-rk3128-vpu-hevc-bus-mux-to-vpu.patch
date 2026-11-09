@@ -1,0 +1,35 @@
+From: Claude <noreply@anthropic.com>
+Subject: [PATCH] soc: rockchip: grf: rk3128: give the VPU/HEVC shared bus to
+ the VPU
+
+The RK3128 VPU1 (Hantro G1/H1, 0x10106000) and the HEVC decoder
+(0x10104000) share one bus interface. GRF_SOC_CON1 bit 15 selects the
+owner: 0 = VPU, 1 = HEVC (the vendor vcodec_service's "vpu_combo",
+mode_bit 15, mode_ctrl 0x144, flips it before every job). The Hantro
+driver never touches it, so whatever the previous owner of the SoC left
+behind decides whether the decoder answers.
+
+Set it to the VPU at GRF init, as is already done for the VPU main clock
+select next to it. A later HEVC driver that arbitrates the mux flips it
+at run time; this only fixes the boot state.
+
+Signed-off-by: Claude <noreply@anthropic.com>
+---
+diff --git a/drivers/soc/rockchip/grf.c b/drivers/soc/rockchip/grf.c
+index b459607c1..e2ad6d0e3 100644
+--- a/drivers/soc/rockchip/grf.c
++++ b/drivers/soc/rockchip/grf.c
+@@ -45,6 +45,13 @@ static const struct rockchip_grf_info rk3036_grf __initconst = {
+ static const struct rockchip_grf_value rk3128_defaults[] __initconst = {
+ 	{ "jtag switching", RK3128_GRF_SOC_CON0, FIELD_PREP_WM16_CONST(BIT(8), 0) },
+ 	{ "vpu main clock", RK3128_GRF_SOC_CON1, FIELD_PREP_WM16_CONST(BIT(10), 0) },
++	/*
++	 * The VPU1 (Hantro G1/H1) and the HEVC decoder share one bus interface, switched by
++	 * this bit: 0 gives it to the VPU, 1 to the HEVC block. The bootloader or the previous
++	 * system may have left it on HEVC (the vendor kernel flips it before every job), so
++	 * make the Hantro driver's block the default owner.
++	 */
++	{ "vpu/hevc bus mux: vpu", RK3128_GRF_SOC_CON1, FIELD_PREP_WM16_CONST(BIT(15), 0) },
+ };
+ 
+ static const struct rockchip_grf_info rk3128_grf __initconst = {

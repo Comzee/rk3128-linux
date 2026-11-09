@@ -1,0 +1,128 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] drm/rockchip: expose RK3126 win0 fixed YCbCr conversion modes
+
+RK3126/RK3128 win0 DSP_CTRL0[21:20] selects MPEG (601 limited), JPEG
+(601 full), HD (709 limited), or bypass. Expose the standard color plane
+properties only on this window and reject the unrepresentable 709 full
+combination in atomic check, including TEST_ONLY. Select the mode under
+the existing register lock, latched with the framebuffer, and reset it
+on RGB. Other VOPs keep their existing tables and behavior.
+
+---
+--- a/drivers/gpu/drm/rockchip/rockchip_drm_vop.h
++++ b/drivers/gpu/drm/rockchip/rockchip_drm_vop.h
+@@ -217,6 +217,8 @@
+ };
+ 
+ struct vop_win_data {
++	/* RK3126 win0 fixed YCbCr-to-RGB selector, absent on other variants. */
++	struct vop_reg csc_mode;
+ 	uint32_t base;
+ 	const struct vop_win_phy *phy;
+ 	enum drm_plane_type type;
+--- a/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
++++ b/drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+@@ -221,6 +221,7 @@
+ 
+ static const struct vop_win_data rk3126_vop_win_data[] = {
+ 	{ .base = 0x00, .phy = &rk3036_win0_data,
++	  .csc_mode = VOP_REG(RK3036_DSP_CTRL0, 0x3, 20),
+ 	  .type = DRM_PLANE_TYPE_PRIMARY },
+ 	{ .base = 0x00, .phy = &rk3126_win1_data,
+ 	  .type = DRM_PLANE_TYPE_CURSOR },
+--- a/drivers/gpu/drm/rockchip/rockchip_drm_vop.c
++++ b/drivers/gpu/drm/rockchip/rockchip_drm_vop.c
+@@ -26,6 +26,7 @@
+ #include <drm/drm_atomic_uapi.h>
+ #include <drm/drm_blend.h>
+ #include <drm/drm_crtc.h>
++#include <drm/drm_color_mgmt.h>
+ #include <drm/drm_flip_work.h>
+ #include <drm/drm_fourcc.h>
+ #include <drm/drm_framebuffer.h>
+@@ -835,6 +836,16 @@
+ 	if (!crtc || WARN_ON(!fb))
+ 		return 0;
+ 
++	/* The independent DRM enums include 709 full, which this VOP cannot do. */
++	if (win->csc_mode.mask && fb->format->is_yuv &&
++	    ((new_plane_state->color_encoding != DRM_COLOR_YCBCR_BT601 &&
++	      new_plane_state->color_encoding != DRM_COLOR_YCBCR_BT709) ||
++	     (new_plane_state->color_range != DRM_COLOR_YCBCR_LIMITED_RANGE &&
++	      new_plane_state->color_range != DRM_COLOR_YCBCR_FULL_RANGE) ||
++	     (new_plane_state->color_encoding == DRM_COLOR_YCBCR_BT709 &&
++	      new_plane_state->color_range == DRM_COLOR_YCBCR_FULL_RANGE)))
++		return -EINVAL;
++
+ 	crtc_state = drm_atomic_get_new_crtc_state(state, crtc);
+ 	if (WARN_ON(!crtc_state))
+ 		return -EINVAL;
+@@ -997,6 +1008,15 @@
+ 		VOP_AFBC_SET(vop, win_sel, VOP_WIN_TO_INDEX(vop_win));
+ 		VOP_AFBC_SET(vop, hdr_ptr, dma_addr);
+ 		VOP_AFBC_SET(vop, pic_size, act_info);
++	}
++
++	if (win->csc_mode.mask) {
++		u32 csc = 0; /* MPEG: BT.601 limited, also the reset for RGB. */
++
++		if (is_yuv)
++			csc = new_state->color_encoding == DRM_COLOR_YCBCR_BT709 ? 2 :
++			      new_state->color_range == DRM_COLOR_YCBCR_FULL_RANGE ? 1 : 0;
++		vop_reg_set(vop, &win->csc_mode, win->base, ~0, csc, "csc_mode");
+ 	}
+ 
+ 	VOP_WIN_SET(vop, win, format, format);
+@@ -1976,16 +1996,26 @@
+ 	return ret;
+ }
+ 
+-static void vop_plane_add_properties(struct drm_plane *plane,
++static int vop_plane_add_properties(struct drm_plane *plane,
+ 				     const struct vop_win_data *win_data)
+ {
+ 	unsigned int flags = 0;
+ 
+ 	flags |= VOP_WIN_HAS_REG(win_data, x_mir_en) ? DRM_MODE_REFLECT_X : 0;
+ 	flags |= VOP_WIN_HAS_REG(win_data, y_mir_en) ? DRM_MODE_REFLECT_Y : 0;
+-	if (flags)
+-		drm_plane_create_rotation_property(plane, DRM_MODE_ROTATE_0,
+-						   DRM_MODE_ROTATE_0 | flags);
++	if (flags) {
++		int ret = drm_plane_create_rotation_property(plane, DRM_MODE_ROTATE_0,
++						     DRM_MODE_ROTATE_0 | flags);
++
++		if (ret)
++			return ret;
++	}
++	if (win_data->csc_mode.mask)
++		return drm_plane_create_color_properties(plane,
++			BIT(DRM_COLOR_YCBCR_BT601) | BIT(DRM_COLOR_YCBCR_BT709),
++			BIT(DRM_COLOR_YCBCR_LIMITED_RANGE) | BIT(DRM_COLOR_YCBCR_FULL_RANGE),
++			DRM_COLOR_YCBCR_BT601, DRM_COLOR_YCBCR_LIMITED_RANGE);
++	return 0;
+ }
+ 
+ static int vop_create_crtc(struct vop *vop)
+@@ -2026,7 +2056,9 @@
+ 
+ 		plane = &vop_win->base;
+ 		drm_plane_helper_add(plane, &plane_helper_funcs);
+-		vop_plane_add_properties(plane, win_data);
++		ret = vop_plane_add_properties(plane, win_data);
++		if (ret)
++			goto err_cleanup_planes;
+ 		if (plane->type == DRM_PLANE_TYPE_PRIMARY)
+ 			primary = plane;
+ 		else if (plane->type == DRM_PLANE_TYPE_CURSOR)
+@@ -2069,7 +2101,9 @@
+ 			goto err_cleanup_crtc;
+ 		}
+ 		drm_plane_helper_add(&vop_win->base, &plane_helper_funcs);
+-		vop_plane_add_properties(&vop_win->base, win_data);
++		ret = vop_plane_add_properties(&vop_win->base, win_data);
++		if (ret)
++			goto err_cleanup_crtc;
+ 	}
+ 
+ 	port = of_get_child_by_name(dev->of_node, "port");

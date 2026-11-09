@@ -1,0 +1,339 @@
+From f16059b712fdc6dd1b89857bb6a34d28438241b7 Mon Sep 17 00:00:00 2001
+From: beat-state <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 07:55:11 -0600
+Subject: [PATCH] lima: store a mediump varying FP16, as the Mali blob does
+
+The storage format of a varying is independent of what the shaders compute in: the GP converts on store (varying
+descriptor format 15 = VEC4_FP16, 13 = VEC2_FP16) and the PP's varying unit converts on load (RSW "Varying Type N"),
+and the PP interpolates into fp16 registers either way, so no shader code changes. A varying the fragment shader
+declares mediump or lowp needs at most 10 mantissa bits (GLSL ES 1.00 4.5.2), which is exactly what fp16 holds, so
+it can be stored FP16 and halve the bytes the GP writes and the PP reads.
+
+The Mali blob (libGLES_mali.so r6p0-01rel1) does this: in the #478 capture of the Demo, v_col of the tunnel,
+galaxy, horizon, chrome and finale programs is "Varying Type 0: Vec4 FP16" with varying stride 8, 16 or 24, where
+lima's is "Vec4 FP32" with stride 16, 32 or 48. Measured over the six Demo scenes, lima writes 1.46-1.96x the
+blob's varying bytes per frame (/var/tmp/mali-re/beat-state/data/bw.json).
+
+The blob keeps a texture coordinate FP32 - v_tc of the reference UI text program (capture prog 9) is "Vec4 FP32" while
+v_uv and v_px of the rounded-rect program (prog 3) are "Vec4 FP16" - because an fp16 coordinate has an ulp of
+about 5e-4 near 1.0, a fifth of a texel on a 256 px texture and more on a bigger one.
+lima_fs_texcoord_varyings() reproduces that rule: it walks back from every texture coordinate, through ALU, phis,
+dependent texture reads and out-of-SSA registers, and marks the varyings that reach it; a coordinate whose shape
+it cannot resolve marks every varying, so an unknown fragment shader keeps today's FP32 layout. With that rule
+lima's per-draw varying types match the blob's on every Demo and reference UI draw of the capture, and gl_PointCoord
+(the Demo's galaxy sprites) correctly leaves v_col free to be FP16.
+
+Pixel effect: a mediump varying that is not a texture coordinate is now rounded to fp16 at each vertex before
+interpolation instead of after it, so an interpolated value can move by up to one fp16 ulp of the vertex values
+(about 1e-3 relative). The Demo's v_col feeds colour, so an 8-bit channel can move by at most 1/255.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+---
+ src/gallium/drivers/lima/ir/gp/nir.c    |   1 +
+ src/gallium/drivers/lima/lima_context.h |   6 ++
+ src/gallium/drivers/lima/lima_draw.c    |  50 +++++++--
+ src/gallium/drivers/lima/lima_program.c | 134 ++++++++++++++++++++++++
+ 4 files changed, 185 insertions(+), 6 deletions(-)
+
+diff --git a/src/gallium/drivers/lima/ir/gp/nir.c b/src/gallium/drivers/lima/ir/gp/nir.c
+index 3fdf1f8..c1b07e9 100644
+--- a/src/gallium/drivers/lima/ir/gp/nir.c
++++ b/src/gallium/drivers/lima/ir/gp/nir.c
+@@ -514,6 +514,7 @@ bool gpir_compile_nir(struct lima_vs_compiled_shader *prog, struct nir_shader *n
+          prog->state.num_varyings++;
+          struct lima_varying_info *v = prog->state.varying + var->data.driver_location;
+          v->type = gpir_varying_type(var->type);
++         v->precision = var->data.precision;
+       }
+    }
+ 
+diff --git a/src/gallium/drivers/lima/lima_context.h b/src/gallium/drivers/lima/lima_context.h
+index d5f8094..1dc494a 100644
+--- a/src/gallium/drivers/lima/lima_context.h
++++ b/src/gallium/drivers/lima/lima_context.h
+@@ -64,6 +64,10 @@ struct lima_fs_compiled_shader {
+       uint8_t uniform_slots;
+       uint8_t uniform_dst[LIMA_PP_PACK_MAX_SLOTS];
+       uint8_t uniform_width[LIMA_PP_PACK_MAX_SLOTS];
++      /* One bit per varying driver_location whose value reaches a texture
++       * coordinate in this shader. Those stay FP32 however low their
++       * precision: an fp16 texture coordinate shifts the sampled texel. */
++      uint32_t texcoord_varyings;
+    } state;
+ };
+ 
+@@ -86,6 +90,8 @@ struct lima_fs_key {
+ 
+ struct lima_varying_info {
+    enum lima_varying_type type;
++   /* GLSL_PRECISION_* of the varying after linking: a mediump or lowp one can be stored FP16 */
++   unsigned precision;
+    int offset;
+ };
+ 
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+index a362ab8..95447c1 100644
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -35,6 +35,7 @@
+ #include "util/u_prim.h"
+ #include "util/u_vbuf.h"
+ #include "util/hash_table.h"
++#include "compiler/glsl_types.h"
+ 
+ #include "lima_context.h"
+ #include "lima_pack.h"
+@@ -625,6 +626,10 @@ lima_logic_op(enum pipe_logicop pipe)
+    return -1;
+ }
+ 
++static enum lima_varying_type
++lima_varying_storage_type(struct lima_context *ctx, int index,
++                          const struct lima_varying_info *v);
++
+ static void
+ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *info)
+ {
+@@ -795,14 +800,15 @@ lima_pack_render_state(struct lima_context *ctx, const struct pipe_draw_info *in
+                continue;
+ 
+             struct lima_varying_info* v = ctx->vs->state.varying + i;
++            enum lima_varying_type type = lima_varying_storage_type(ctx, index, v);
+             if (index < 10)
+-               *varyings[index] = v->type;
++               *varyings[index] = type;
+             else if (index == 10) {
+-               state.varying_type_10_low = v->type & 0x3;
+-               state.varying_type_10_high = v->type >> 2;
++               state.varying_type_10_low = type & 0x3;
++               state.varying_type_10_high = type >> 2;
+             }
+             else if (index == 11)
+-               state.varying_type_11 = v->type;
++               state.varying_type_11 = type;
+ 
+             index++;
+          }
+@@ -954,6 +960,35 @@ lima_update_pp_uniform(struct lima_context *ctx)
+       lima_ctx_buff_va(ctx, lima_ctx_buff_pp_uniform_array));
+ }
+ 
++/* The storage format of one varying, which is not the format the shaders compute in: the GP converts on store
++ * (varying descriptor format 15 = VEC4_FP16) and the PP's varying unit converts on load (RSW "Varying Type N"),
++ * and the PP interpolates into fp16 registers either way. So a varying the fragment shader declares mediump or
++ * lowp - at most 10 mantissa bits by GLSL ES 1.00 4.5.2, which is what fp16 has - can be stored FP16 and halve
++ * the bytes the GP writes and the PP reads. The Mali blob does exactly this (capture RSWs: v_col of the Demo's
++ * tunnel and galaxy programs is "Vec4 FP16" with stride 8 or 16 where lima's is "Vec4 FP32" with 16 or 32), and
++ * keeps a texture coordinate FP32, which lima_fs_texcoord_varyings() reproduces.
++ */
++static enum lima_varying_type
++lima_varying_storage_type(struct lima_context *ctx, int index,
++                          const struct lima_varying_info *v)
++{
++   /* index is the varying's slot in the RSW ("Varying Type N"), which is also the base the fragment shader's
++    * load_input carries, so lima_fs_texcoord_varyings()'s mask is indexed the same way. */
++   if (v->precision != GLSL_PRECISION_MEDIUM && v->precision != GLSL_PRECISION_LOW)
++      return v->type;
++   if (ctx->fs->state.texcoord_varyings & BITFIELD_BIT(index))
++      return v->type;
++
++   switch (v->type) {
++   case LIMA_VARYING_TYPE_VEC4_FP32:
++      return LIMA_VARYING_TYPE_VEC4_FP16;
++   case LIMA_VARYING_TYPE_VEC2_FP32:
++      return LIMA_VARYING_TYPE_VEC2_FP16;
++   default:
++      return v->type;
++   }
++}
++
+ static unsigned int
+ lima_varying_size(enum lima_varying_type type)
+ {
+@@ -1007,6 +1042,7 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+    int n = 0;
+ 
+    int offset = 0;
++   int index = 0;
+ 
+    for (int i = 0; i < vs->state.num_outputs; i++) {
+       struct lima_varying_info *v = vs->state.varying + i;
+@@ -1015,7 +1051,7 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+           i == vs->state.point_size_idx)
+          continue;
+ 
+-      int size = lima_varying_size(v->type);
++      int size = lima_varying_size(lima_varying_storage_type(ctx, index++, v));
+ 
+       offset = align(offset, size);
+ 
+@@ -1048,6 +1084,7 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+    lima_job_add_bo(job, LIMA_PIPE_GP, ctx->gp_output, LIMA_SUBMIT_BO_WRITE);
+    lima_job_add_bo(job, LIMA_PIPE_PP, ctx->gp_output, LIMA_SUBMIT_BO_READ);
+ 
++   index = 0;
+    for (int i = 0; i < vs->state.num_outputs; i++) {
+       struct lima_varying_info *v = vs->state.varying + i;
+ 
+@@ -1063,7 +1100,8 @@ lima_update_varying(struct lima_context *ctx, const struct pipe_draw_info *info,
+          /* Varying */
+          varying[n++] = ctx->gp_output->va + ctx->gp_output_varyings_offt +
+                         v->offset;
+-         varying[n++] = (vs->state.varying_stride << 11) | lima_gp_vertex_format_out(v->type);
++         varying[n++] = (vs->state.varying_stride << 11) |
++            lima_gp_vertex_format_out(lima_varying_storage_type(ctx, index++, v));
+       }
+    }
+ 
+diff --git a/src/gallium/drivers/lima/lima_program.c b/src/gallium/drivers/lima/lima_program.c
+index 42907c0..2162e0f 100644
+--- a/src/gallium/drivers/lima/lima_program.c
++++ b/src/gallium/drivers/lima/lima_program.c
+@@ -414,6 +414,138 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
+    nir_sweep(s);
+ }
+ 
++/* Which varyings this fragment shader uses as a texture coordinate.
++ *
++ * The Mali blob stores a mediump varying FP16 (half the GP write and PP read traffic) but keeps a texture
++ * coordinate FP32: in the reference UI text program (capture prog 9) v_tc is "Varying Type 0: Vec4 FP32" while v_uv and
++ * v_px of the rounded-rect program (prog 3) are "Vec4 FP16". An fp16 coordinate has an ulp of about 5e-4 near 1.0,
++ * which is a fifth of a texel on a 256 px texture and more on a bigger one, so it would move the sampled texel.
++ *
++ * Walk back from every texture coordinate and mark the varyings that reach it. A coordinate this walk cannot
++ * resolve marks every varying, so an unknown shape keeps today's FP32 layout.
++ */
++#define LIMA_TEXCOORD_ALL (~0u)
++
++static uint32_t
++lima_fs_texcoord_varyings(nir_shader *s)
++{
++   uint32_t mask = 0;
++
++   nir_foreach_function_impl(impl, s) {
++      nir_foreach_block(block, impl) {
++         nir_foreach_instr(instr, block) {
++            if (instr->type != nir_instr_type_tex)
++               continue;
++            nir_tex_instr *tex = nir_instr_as_tex(instr);
++
++            for (unsigned i = 0; i < tex->num_srcs; i++) {
++               switch (tex->src[i].src_type) {
++               case nir_tex_src_coord:
++               case nir_tex_src_offset:
++               case nir_tex_src_lod:
++               case nir_tex_src_bias:
++               case nir_tex_src_ddx:
++               case nir_tex_src_ddy:
++                  break;
++               default:
++                  continue;
++               }
++
++               nir_def *work[128];
++               unsigned n = 0, seen = 0;
++
++               work[n++] = tex->src[i].src.ssa;
++
++               while (seen < n) {
++                  nir_def *def = work[seen++];
++                  nir_instr *p = nir_def_instr_nonconst(def);
++                  nir_def *more[8];
++                  unsigned nmore = 0;
++
++                  switch (p->type) {
++                  case nir_instr_type_load_const:
++                  case nir_instr_type_undef:
++                     continue;
++                  case nir_instr_type_alu: {
++                     nir_alu_instr *alu = nir_instr_as_alu(p);
++                     for (unsigned k = 0; k < nir_op_infos[alu->op].num_inputs && nmore < ARRAY_SIZE(more); k++)
++                        more[nmore++] = alu->src[k].src.ssa;
++                     break;
++                  }
++                  case nir_instr_type_phi: {
++                     nir_phi_instr *phi = nir_instr_as_phi(p);
++                     nir_foreach_phi_src(src, phi) {
++                        if (nmore < ARRAY_SIZE(more))
++                           more[nmore++] = src->src.ssa;
++                     }
++                     break;
++                  }
++                  case nir_instr_type_tex: {
++                     /* a dependent texture read: its own sources feed this coordinate */
++                     nir_tex_instr *t = nir_instr_as_tex(p);
++                     for (unsigned k = 0; k < t->num_srcs && nmore < ARRAY_SIZE(more); k++)
++                        more[nmore++] = t->src[k].src.ssa;
++                     break;
++                  }
++                  case nir_instr_type_intrinsic: {
++                     nir_intrinsic_instr *intr = nir_instr_as_intrinsic(p);
++                     switch (intr->intrinsic) {
++                     case nir_intrinsic_load_input:
++                        mask |= BITFIELD_BIT(nir_intrinsic_base(intr));
++                        continue;
++                     case nir_intrinsic_load_reg:
++                        /* out of SSA: follow every store_reg into the same register */
++                        nir_foreach_block(b2, impl) {
++                           nir_foreach_instr(i2, b2) {
++                              if (i2->type != nir_instr_type_intrinsic)
++                                 continue;
++                              nir_intrinsic_instr *st = nir_instr_as_intrinsic(i2);
++                              if (st->intrinsic != nir_intrinsic_store_reg ||
++                                  st->src[1].ssa != intr->src[0].ssa)
++                                 continue;
++                              if (nmore < ARRAY_SIZE(more))
++                                 more[nmore++] = st->src[0].ssa;
++                              else
++                                 return LIMA_TEXCOORD_ALL;
++                           }
++                        }
++                        break;
++                     case nir_intrinsic_decl_reg:
++                     case nir_intrinsic_load_point_coord:
++                     case nir_intrinsic_load_frag_coord:
++                     case nir_intrinsic_load_front_face:
++                     case nir_intrinsic_load_uniform:
++                     case nir_intrinsic_load_ubo:
++                        /* not a varying */
++                        continue;
++                     default:
++                        return LIMA_TEXCOORD_ALL;
++                     }
++                     break;
++                  }
++                  default:
++                     return LIMA_TEXCOORD_ALL;
++                  }
++
++                  for (unsigned k = 0; k < nmore; k++) {
++                     bool dup = false;
++                     for (unsigned m = 0; m < n; m++)
++                        dup |= work[m] == more[k];
++                     if (dup)
++                        continue;
++                     if (n >= ARRAY_SIZE(work))
++                        return LIMA_TEXCOORD_ALL;
++                     work[n++] = more[k];
++                  }
++               }
++            }
++         }
++      }
++   }
++
++   return mask;
++}
++
+ static bool
+ lima_fs_compile_shader(struct lima_context *ctx,
+                        struct lima_fs_key *key,
+@@ -442,6 +574,8 @@ lima_fs_compile_shader(struct lima_context *ctx,
+    lima_nir_pack_pp_uniforms(nir, fs);
+    lima_program_optimize_fs_nir(nir, key, &tex_options);
+ 
++   fs->state.texcoord_varyings = lima_fs_texcoord_varyings(nir);
++
+    if (lima_debug & LIMA_DEBUG_PP)
+       nir_print_shader(nir, stdout);
+ 

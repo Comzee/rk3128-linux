@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Video decode (development record #299, docs/RK3128-LINUX.md "Video decode: H.264 (VPU1)").
+ * Included by scripts/linux-build.sh after the board file (#298 fragment convention).
+ *
+ * Two things live here: the shared CMA pool (this ticket owns it; #300 and #305 use it) and
+ * the VPU1 nodes of rk3128.dtsi turned on explicitly.
+ *
+ * #336 (LINUX-DESIGN.md 13): the pool is 160 MiB and the VPU runs on it with its MMU off, so the
+ * decoder's capture buffers are contiguous and can be scanned out by the VOP (zero-copy video).
+ */
+
+/ {
+	reserved-memory {
+		/*
+		 * The default CMA pool, 160 MiB (#336: an app switch during a 1080p video needs about 69 MB,
+		 * LINUX-DESIGN.md 13's table; 160 MiB leaves room for fragmentation. #299 had 64 MiB, the fork's
+		 * `rk3128-cma-64m` size). No `reg`: the kernel places it itself, top-down in low memory, after all the
+		 * static regions are reserved, so it can never land on the ramoops region
+		 * (0x7f100000), u-boot's framebuffer (0x9dc00000, no-map above low memory) or on the
+		 * initrd that u-boot loads (a fixed address overlapped it in the fork: bad_page
+		 * during free_initrd). `reusable`: the pages serve movable allocations until a
+		 * driver needs a contiguous block. Alignment 8 KiB as in the fork; the kernel rounds
+		 * it up to a CMA pageblock itself.
+		 */
+		cma_region: linux,cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x0a000000>;
+			alignment = <0x2000>;
+			linux,cma-default;
+		};
+	};
+};
+
+/*
+ * VPU1 = VDPU1 (H.264, VP8, MPEG-2 decode) + VEPU1 (JPEG encode) at 0x10106000. rk3128.dtsi
+ * describes it fully, behind `vpu_mmu` (0x10106800). #336 turns that MMU off: the VOP has no
+ * IOMMU in this port (RK3128-LINUX.md "LVDS port" item 8), so it scans out only contiguous
+ * buffers, and with `vpu_mmu` on, Hantro's capture buffers are scattered pages whose dma-buf
+ * import into rockchip-drm fails. Without `iommus`, Hantro allocates from the CMA pool above,
+ * and its frames go to win0 with no copy. This is the configuration in which the 6.6 fork's
+ * Hantro decoded on RK3128.
+ */
+&vpu {
+	status = "okay";
+	/delete-property/ iommus;
+};
+
+&vpu_mmu {
+	status = "disabled";
+};

@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * DDR3 frequency change (development record #379, docs/RK3128-LINUX.md "Speed against Android").
+ * Included by scripts/linux-build.sh after the board file (#298 fragment convention).
+ *
+ * The uPCTL (0x20004000), the DDR PHY (0x2000a000) and the NoC service registers (0x10128000,
+ * DdrTiming at +0xc) are the vendor 3.10 kernel's static map for RK312x (found in its iotable);
+ * the top 4 KiB of the internal SRAM holds the switch code while the DDR is in self-refresh
+ * (the bottom page holds the SMP trampoline). The vendor's OPP is 396 MHz at vdd_logic 1.25 V,
+ * so the node needs the PWM rail and is on with it (RK3128_PWM_REGULATORS). Patch 379-0002's
+ * driver raises the clock at probe to rockchip,boot-mhz = RK3128_DDR_MHZ (scripts/linux-build.sh,
+ * default auto: 396 with the regulators, else 0 = the loader's 300 MHz; rk3128_dmc.boot_mhz=N overrides it;
+ * debugfs rk3128-dmc/mhz raises it at run time, never lowers it: the vendor's 300 MHz mode
+ * decoded with errors after a down-switch, attempt 379-7). Measured on the board (attempts
+ * 379-5..8): 300 -> 396 MHz in 0.26-0.47 ms, HEVC zero copy 152 -> 202 fps. #387 proved 396 at
+ * the vendor's exact settings (stressapptest 194 GB with 0 errors, the registers equal to the
+ * vendor kernel's) and made it the default; the product image has the regulators on.
+ * Since #456 every switch runs on CPU 0 with the other CPUs stopped through their stopper
+ * threads, each phase under a deadline (a boot hung at the switch in attempt 428-1); debugfs
+ * rk3128-dmc/test is its on hardware test kit.
+ */
+
+/ {
+	dmc: memory-controller@20004000 {
+		compatible = "rockchip,rk3128-dmc";
+		reg = <0x20004000 0x1000>, <0x2000a000 0x1000>, <0x10128000 0x1000>,
+		      <0x10081000 0x1000>;
+		reg-names = "pctl", "phy", "noc", "sram";
+		rockchip,cru = <&cru>;
+		rockchip,grf = <&grf>;
+		rockchip,pmu = <&pmu>;
+		logic-supply = <&vdd_logic>;
+		rockchip,boot-mhz = <RK3128_DDR_MHZ>;
+		status = RK3128_PWM_REGULATORS;
+	};
+};

@@ -1,0 +1,419 @@
+#472 research only, never in MESA_PATCHES: LIMA_X switches and per-cause reload counters for lima, on top of
+Mesa 26.2.6 + linux/userspace/mesa/0001-0007 (docs/research/gpu-demo-gap/midpass.md). Bits: 1 no rename (0006 off),
+2 wait for each job, 4 reload PLBU state, 8 no depth reload, 16 depth reload first, 32 early-z off for reload jobs,
+64 wait before each reload job, 128 reload clip off, 256 log counters, 512 no reload, 1024 no depth write-back,
+2048 reload sample centre offset, 4096 flush the readers then rename.
+
+diff --git a/src/gallium/drivers/lima/lima_blit.c b/src/gallium/drivers/lima/lima_blit.c
+index 03916bf..49ca397 100644
+--- a/src/gallium/drivers/lima/lima_blit.c
++++ b/src/gallium/drivers/lima/lima_blit.c
+@@ -25,6 +25,7 @@
+ #include "lima_parser.h"
+ #include "lima_util.h"
+ #include "lima_blit.h"
++#include "lima_x.h"
+ 
+ void
+ lima_pack_blit_cmd(struct lima_job *job,
+@@ -90,6 +91,10 @@ lima_pack_blit_cmd(struct lima_job *job,
+ 
+       state.viewport_near = 0.0f;
+       state.viewport_far = 1.0f;
++      if (lima_x_reloading && (lima_x & LIMA_X_RELOAD_CLIP)) {
++         state.depth_test_near_clip_disable = true;
++         state.depth_test_far_clip_disable = true;
++      }
+ 
+       if (util_format_is_depth_or_stencil(res->base.format)) {
+          state.color_mask = 0;
+@@ -157,10 +162,14 @@ lima_pack_blit_cmd(struct lima_job *job,
+       src->x,              src->y + src->height,
+       0, 0, /* unused */
+    };
++   if (lima_x_reloading && (lima_x & LIMA_X_RELOAD_NEAREST_CENTRE))
++      for (int k = 0; k < 6; k++)
++         reload_varying[k] -= 0.25f;
+    memcpy(cpu + lima_blit_varying_offset, reload_varying,
+           sizeof(reload_varying));
+ 
+-   PLBU_CMD_BEGIN(cmd_array, scissor ? 22 : 20);
++   bool xplbu = lima_x_reloading && (lima_x & LIMA_X_RELOAD_PLBU);
++   PLBU_CMD_BEGIN(cmd_array, (scissor || xplbu) ? 28 : 20);
+ 
+    PLBU_CMD_VIEWPORT_LEFT(0);
+    PLBU_CMD_VIEWPORT_RIGHT(fui(fb_width));
+@@ -182,6 +191,12 @@ lima_pack_blit_cmd(struct lima_job *job,
+       lima_damage_rect_union(&job->damage_rect, minx, maxx, miny, maxy);
+    }
+ 
++   if (xplbu) {
++      PLBU_CMD_SCISSORS(0, (int)fb_width, 0, (int)fb_height);
++      PLBU_CMD_PRIMITIVE_SETUP(false, 0, 1);
++      PLBU_CMD_DEPTH_RANGE_NEAR(fui(0.0f));
++      PLBU_CMD_DEPTH_RANGE_FAR(fui(1.0f));
++   } else
+    PLBU_CMD_UNKNOWN2();
+    PLBU_CMD_UNKNOWN1();
+ 
+@@ -292,8 +307,10 @@ lima_do_blit(struct pipe_context *pctx,
+    struct lima_resource *src_res = lima_resource(src_surf.texture);
+    struct lima_resource *dst_res = lima_resource(dst_surf.texture);
+ 
++   lima_x_cause = LIMA_XC_BLIT;
+    lima_flush_job_accessing_bo(ctx, src_res->bo, true);
+    lima_flush_job_accessing_bo(ctx, dst_res->bo, true);
++   lima_x_cause = LIMA_XC_OTHER;
+ 
+    lima_job_add_bo(job, LIMA_PIPE_PP, src_res->bo, LIMA_SUBMIT_BO_READ);
+    _mesa_hash_table_insert(ctx->write_jobs, &dst_res->base, job);
+@@ -331,7 +348,9 @@ lima_do_blit(struct pipe_context *pctx,
+ 
+    job->resolve = reload_flags;
+ 
++   lima_x_cause = LIMA_XC_BLIT;
+    lima_do_job(job);
++   lima_x_cause = LIMA_XC_OTHER;
+ 
+    pipe_resource_reference(&dst_surf.texture, NULL);
+    pipe_resource_reference(&src_surf.texture, NULL);
+diff --git a/src/gallium/drivers/lima/lima_draw.c b/src/gallium/drivers/lima/lima_draw.c
+index a362ab8..ea90447 100644
+--- a/src/gallium/drivers/lima/lima_draw.c
++++ b/src/gallium/drivers/lima/lima_draw.c
+@@ -43,6 +43,7 @@
+ #include "lima_program.h"
+ #include "lima_bo.h"
+ #include "lima_job.h"
++#include "lima_x.h"
+ #include "lima_texture.h"
+ #include "lima_util.h"
+ #include "lima_gpu.h"
+@@ -130,7 +131,9 @@ lima_update_job_wb(struct lima_context *ctx, unsigned buffers)
+    if (fb->base.nr_cbufs && (buffers & PIPE_CLEAR_COLOR0) &&
+        !(job->resolve & PIPE_CLEAR_COLOR0)) {
+       struct lima_resource *res = lima_resource(fb->base.cbufs[0].texture);
++      lima_x_cause = LIMA_XC_WB;
+       lima_flush_job_accessing_bo(ctx, res->bo, true);
++      lima_x_cause = LIMA_XC_OTHER;
+       _mesa_hash_table_insert(ctx->write_jobs, &res->base, job);
+       lima_job_add_bo(job, LIMA_PIPE_PP, res->bo, LIMA_SUBMIT_BO_WRITE);
+    }
+@@ -139,7 +142,9 @@ lima_update_job_wb(struct lima_context *ctx, unsigned buffers)
+    if (fb->base.zsbuf.texture && (buffers & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL)) &&
+        !(job->resolve & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL))) {
+       struct lima_resource *res = lima_resource(fb->base.zsbuf.texture);
++      lima_x_cause = LIMA_XC_WB;
+       lima_flush_job_accessing_bo(ctx, res->bo, true);
++      lima_x_cause = LIMA_XC_OTHER;
+       _mesa_hash_table_insert(ctx->write_jobs, &res->base, job);
+       lima_job_add_bo(job, LIMA_PIPE_PP, res->bo, LIMA_SUBMIT_BO_WRITE);
+    }
+@@ -159,7 +164,9 @@ lima_clear(struct pipe_context *pctx, unsigned buffers,
+    /* flush if this job already contains any draw, otherwise multi clear can be
+     * combined into a single job */
+    if (lima_job_has_draw_pending(job)) {
++      lima_x_cause = LIMA_XC_CLEAR;
+       lima_do_job(job);
++      lima_x_cause = LIMA_XC_OTHER;
+       job = lima_job_get(ctx);
+    }
+ 
+@@ -1266,7 +1273,9 @@ lima_draw_vbo(struct pipe_context *pctx,
+     * hit tile heap size limit */
+    if (job->draws > MAX_DRAWS_PER_JOB) {
+       unsigned resolve = job->resolve;
++      lima_x_cause = LIMA_XC_DRAWS;
+       lima_do_job(job);
++      lima_x_cause = LIMA_XC_OTHER;
+       /* Subsequent job will need to resolve the same buffers */
+       lima_update_job_wb(ctx, resolve);
+    }
+diff --git a/src/gallium/drivers/lima/lima_job.c b/src/gallium/drivers/lima/lima_job.c
+index 3ebefdf..69a525d 100644
+--- a/src/gallium/drivers/lima/lima_job.c
++++ b/src/gallium/drivers/lima/lima_job.c
+@@ -23,6 +23,7 @@
+ 
+ #include <stdlib.h>
+ #include <string.h>
++#include <unistd.h>
+ 
+ #include "xf86drm.h"
+ #include "drm-uapi/lima_drm.h"
+@@ -48,6 +49,30 @@
+ #include "lima_gpu.h"
+ #include "lima_blit.h"
+ #include "lima_pack.h"
++#include "lima_x.h"
++
++int lima_x;
++int lima_x_cause;
++int lima_x_reloading;
++static unsigned x_submits, x_reload_jobs, x_reload_c[LIMA_XC_N], x_reload_z[LIMA_XC_N];
++static int64_t x_last;
++static const char *x_names[LIMA_XC_N] = {"other", "eof", "flush", "map", "clear", "draws", "blit", "wb"};
++void lima_x_count_reload(int cause, int zs) { (zs ? x_reload_z : x_reload_c)[cause]++; }
++static void x_log(void)
++{
++   static unsigned last_reloads = ~0u;
++   int64_t now = os_time_get_nano();
++   if (now - x_last < 2000000000ll && x_reload_jobs == last_reloads)
++      return;
++   last_reloads = x_reload_jobs;
++   x_last = now;
++   char b[400];
++   int n = snprintf(b, sizeof(b), "lima-x: pid %d submits %u reload-jobs %u; colour by cause", (int)getpid(), x_submits, x_reload_jobs);
++   for (int i = 0; i < LIMA_XC_N; i++) if (x_reload_c[i]) n += snprintf(b + n, sizeof(b) - n, " %s=%u", x_names[i], x_reload_c[i]);
++   n += snprintf(b + n, sizeof(b) - n, "; zs");
++   for (int i = 0; i < LIMA_XC_N; i++) if (x_reload_z[i]) n += snprintf(b + n, sizeof(b) - n, " %s=%u", x_names[i], x_reload_z[i]);
++   fprintf(stderr, "%s\n", b);
++}
+ 
+ #define VOID2U64(x) ((uint64_t)(unsigned long)(x))
+ 
+@@ -425,12 +450,26 @@ lima_pack_head_plbu_cmd(struct lima_job *job)
+ 
+    PLBU_CMD_END();
+ 
+-   if (lima_fb_cbuf_needs_reload(job)) {
++   bool rc = lima_fb_cbuf_needs_reload(job), rz = lima_fb_zsbuf_needs_reload(job);
++   if (rc)
++      lima_x_count_reload(lima_resource(job->key.cbuf.texture)->x_cause, 0);
++   if (rz)
++      lima_x_count_reload(lima_resource(job->key.zsbuf.texture)->x_cause, 1);
++   job->x_reload = rc || rz;
++   if (lima_x & LIMA_X_NO_RELOAD)
++      rc = rz = false;
++   if (lima_x & LIMA_X_NO_ZS_RELOAD)
++      rz = false;
++   lima_x_reloading = 1;
++   if (rz && (lima_x & LIMA_X_ZS_FIRST))
++      lima_pack_reload_plbu_cmd(job, &job->key.zsbuf);
++   if (rc) {
+       lima_pack_reload_plbu_cmd(job, &job->key.cbuf);
+    }
+ 
+-   if (lima_fb_zsbuf_needs_reload(job))
++   if (rz && !(lima_x & LIMA_X_ZS_FIRST))
+       lima_pack_reload_plbu_cmd(job, &job->key.zsbuf);
++   lima_x_reloading = 0;
+ }
+ 
+ static void
+@@ -814,7 +853,7 @@ lima_pack_pp_frame_reg(struct lima_job *job, uint32_t *frame_reg,
+ 
+    lima_pack(frame_reg, PP_FRAME, frame) {
+       frame.render_address = screen->pp_buffer->va + pp_frame_rsw_offset;
+-      frame.early_z = true;
++      frame.early_z = !(job->x_reload && (lima_x & LIMA_X_EARLYZ_OFF));
+       if (job->key.cbuf.texture && util_format_is_float(job->key.cbuf.texture->format)) {
+          frame.fp16_tilebuffer = true;
+          frame.clear_value_16bpc_color = job->clear.color_16bpc;
+@@ -865,7 +904,7 @@ lima_pack_pp_frame_reg(struct lima_job *job, uint32_t *frame_reg,
+       }
+    }
+ 
+-   if (job->key.zsbuf.texture &&
++   if (job->key.zsbuf.texture && !(lima_x & LIMA_X_NO_ZS_WB) &&
+        (job->resolve & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL)))
+       lima_pack_wb_zsbuf_reg(job, wb_reg, wb_idx++);
+ }
+@@ -923,6 +962,16 @@ lima_do_job(struct lima_job *job)
+    lima_dump_command_stream_print(
+       job->dump, &gp_frame, sizeof(gp_frame), false, "add gp frame\n");
+ 
++   x_submits++;
++   if (job->x_reload)
++      x_reload_jobs++;
++   if (job->x_reload && (lima_x & LIMA_X_RELOAD_WAIT)) {
++      lima_job_wait(job, LIMA_PIPE_GP, OS_TIMEOUT_INFINITE);
++      lima_job_wait(job, LIMA_PIPE_PP, OS_TIMEOUT_INFINITE);
++   }
++   if (lima_x & LIMA_X_LOG)
++      x_log();
++
+    if (!lima_job_start(job, LIMA_PIPE_GP, &gp_frame, sizeof(gp_frame)))
+       fprintf(stderr, "gp job error\n");
+ 
+@@ -1014,6 +1063,9 @@ lima_do_job(struct lima_job *job)
+       }
+    }
+ 
++   if (lima_x & LIMA_X_SYNC)
++      lima_job_wait(job, LIMA_PIPE_PP, OS_TIMEOUT_INFINITE);
++
+    ctx->plb_index = (ctx->plb_index + 1) % lima_ctx_num_plb;
+ 
+    /* Set reload flags for next draw. It'll be unset if buffer is cleared */
+@@ -1021,12 +1073,14 @@ lima_do_job(struct lima_job *job)
+       struct pipe_surface *psurf = &job->key.cbuf;
+       struct lima_resource *res = lima_resource(psurf->texture);
+       res->reload |= PIPE_CLEAR_COLOR0;
++      res->x_cause = lima_x_cause;
+    }
+ 
+    if (job->key.zsbuf.texture && (job->resolve & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL))) {
+       struct pipe_surface *psurf = &job->key.zsbuf;
+       struct lima_resource *res = lima_resource(psurf->texture);
+       res->reload |= (job->resolve & (PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL));
++      res->x_cause = lima_x_cause;
+    }
+ 
+    if (ctx->job == job)
+@@ -1091,7 +1145,9 @@ lima_pipe_flush(struct pipe_context *pctx, struct pipe_fence_handle **fence,
+ {
+    struct lima_context *ctx = lima_context(pctx);
+ 
++   lima_x_cause = (flags & PIPE_FLUSH_END_OF_FRAME) ? LIMA_XC_EOF : LIMA_XC_FLUSH;
+    lima_flush(ctx);
++   lima_x_cause = LIMA_XC_OTHER;
+ 
+    if (fence) {
+       int drm_fd = lima_screen(ctx->base.screen)->fd;
+diff --git a/src/gallium/drivers/lima/lima_job.h b/src/gallium/drivers/lima/lima_job.h
+index e25840c..16cdac2 100644
+--- a/src/gallium/drivers/lima/lima_job.h
++++ b/src/gallium/drivers/lima/lima_job.h
+@@ -64,6 +64,7 @@ struct lima_job_fb_info {
+ };
+ 
+ struct lima_job {
++   bool x_reload;
+    int fd;
+    struct lima_context *ctx;
+ 
+diff --git a/src/gallium/drivers/lima/lima_resource.c b/src/gallium/drivers/lima/lima_resource.c
+index de8e244..b32f4f4 100644
+--- a/src/gallium/drivers/lima/lima_resource.c
++++ b/src/gallium/drivers/lima/lima_resource.c
+@@ -45,6 +45,7 @@
+ #include "lima_screen.h"
+ #include "lima_context.h"
+ #include "lima_resource.h"
++#include "lima_x.h"
+ #include "lima_bo.h"
+ #include "lima_util.h"
+ #include "lima_blit.h"
+@@ -626,6 +627,7 @@ lima_transfer_map(struct pipe_context *pctx,
+             (usage & PIPE_MAP_DISCARD_RANGE) &&
+             !(usage & (PIPE_MAP_UNSYNCHRONIZED | PIPE_MAP_READ |
+                        PIPE_MAP_PERSISTENT | PIPE_MAP_COHERENT)) &&
++            !(lima_x & LIMA_X_NORENAME) &&
+             (lima_job_bo_pending(ctx, bo) ||
+              !lima_bo_wait(bo, LIMA_GEM_WAIT_WRITE, 0))) {
+       /* glBufferSubData of part of a buffer that a job still reads
+@@ -636,6 +638,11 @@ lima_transfer_map(struct pipe_context *pctx,
+        * CPU on every such call. Jobs keep the old BO through their
+        * references; the GPU only reads buffers on lima, so the old BO can
+        * be read while it is in use. */
++      if (lima_x & LIMA_X_SPLIT_RENAME) {
++         lima_x_cause = LIMA_XC_MAP;
++         lima_flush_job_accessing_bo(ctx, bo, true);
++         lima_x_cause = LIMA_XC_OTHER;
++      }
+       struct lima_bo *new_bo = lima_bo_create(screen, bo->size, bo->flags);
+       if (!new_bo)
+          return NULL;
+@@ -665,7 +672,9 @@ lima_transfer_map(struct pipe_context *pctx,
+             (usage & PIPE_MAP_READ_WRITE)) {
+       /* use once buffers are made sure to not read/write overlapped
+        * range, so no need to sync */
++      lima_x_cause = LIMA_XC_MAP;
+       lima_flush_job_accessing_bo(ctx, bo, usage & PIPE_MAP_WRITE);
++      lima_x_cause = LIMA_XC_OTHER;
+ 
+       unsigned op = usage & PIPE_MAP_WRITE ?
+          LIMA_GEM_WAIT_WRITE : LIMA_GEM_WAIT_READ;
+@@ -883,7 +892,9 @@ lima_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
+    /* For a discussion about flushes here see
+     * https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/34054#note_2867478
+     */
++   lima_x_cause = LIMA_XC_BLIT;
+    lima_flush(ctx);
++   lima_x_cause = LIMA_XC_OTHER;
+ 
+    if (lima_do_blit(pctx, blit_info)) {
+       goto done;
+@@ -910,7 +921,9 @@ lima_blit(struct pipe_context *pctx, const struct pipe_blit_info *blit_info)
+    util_blitter_blit(ctx->blitter, &info, NULL);
+ 
+ done:
++   lima_x_cause = LIMA_XC_BLIT;
+    lima_flush(ctx);
++   lima_x_cause = LIMA_XC_OTHER;
+ }
+ 
+ static void
+@@ -952,7 +965,9 @@ lima_texture_subdata(struct pipe_context *pctx,
+       .staging = (void *)data,
+    };
+ 
++   lima_x_cause = LIMA_XC_MAP;
+    lima_flush_job_accessing_bo(ctx, res->bo, true);
++   lima_x_cause = LIMA_XC_OTHER;
+    lima_bo_wait(res->bo, LIMA_GEM_WAIT_WRITE, OS_TIMEOUT_INFINITE);
+    if (!lima_bo_map(res->bo))
+       return;
+diff --git a/src/gallium/drivers/lima/lima_resource.h b/src/gallium/drivers/lima/lima_resource.h
+index 7f1c0fd..efdc7ba 100644
+--- a/src/gallium/drivers/lima/lima_resource.h
++++ b/src/gallium/drivers/lima/lima_resource.h
+@@ -60,6 +60,7 @@ struct lima_resource {
+    bool modifier_constant;
+    unsigned full_updates;
+    unsigned reload;
++   int x_cause;
+    /* PIPE_BUFFER: the bytes ever written since the BO was (re)allocated; a job can read nothing outside it */
+    struct util_range valid_buffer_range;
+ 
+diff --git a/src/gallium/drivers/lima/lima_screen.c b/src/gallium/drivers/lima/lima_screen.c
+index 1e7e8c3..4c5cc5b 100644
+--- a/src/gallium/drivers/lima/lima_screen.c
++++ b/src/gallium/drivers/lima/lima_screen.c
+@@ -35,6 +35,7 @@
+ #include "drm-uapi/lima_drm.h"
+ 
+ #include "lima_screen.h"
++#include "lima_x.h"
+ #include "lima_context.h"
+ #include "lima_resource.h"
+ #include "lima_program.h"
+@@ -511,6 +512,8 @@ static void
+ lima_screen_parse_env(void)
+ {
+    lima_debug = debug_get_option_lima_debug();
++   lima_x = debug_get_num_option("LIMA_X", 0);
++   if (lima_x) fprintf(stderr, "lima: LIMA_X=0x%x (#472 experiment)\n", lima_x);
+ 
+    lima_ctx_num_plb = debug_get_num_option("LIMA_CTX_NUM_PLB", LIMA_CTX_PLB_DEF_NUM);
+    if (lima_ctx_num_plb > LIMA_CTX_PLB_MAX_NUM ||
+diff --git a/src/gallium/drivers/lima/lima_x.h b/src/gallium/drivers/lima/lima_x.h
+new file mode 100644
+index 0000000..56b764b
+--- /dev/null
++++ b/src/gallium/drivers/lima/lima_x.h
+@@ -0,0 +1,23 @@
++/* #472 experiment switches (RK3128 reference, never for the image): LIMA_X=<bits> */
++#ifndef H_LIMA_X
++#define H_LIMA_X
++#define LIMA_X_NORENAME      (1 << 0)  /* 0006's busy-buffer rename off: partial writes flush and wait as stock */
++#define LIMA_X_SYNC          (1 << 1)  /* wait for each job's PP before returning from lima_do_job */
++#define LIMA_X_RELOAD_PLBU   (1 << 2)  /* reload draw: own PRIMITIVE_SETUP (0x2200), full scissor, depth range 0..1 */
++#define LIMA_X_NO_ZS_RELOAD  (1 << 3)  /* no depth/stencil reload draw */
++#define LIMA_X_ZS_FIRST      (1 << 4)  /* depth/stencil reload draw before the colour one */
++#define LIMA_X_EARLYZ_OFF    (1 << 5)  /* PP frame early_z off for a job with a reload */
++#define LIMA_X_RELOAD_WAIT   (1 << 6)  /* before submitting a job with a reload, wait for every earlier GP and PP job */
++#define LIMA_X_RELOAD_CLIP   (1 << 7)  /* reload RSW: near/far depth clip off (as the blob's draws) */
++#define LIMA_X_LOG           (1 << 8)  /* stderr: submits and reloads per cause, every 2 s */
++#define LIMA_X_NO_RELOAD     (1 << 9)  /* no reload draw at all (what a lost reload looks like) */
++#define LIMA_X_NO_ZS_WB      (1 << 10) /* a job reloads/writes back no depth/stencil when the next job will reload it */
++#define LIMA_X_RELOAD_NEAREST_CENTRE (1 << 11) /* reload varyings at texel centres offset by -0.5 (precision check) */
++#define LIMA_X_SPLIT_RENAME  (1 << 12) /* the rename, but the job reading the buffer is flushed first (split, fresh buffer) */
++extern int lima_x;
++enum { LIMA_XC_OTHER, LIMA_XC_EOF, LIMA_XC_FLUSH, LIMA_XC_MAP, LIMA_XC_CLEAR, LIMA_XC_DRAWS, LIMA_XC_BLIT, LIMA_XC_WB, LIMA_XC_N };
++extern int lima_x_cause;
++extern int lima_x_reloading;
++void lima_x_count_reload(int cause, int zs);
++void lima_x_count_submit(void);
++#endif

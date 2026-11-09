@@ -1,0 +1,2 @@
+0001-dmix-clear-the-sum-ring-behind-hw_ptr-never-read-the-slave-buffer.patch
+0002-softvol-neon-loop-for-interleaved-stereo-s16.patch

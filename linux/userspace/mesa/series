@@ -1,0 +1,14 @@
+0001-lima-prepare-for-FP16-varyings.patch
+0002-lima-return-after-unreachable-varying-format.patch
+0003-lima-split-load-input-vec.patch
+0004-lima-pack-pp-uniforms.patch
+0005-lima-keep-aligned-fs-varyings.patch
+0006-lima-rename-busy-buffer-on-partial-write.patch
+0007-lima-default-to-4-plbs.patch
+0010-lima-use-the-result-combiner-as-a-third-multiply-port.patch
+0011-nir-do-not-propagate-a-constant-into-part-of-an-fs-input-slot.patch
+0012-lima-store-mediump-varyings-fp16.patch
+0013-lima-pack-the-varying-stride-to-8.patch
+0014-lima-gpir-one-cycle-of-critical-path-slack-when-picking-the-next-node.patch
+0015-lima-let-more-than-one-unit-read-texture-in-the-texld-s-instruction.patch
+0016-lazy-glsl-builtins-on-cache-hit.patch

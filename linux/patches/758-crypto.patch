@@ -1,0 +1,1578 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] crypto: enable validated RK3128 DMA and shared health-tested RNG
+
+Register native AES/DES/EDE/hash DMA with separate private
+coherent buffers.
+Use the validated upper-DDR, no-BLOCK_FLUSH recipe and bounded completion.
+Preserve oscillator health tests under one owner and hold lifetime clocks.
+Guard both probes against retained PMU idle; refuse runtime gating.
+Set priorities and CPU fallbacks from measured requester/worker CPU time.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/crypto/rockchip/rk3128-crypto.c b/drivers/crypto/rockchip/rk3128-crypto.c
+--- a/drivers/crypto/rockchip/rk3128-crypto.c
++++ b/drivers/crypto/rockchip/rk3128-crypto.c
+@@ -10,6 +10,9 @@
+ #include <linux/delay.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/interrupt.h>
++#include <linux/mfd/syscon.h>
++#include <linux/regmap.h>
++#include <linux/hw_random.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+@@ -20,18 +23,79 @@
+ #include <linux/reset.h>
+ #include <linux/unaligned.h>
+ #include "rk3128-regs.h"
++#include "../../char/hw_random/rk3128-rng-health.h"
++#include "../../char/hw_random/rk3128-rng-pmu.h"
++
++#define RK_RNG_CTRL 0x008
++#define RK_RNG_START BIT(8)
++#define RK_RNG_OSC 0x200
++#define RK_RNG_ENABLE BIT(16)
++#define RK_RNG_PERIOD 1000
++#define RK_RNG_DATA 0x204
++#define RK_RNG_BYTES 32
++#define RK_RNG_QUALITY 128 /* per 1024 bits: 0.125, fourfold below H=0.5 */
++
++
+ 
+ #define RK_CHUNK SZ_16K
+-#define RK_NCIPHER 9
++#define RK_NCIPHER 7
+ #define RK_NHASH 3
+ 
+ /* No DMA on module load without an explicit diagnostic request. */
+-static bool enable_dma;
++static bool cipher_pio;
++module_param(cipher_pio, bool, 0400);
++MODULE_PARM_DESC(cipher_pio, "Diagnostic PIO fallback; normal operation uses accepted native DMA");
++static unsigned int fallback_bytes = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128) ? 1024 : 0;
++module_param(fallback_bytes, uint, 0400);
++MODULE_PARM_DESC(fallback_bytes,
++	"Base CPU cutoff; measured floors apply; zero forces DMA diagnostics");
++static bool des_dma = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128);
++module_param(des_dma, bool, 0400);
++MODULE_PARM_DESC(des_dma, "Use separate private DMA buffers for DES/EDE; AES remains PIO");
++static bool enable_rng = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128);
++module_param(enable_rng, bool, 0400);
++MODULE_PARM_DESC(enable_rng, "Accepted oscillator under the crypto device lock");
++static bool enable_dma = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128);
+ module_param(enable_dma, bool, 0400);
+-MODULE_PARM_DESC(enable_dma, "Register unaccepted cipher/hash algorithms (diagnostic only)");
++MODULE_PARM_DESC(enable_dma, "Register the admitted cipher/hash algorithms");
++static unsigned int dma_stage = IS_BUILTIN(CONFIG_CRYPTO_DEV_RK3128) ? 3 : 1;
++module_param(dma_stage, uint, 0400);
++MODULE_PARM_DESC(dma_stage, "Admission: 1 hashes, 2 plus AES, 3 plus DES/EDE");
++static unsigned int probe_count = 1;
++module_param(probe_count, uint, 0400);
++static unsigned int probe_bytes = 64;
++module_param(probe_bytes, uint, 0400);
++static bool des_map_probe;
++module_param(des_map_probe, bool, 0400);
++MODULE_PARM_DESC(des_map_probe, "Exclusive public DES DMA/canary mapping experiment");
++static bool native_dma_probe;
++module_param(native_dma_probe, bool, 0400);
++static unsigned int minimal_bytes = 16;
++module_param(minimal_bytes, uint, 0400);
++static bool minimal_probe, des_probe;
++module_param(minimal_probe, bool, 0400);
++module_param(des_probe, bool, 0400);
++MODULE_PARM_DESC(minimal_probe, "Fresh-boot vendor sequence: no block flush/IV or post-DMA cleanup");
++MODULE_PARM_DESC(des_probe, "Diagnostic single-DES known answer instead of AES128");
++static bool native_probe;
++module_param(native_probe, bool, 0400);
++MODULE_PARM_DESC(native_probe, "Exclusive native CBC/CTR PIO byte-order matrix");
++static bool pio_matrix;
++module_param(pio_matrix, bool, 0400);
++MODULE_PARM_DESC(pio_matrix, "Exclusive no-DMA AES/DES PIO protocol matrix");
++static bool pio_probe, block_probe, inplace_probe;
++module_param(pio_probe, bool, 0400);
++module_param(block_probe, bool, 0400);
++module_param(inplace_probe, bool, 0400);
++MODULE_PARM_DESC(pio_probe, "One AES128 ECB PIO known answer, no API registration");
++MODULE_PARM_DESC(block_probe, "One AES128 ECB DMA known answer, no API registration");
++MODULE_PARM_DESC(inplace_probe, "Diagnostic block DMA writes back to its input buffer");
++static bool normal_dma;
++module_param(normal_dma, bool, 0400);
++MODULE_PARM_DESC(normal_dma, "Diagnostic: use normal coherent DDR instead of private low pool");
+ static bool hash_probe;
+ module_param(hash_probe, bool, 0400);
+-MODULE_PARM_DESC(hash_probe, "One bounded 64-byte SHA256 DMA with low DDR buffers; no API registration");
++MODULE_PARM_DESC(hash_probe, "Bounded software-checked SHA256 DMAs; no API registration");
+ 
+ /* Finite bring-up breadcrumbs; omitted from normal kernels. */
+ #define rk_trace(d, fmt, ...) do { \
+@@ -65,8 +129,13 @@
+ 	int irq;
+ 	u32 irq_status;
+ 	void *in, *out;
++	void *pio_in, *pio_out;
++	unsigned int pio_used, dma_in_used, dma_out_used;
+ 	dma_addr_t in_dma, out_dma;
+ 	bool broken, irq_enabled, dma_started;
++	bool rng_failed, rng_registered, lifetime_ref;
++	struct hwrng rng;
++	struct rk_rng_health health;
+ 	unsigned int nc, nh;
+ 	struct mutex lock;
+ 	struct rk3128_cipher ciphers[RK_NCIPHER];
+@@ -74,10 +143,14 @@
+ };
+ struct rk3128_cipher_ctx {
+ 	struct rk3128_cipher *alg;
++	struct crypto_skcipher *fallback;
+ 	u8 key[AES_MAX_KEY_SIZE];
+ 	unsigned int keylen;
+ };
+-struct rk3128_cipher_req { bool decrypt; };
++struct rk3128_cipher_req {
++	bool decrypt;
++	struct skcipher_request fallback;
++};
+ struct rk3128_hash_ctx {
+ 	struct rk3128_hash *alg;
+ 	struct crypto_ahash *fallback;
+@@ -86,6 +159,101 @@
+ 	struct ahash_request fallback;
+ };
+ 
++static int rk_rng_sample(struct rk3128_dev *r, u8 data[RK_RNG_BYTES])
++{
++	u32 ctrl;
++	unsigned int i;
++	int err;
++
++	writel(RK_RNG_START << 16 | RK_RNG_START, r->reg + RK_RNG_CTRL);
++	err = readl_poll_timeout(r->reg + RK_RNG_CTRL, ctrl,
++				 !(ctrl & RK_RNG_START), 50, 20000);
++	if (err)
++		return err;
++	for (i = 0; i < RK_RNG_BYTES; i += 4)
++		put_unaligned_le32(readl(r->reg + RK_RNG_DATA + i), data + i);
++	if (rk_rng_health_block(&r->health, data))
++		return -EIO;
++	return 0;
++}
++
++static void rk_rng_fail(struct rk3128_dev *r)
++{
++	r->rng_failed = true;
++	writel(0, r->reg + RK_RNG_OSC);
++	dev_err_ratelimited(r->dev, "TRNG timeout/health failure; output latched off until driver removal\n");
++}
++
++static int rk_rng_init(struct hwrng *rng)
++{
++	struct rk3128_dev *r = container_of(rng, struct rk3128_dev, rng);
++	u8 discard[RK_RNG_BYTES];
++	unsigned int i;
++	int err = 0;
++
++	mutex_lock(&r->lock);
++	if (r->rng_failed || r->broken) {
++		err = -EIO;
++		goto out;
++	}
++	/* The oscillator is independent of the crypto clocks and flush signals.
++	 * Keep it on while selected. Withhold/test 1024 startup bits (90B 4.3).
++	 * Preserve continuous-test history across source selection as well.
++	 */
++	writel(RK_RNG_ENABLE | RK_RNG_PERIOD, r->reg + RK_RNG_OSC);
++	for (i = 0; i < 4; i++) {
++		err = rk_rng_sample(r, discard);
++		if (err) {
++			rk_rng_fail(r);
++			break;
++		}
++	}
++	memzero_explicit(discard, sizeof(discard));
++out:
++	mutex_unlock(&r->lock);
++	return err;
++}
++
++static void rk_rng_cleanup(struct hwrng *rng)
++{
++	struct rk3128_dev *r = container_of(rng, struct rk3128_dev, rng);
++
++	mutex_lock(&r->lock);
++	if (!r->broken)
++		writel(0, r->reg + RK_RNG_OSC);
++	mutex_unlock(&r->lock);
++}
++
++static int rk_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
++{
++	struct rk3128_dev *r = container_of(rng, struct rk3128_dev, rng);
++	u8 data[RK_RNG_BYTES];
++	int err;
++	size_t n = min_t(size_t, max, sizeof(data));
++
++	if (!wait || !n)
++		return 0;
++	mutex_lock(&r->lock);
++	if (r->rng_failed || r->broken) {
++		err = -EIO;
++		goto out;
++	}
++	err = rk_rng_sample(r, data);
++	if (err) {
++		rk_rng_fail(r);
++		goto clear;
++	}
++	/* Never expose any part of a sample that failed either health test. */
++	memcpy(buf, data, n);
++	err = n;
++clear:
++	memzero_explicit(data, sizeof(data));
++out:
++	mutex_unlock(&r->lock);
++	return err;
++}
++
++
+ static void rk_write(struct rk3128_dev *d, u32 off, u32 val)
+ {
+ 	writel(val, d->reg + off);
+@@ -243,18 +411,29 @@
+ 	return 0;
+ }
+ 
+-static void rk_end(struct rk3128_dev *d)
++static void rk_end(struct rk3128_dev *d, bool pio)
+ {
++	u32 flush = RK_CRYPTO_HASH_FLUSH | (pio ? RK_CRYPTO_BLOCK_FLUSH : 0);
++
+ 	if (!d->broken) {
+-		memzero_explicit(d->in, RK_CHUNK);
+-		memzero_explicit(d->out, RK_CHUNK);
++		if (pio) {
++			memzero_explicit(d->pio_in, d->pio_used);
++			memzero_explicit(d->pio_out, d->pio_used);
++			d->pio_used = 0;
++		} else {
++			memzero_explicit(d->in, d->dma_in_used);
++			memzero_explicit(d->out, d->dma_out_used);
++			d->dma_in_used = d->dma_out_used = 0;
++		}
+ 		rk_irq_off(d);
+ 		rk_write(d, RK_CRYPTO_INTENA, 0);
+ 		synchronize_irq(d->irq);
+-		/* Match v1's per-request flush; reserve CRU reset for PM/faults. */
++		/* DMA START was quiesced before buffer reuse. The working vendor
++		 * FIFO recipe has no per-request BLOCK_FLUSH. PIO keeps its proven
++		 * block flush; the independent hash engine still needs HASH_FLUSH.
++		 */
+ 		rk_write(d, RK_CRYPTO_CTRL,
+-			 (RK_CRYPTO_BLOCK_FLUSH | RK_CRYPTO_HASH_FLUSH) << 16 |
+-			 RK_CRYPTO_BLOCK_FLUSH | RK_CRYPTO_HASH_FLUSH);
++			 flush << 16 | flush);
+ 		readl(d->reg + RK_CRYPTO_CTRL);
+ 		udelay(1);
+ 		memset_io(d->reg + RK_CRYPTO_AES_KEY_0, 0, 32);
+@@ -264,7 +443,7 @@
+ 		memset_io(d->reg + RK_CRYPTO_TDES_IV_0, 0, 8);
+ 		memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
+ 		rk_write(d, RK_CRYPTO_CTRL,
+-			 (RK_CRYPTO_BLOCK_FLUSH | RK_CRYPTO_HASH_FLUSH) << 16);
++			 flush << 16);
+ 		rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
+ 		rk_irq_on(d);
+ 	}
+@@ -279,13 +458,26 @@
+ 
+ 	ctx->alg = container_of(crypto_skcipher_alg(tfm), struct rk3128_cipher,
+ 				alg.base);
+-	crypto_skcipher_set_reqsize(tfm, sizeof(struct rk3128_cipher_req));
++	/* Keep final CTR IV semantics identical across the cutoff. The NEON
++	 * skcipher leaves a partial block's IV unchanged; the library oracle
++	 * and this hardware driver advance it by ceil(bytes / AES_BLOCK_SIZE).
++	 */
++	ctx->fallback = crypto_alloc_skcipher(ctx->alg->ctr ? "ctr-aes-lib" :
++					      crypto_skcipher_alg(tfm)->base.cra_name,
++					      0, CRYPTO_ALG_NEED_FALLBACK | CRYPTO_ALG_ASYNC);
++	if (IS_ERR(ctx->fallback))
++		return PTR_ERR(ctx->fallback);
++	crypto_skcipher_set_reqsize(tfm, sizeof(struct rk3128_cipher_req) +
++				   crypto_skcipher_reqsize(ctx->fallback));
+ 	return 0;
+ }
+ 
+ static void rk_cipher_exit(struct crypto_skcipher *tfm)
+ {
+-	memzero_explicit(crypto_skcipher_ctx(tfm), sizeof(struct rk3128_cipher_ctx));
++	struct rk3128_cipher_ctx *ctx = crypto_skcipher_ctx(tfm);
++
++	crypto_free_skcipher(ctx->fallback);
++	memzero_explicit(ctx, sizeof(*ctx));
+ }
+ 
+ static int rk_setkey(struct crypto_skcipher *tfm, const u8 *key, unsigned int len)
+@@ -305,6 +497,12 @@
+ 	}
+ 	if (err)
+ 		return err;
++	crypto_skcipher_clear_flags(ctx->fallback, CRYPTO_TFM_REQ_MASK);
++	crypto_skcipher_set_flags(ctx->fallback,
++				  crypto_skcipher_get_flags(tfm) & CRYPTO_TFM_REQ_MASK);
++	err = crypto_skcipher_setkey(ctx->fallback, key, len);
++	if (err)
++		return err;
+ 	memcpy(ctx->key, key, len);
+ 	ctx->keylen = len;
+ 	return 0;
+@@ -325,6 +523,16 @@
+ 	if (sg_nents_for_len(req->src, req->cryptlen) < 0 ||
+ 	    sg_nents_for_len(req->dst, req->cryptlen) < 0)
+ 		return -EINVAL;
++	if ((!cipher_pio || (ctx->alg->des && des_dma)) && fallback_bytes &&
++	    req->cryptlen < max_t(unsigned int, fallback_bytes,
++		ctx->alg->des && (ctx->alg->mode & RK_CRYPTO_TDES_SELECT) ? SZ_1K : SZ_4K)) {
++		struct skcipher_request *fb = &rctx->fallback;
++
++		skcipher_request_set_tfm(fb, ctx->fallback);
++		skcipher_request_set_callback(fb, req->base.flags, NULL, NULL);
++		skcipher_request_set_crypt(fb, req->src, req->dst, req->cryptlen, req->iv);
++		return decrypt ? crypto_skcipher_decrypt(fb) : crypto_skcipher_encrypt(fb);
++	}
+ 	rctx->decrypt = decrypt;
+ 	return crypto_transfer_skcipher_request_to_engine(ctx->alg->dev->engine, req);
+ }
+@@ -339,6 +547,75 @@
+ 	return rk_cipher_enqueue(req, true);
+ }
+ 
++/* The v1 PIO protocol is documented and independently used by NetBSD.
++ * RK3128's AES/TDES_STS DONE bits remain zero after a correct result; CTRL's
++ * self-clearing START is the verified completion signal. The poll sleeps if
++ * the first read is not complete, and every block has a bounded deadline.
++ */
++static int rk_pio_chunk(struct rk3128_dev *d, struct rk3128_cipher_ctx *ctx,
++			u32 mode, u8 iv[16], unsigned int bytes, bool decrypt)
++{
++	struct rk3128_cipher *alg = ctx->alg;
++	unsigned int block = alg->des ? 8 : 16, off, i;
++	u32 control = alg->des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL;
++	u32 din = alg->des ? RK_CRYPTO_TDES_DIN_0 : RK_CRYPTO_AES_DIN_0;
++	u32 dout = alg->des ? RK_CRYPTO_TDES_DOUT_0 : RK_CRYPTO_AES_DOUT_0;
++	u32 keyreg = alg->des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0;
++	u32 start = alg->des ? RK_CRYPTO_TDES_START : RK_CRYPTO_AES_START, v;
++	bool cbc = alg->mode & (alg->des ? RK_CRYPTO_TDES_CHAINMODE_CBC : RK_CRYPTO_AES_CBC_MODE);
++	u8 nextiv[16], work[16];
++	int err;
++
++	/* PIO's native chaining failed known answers. Use the proven hardware
++	 * ECB primitive with the standard CBC/CTR construction, as crypto mode
++	 * templates do. Every cipher block still runs on silicon, never a software
++	 * AES/DES substitute. Counter arithmetic is big endian, including tails.
++	 */
++	mode &= ~(alg->des ? RK_CRYPTO_TDES_CHAINMODE_CBC :
++		  RK_CRYPTO_AES_CBC_MODE | RK_CRYPTO_AES_CTR_MODE);
++	if (alg->ctr)
++		mode &= ~RK_CRYPTO_AES_DEC;
++	rk_write(d, RK_CRYPTO_INTENA, 0);
++	rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
++	for (off = 0; off < bytes; off += block) {
++		memcpy(work, alg->ctr ? iv : d->pio_in + off, block);
++		if (cbc && decrypt)
++			memcpy(nextiv, work, block);
++		if (cbc && !decrypt)
++			for (i = 0; i < block; i++)
++				work[i] ^= iv[i];
++		for (i = 0; i < block; i += 4)
++			rk_write(d, din + i, get_unaligned_le32(work + i));
++		for (i = 0; i < ctx->keylen; i += 4)
++			rk_write(d, keyreg + i, get_unaligned_le32(ctx->key + i));
++		rk_write(d, control, mode);
++		rk_dma_start(d, start);
++		err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, v, !(v & start), 1, 10000);
++		if (err) {
++			memzero_explicit(nextiv, sizeof(nextiv));
++			memzero_explicit(work, sizeof(work));
++			return rk_abort(d, err);
++		}
++		for (i = 0; i < block; i += 4)
++			put_unaligned_le32(readl(d->reg + dout + i), work + i);
++		if (alg->ctr)
++			for (i = 0; i < block; i++)
++				work[i] ^= ((u8 *)d->pio_in)[off + i];
++		if (cbc && decrypt)
++			for (i = 0; i < block; i++)
++				work[i] ^= iv[i];
++		memcpy(d->pio_out + off, work, block);
++		if (alg->ctr)
++			crypto_inc(iv, block);
++		else if (cbc)
++			memcpy(iv, decrypt ? nextiv : work, block);
++		cond_resched();
++	}
++	memzero_explicit(nextiv, sizeof(nextiv));
++	memzero_explicit(work, sizeof(work));
++	return 0;
++}
++
+ static int rk_cipher_run(struct crypto_engine *engine, void *async_req)
+ {
+ 	struct skcipher_request *req = container_of(async_req, struct skcipher_request, base);
+@@ -347,6 +624,9 @@
+ 	struct rk3128_cipher_req *rctx = skcipher_request_ctx(req);
+ 	struct rk3128_cipher *alg = ctx->alg;
+ 	struct rk3128_dev *d = alg->dev;
++	bool pio = cipher_pio && !(alg->des && des_dma);
++	void *input = pio ? d->pio_in : d->in;
++	void *output = pio ? d->pio_out : d->out;
+ 	u8 iv[16] = {}, nextiv[16];
+ 	unsigned int off, n, bytes, block = alg->des ? 8 : 16;
+ 	u32 mode = alg->mode;
+@@ -362,10 +642,12 @@
+ 	if (rctx->decrypt && !alg->ctr)
+ 		mode |= BIT(0);
+ 	if (alg->des) {
+-		mode |= RK_CRYPTO_TDES_FIFO_MODE | RK_CRYPTO_TDES_BYTESWAP_KEY |
++		mode |= (pio ? RK_CRYPTO_TDES_BYTESWAP_DI | RK_CRYPTO_TDES_BYTESWAP_DO :
++			 RK_CRYPTO_TDES_FIFO_MODE) | RK_CRYPTO_TDES_BYTESWAP_KEY |
+ 			RK_CRYPTO_TDES_BYTESWAP_IV;
+ 	} else {
+-		mode |= RK_CRYPTO_AES_FIFO_MODE | RK_CRYPTO_AES_KEY_CHANGE |
++		mode |= (pio ? RK_CRYPTO_AES_BYTESWAP_DI | RK_CRYPTO_AES_BYTESWAP_DO :
++			 RK_CRYPTO_AES_FIFO_MODE) | RK_CRYPTO_AES_KEY_CHANGE |
+ 			RK_CRYPTO_AES_BYTESWAP_KEY | RK_CRYPTO_AES_BYTESWAP_IV;
+ 		if (alg->ctr)
+ 			mode |= RK_CRYPTO_AES_BYTESWAP_CNT;
+@@ -377,24 +659,34 @@
+ 	for (off = 0; off < req->cryptlen; off += n) {
+ 		n = min_t(unsigned int, RK_CHUNK, req->cryptlen - off);
+ 		bytes = round_up(n, block);
+-		memset(d->in, 0, bytes);
+-		scatterwalk_map_and_copy(d->in, req->src, off, n, 0);
++		memset(input + n, 0, bytes - n);
++		scatterwalk_map_and_copy(input, req->src, off, n, 0);
++		if (pio) {
++			d->pio_used = max(d->pio_used, bytes);
++			err = rk_pio_chunk(d, ctx, mode, iv, bytes, rctx->decrypt);
++			if (err)
++				break;
++			scatterwalk_map_and_copy(output, req->dst, off, n, 1);
++			continue;
++		}
++		d->dma_in_used = max(d->dma_in_used, bytes);
++		d->dma_out_used = max(d->dma_out_used, bytes);
+ 		if (rctx->decrypt && !alg->ctr)
+ 			memcpy(nextiv, d->in + n - block, block);
+-		rk_flush(d, RK_CRYPTO_BLOCK_FLUSH);
+-		rk_write(d, alg->des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL, mode);
+ 		memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0),
+ 			    ctx->key, ctx->keylen);
+-		memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_IV_0 : RK_CRYPTO_AES_IV_0),
+-			    iv, block);
++		rk_write(d, alg->des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL, mode);
++		if (crypto_skcipher_ivsize(tfm))
++			memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_IV_0 : RK_CRYPTO_AES_IV_0),
++				    iv, block);
+ 		if (alg->ctr)
+ 			memcpy_toio(d->reg + RK_CRYPTO_AES_CNT_0, iv, AES_BLOCK_SIZE);
+ 		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_BTFIFO |
+ 			 RK_CRYPTO_BYTESWAP_BRFIFO | (alg->des ? RK_CRYPTO_DESSEL : 0));
+ 		rk_arm(d, RK_CRYPTO_BCDMA_ERR_ENA | RK_CRYPTO_BCDMA_DONE_ENA);
+ 		rk_write(d, RK_CRYPTO_BRDMAS, d->in_dma);
+-		rk_write(d, RK_CRYPTO_BTDMAS, d->out_dma);
+ 		rk_write(d, RK_CRYPTO_BRDMAL, bytes / 4);
++		rk_write(d, RK_CRYPTO_BTDMAS, d->out_dma);
+ 		dma_wmb();
+ 		rk_trace_once(d, "cipher: DMA mode=%x bytes=%u\n", mode, bytes);
+ 		rk_dma_start(d, RK_CRYPTO_BLOCK_START);
+@@ -402,6 +694,19 @@
+ 		rk_trace_once(d, "cipher: IRQ result %d\n", err);
+ 		if (err)
+ 			break;
++		/* Do not clear/reuse coherent storage before the DMA controller
++		 * releases START, even after its completion IRQ.
++		 */
++		{
++			u32 status;
++
++			err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, status,
++				!(status & RK_CRYPTO_BLOCK_START), 1, 10000);
++			if (err) {
++				rk_abort(d, err);
++				break;
++			}
++		}
+ 		if (alg->ctr) {
+ 			unsigned int b;
+ 
+@@ -418,7 +723,7 @@
+ 		memcpy(req->iv, iv, block);
+ 	memzero_explicit(iv, sizeof(iv));
+ 	memzero_explicit(nextiv, sizeof(nextiv));
+-	rk_end(d);
++	rk_end(d, pio);
+ finish:
+ 	local_bh_disable();
+ 	crypto_finalize_skcipher_request(engine, req, err);
+@@ -466,7 +771,9 @@
+ {
+ 	struct rk3128_hash_ctx *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(req));
+ 
+-	if (!req->nbytes)
++	if (!req->nbytes || (fallback_bytes && req->nbytes <
++	    max_t(unsigned int, fallback_bytes,
++		  ctx->alg->mode == RK_CRYPTO_HASH_SHA256 ? SZ_4K : SZ_16K)))
+ 		return crypto_ahash_digest(rk_fallback(req));
+ 	if (sg_nents_for_len(req->src, req->nbytes) < 0)
+ 		return -EINVAL;
+@@ -482,6 +789,10 @@
+ 					 CRYPTO_ALG_NEED_FALLBACK);
+ 	if (IS_ERR(ctx->fallback))
+ 		return PTR_ERR(ctx->fallback);
++	if (crypto_ahash_statesize(ctx->fallback) != crypto_ahash_statesize(tfm)) {
++		crypto_free_ahash(ctx->fallback);
++		return -EINVAL;
++	}
+ 	crypto_ahash_set_reqsize(tfm, sizeof(struct rk3128_hash_req) +
+ 				crypto_ahash_reqsize(ctx->fallback));
+ 	return 0;
+@@ -516,7 +827,8 @@
+ 	rk_write(d, RK_CRYPTO_HASH_MSG_LEN, req->nbytes);
+ 	for (off = 0; off < req->nbytes; off += n) {
+ 		n = min_t(unsigned int, RK_CHUNK, req->nbytes - off);
+-		memset(d->in, 0, round_up(n, 4));
++		d->dma_in_used = max(d->dma_in_used, round_up(n, 4));
++		memset(d->in + n, 0, round_up(n, 4) - n);
+ 		scatterwalk_map_and_copy(d->in, req->src, off, n, 0);
+ 		rk_arm(d, RK_CRYPTO_HRDMA_ERR_ENA | RK_CRYPTO_HRDMA_DONE_ENA);
+ 		rk_write(d, RK_CRYPTO_HRDMAS, d->in_dma);
+@@ -536,7 +848,7 @@
+ 	for (i = 0; i < crypto_ahash_digestsize(tfm); i += 4)
+ 		put_unaligned_le32(readl(d->reg + RK_CRYPTO_HASH_DOUT_0 + i), req->result + i);
+ end:
+-	rk_end(d);
++	rk_end(d, false);
+ finish:
+ 	local_bh_disable();
+ 	crypto_finalize_hash_request(engine, req, err);
+@@ -546,8 +858,8 @@
+ 
+ #define RK_CIPHER(_name, _id, _bs, _iv, _min, _max, _mode, _des, _ctr) \
+ 	{ .alg = { .base = { .base = { .cra_name = _name, \
+-	.cra_driver_name = _id "-rk3128", .cra_priority = 1, \
+-	.cra_flags = CRYPTO_ALG_ASYNC, .cra_blocksize = _bs, \
++	.cra_driver_name = _id "-rk3128", .cra_priority = _des ? 400 : 1, \
++	.cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK, .cra_blocksize = _bs, \
+ 	.cra_ctxsize = sizeof(struct rk3128_cipher_ctx), .cra_module = THIS_MODULE }, \
+ 	.init = rk_cipher_init, .exit = rk_cipher_exit, .setkey = rk_setkey, \
+ 	.encrypt = rk_encrypt, .decrypt = rk_decrypt, .ivsize = _iv, \
+@@ -564,11 +876,6 @@
+ 		  RK_CRYPTO_TDES_SELECT, true, false),
+ 	RK_CIPHER("cbc(des3_ede)", "cbc-des3-ede", 8, 8, 24, 24,
+ 		  RK_CRYPTO_TDES_SELECT | RK_CRYPTO_TDES_CHAINMODE_CBC, true, false),
+-	RK_CIPHER("ecb(des3_eee)", "ecb-des3-eee", 8, 0, 24, 24,
+-		  RK_CRYPTO_TDES_SELECT | RK_CRYPTO_TDES_EEE, true, false),
+-	RK_CIPHER("cbc(des3_eee)", "cbc-des3-eee", 8, 8, 24, 24,
+-		  RK_CRYPTO_TDES_SELECT | RK_CRYPTO_TDES_EEE | RK_CRYPTO_TDES_CHAINMODE_CBC,
+-		  true, false),
+ };
+ 
+ #define RK_HASH(_name, _size, _state, _mode) \
+@@ -578,7 +885,7 @@
+ 	.init_tfm = rk_hash_init_tfm, .exit_tfm = rk_hash_exit_tfm, \
+ 	.halg = { .digestsize = _size, .statesize = sizeof(_state), \
+ 	.base = { .cra_name = _name, .cra_driver_name = _name "-rk3128", \
+-	.cra_priority = 1, .cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK, \
++	.cra_priority = 400, .cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK, \
+ 	.cra_blocksize = 64, .cra_ctxsize = sizeof(struct rk3128_hash_ctx), \
+ 	.cra_module = THIS_MODULE } } }, .op.do_one_request = rk_hash_run }, .mode = _mode }
+ 
+@@ -588,6 +895,22 @@
+ 	RK_HASH("sha256", SHA256_DIGEST_SIZE, struct sha256_state, RK_CRYPTO_HASH_SHA256),
+ };
+ 
++/* The fallback owns the opaque streaming state format. In 7.3 the software
++ * hash state includes a partial-byte marker beyond the legacy context struct.
++ */
++static int rk_hash_statesize(struct rk3128_hash *hash)
++{
++	struct crypto_ahash *fallback;
++
++	fallback = crypto_alloc_ahash(hash->alg.base.halg.base.cra_name, 0,
++				      CRYPTO_ALG_NEED_FALLBACK);
++	if (IS_ERR(fallback))
++		return PTR_ERR(fallback);
++	hash->alg.base.halg.statesize = crypto_ahash_statesize(fallback);
++	crypto_free_ahash(fallback);
++	return 0;
++}
++
+ static void rk_unregister(struct rk3128_dev *d, unsigned int nc, unsigned int nh)
+ {
+ 	while (nh--)
+@@ -618,60 +941,593 @@
+ 		return 0;
+ 	}
+ 	pm_runtime_disable(d->dev);
++	if (d->lifetime_ref) {
++		pm_runtime_put_noidle(d->dev);
++		d->lifetime_ref = false;
++	}
+ 	if (!pm_runtime_status_suspended(d->dev))
+ 		rk_suspend(d->dev);
+ 	crypto_engine_exit(d->engine);
+ 	return err;
+ }
+ 
+-/* Deliberately outside crypto API: exactly one start, 64 zero bytes. */
+-static int rk_hash_probe(struct rk3128_dev *d)
++/* Explicit diagnostic observations, never registered algorithms. A complete
++ * but wrong public result is recorded and can be followed by the next row;
++ * timeout/IRQ/control failure latches the usual refusal and stops the matrix.
++ */
++static int rk_des_map_probe(struct rk3128_dev *d)
++{
++	static const u8 key[8] = { 0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1 };
++	static const u8 block[8] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
++	static const unsigned int lengths[] = { 8, 16, 32, 8 };
++	struct crypto_skcipher *sw;
++	struct skcipher_request *req;
++	struct scatterlist src, dst;
++	u8 *plain, *expected;
++	u32 v, conf;
++	unsigned int row, i, n;
++	int err;
++
++	sw = crypto_alloc_skcipher("ecb(des)", 0, CRYPTO_ALG_ASYNC);
++	if (IS_ERR(sw))
++		return PTR_ERR(sw);
++	req = skcipher_request_alloc(sw, GFP_KERNEL);
++	if (!req) {
++		err = -ENOMEM;
++		goto free_sw;
++	}
++	plain = kmalloc(64, GFP_KERNEL);
++	if (!plain) {
++		err = -ENOMEM;
++		goto free_req;
++	}
++	expected = plain + 32;
++	skcipher_request_set_callback(req, 0, NULL, NULL);
++	err = crypto_skcipher_setkey(sw, key, sizeof(key));
++	if (err)
++		goto free_plain;
++	err = rk_begin(d);
++	if (err)
++		goto free_plain;
++	for (row = 0; row < ARRAY_SIZE(lengths); row++) {
++		n = lengths[row];
++		for (i = 0; i < n; i++)
++			plain[i] = block[i % 8] ^ ((i / 8) * 0x11);
++		sg_init_one(&src, plain, n);
++		sg_init_one(&dst, expected, n);
++		skcipher_request_set_crypt(req, &src, &dst, n, NULL);
++		err = crypto_skcipher_encrypt(req);
++		if (err)
++			break;
++		memcpy(d->in, plain, n);
++		memset(d->out, 0xa5, 128);
++		for (i = 0; i < sizeof(key); i += 4)
++			rk_write(d, RK_CRYPTO_TDES_KEY1_0 + i, get_unaligned_le32(key + i));
++		rk_write(d, RK_CRYPTO_TDES_CTRL, RK_CRYPTO_TDES_FIFO_MODE |
++			 RK_CRYPTO_TDES_BYTESWAP_KEY | RK_CRYPTO_TDES_BYTESWAP_IV);
++		conf = RK_CRYPTO_DESSEL | RK_CRYPTO_BYTESWAP_BRFIFO;
++		if (row != 3)
++			conf |= RK_CRYPTO_BYTESWAP_BTFIFO;
++		rk_write(d, RK_CRYPTO_CONF, conf);
++		rk_arm(d, RK_CRYPTO_BCDMA_ERR_ENA | RK_CRYPTO_BCDMA_DONE_ENA);
++		rk_write(d, RK_CRYPTO_BRDMAS, d->in_dma);
++		rk_write(d, RK_CRYPTO_BRDMAL, n / 4);
++		rk_write(d, RK_CRYPTO_BTDMAS, d->out_dma + 64);
++		dma_wmb();
++		dev_info(d->dev, "DES map row=%u bytes=%u src=%pad dst=%08x words=%u conf=%08x ctrl=%08x; START\n",
++			 row, n, &d->in_dma, readl(d->reg + RK_CRYPTO_BTDMAS),
++			 readl(d->reg + RK_CRYPTO_BRDMAL), readl(d->reg + RK_CRYPTO_CONF),
++			 readl(d->reg + RK_CRYPTO_CTRL));
++		rk_dma_start(d, RK_CRYPTO_BLOCK_START);
++		dev_info(d->dev, "DES map row=%u START returned\n", row);
++		err = rk_wait(d, RK_CRYPTO_BCDMA_DONE_INT);
++		if (err)
++			break;
++		err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, v,
++					 !(v & RK_CRYPTO_BLOCK_START), 10, 10000);
++		if (err) {
++			rk_abort(d, err);
++			break;
++		}
++		dma_rmb();
++		if (row == 3)
++			for (i = 0; i < n; i += 4)
++				put_unaligned_be32(get_unaligned_le32(expected + i), expected + i);
++		dev_info(d->dev, "DES map row=%u result=%*phN expected=%*phN raw=%*phN before_ok=%u after_ok=%u ctrl=%08x\n",
++			 row, n, d->out + 64, n, expected, n + 32, d->out + 48,
++			 !memchr_inv(d->out + 48, 0xa5, 16),
++			 !memchr_inv(d->out + 64 + n, 0xa5, 16), v);
++	}
++	dev_info(d->dev, "DES mapping finished rows=%u err=%d; no accepted APIs\n", row, err);
++	/* Public diagnostic buffers stay private/pinned through reboot. */
++	pm_runtime_put_noidle(d->dev);
++	mutex_unlock(&d->lock);
++free_plain:
++	kfree_sensitive(plain);
++free_req:
++	skcipher_request_free(req);
++free_sw:
++	crypto_free_skcipher(sw);
++	return err;
++}
++
++/* No DMA whatsoever: reset only the PIO core between finite experiments.
++ * Unlike DMA timeouts, these deliberately observed PIO status timeouts may be
++ * followed by another PIO row. Admission forbids hash/cipher DMA and APIs.
++ */
++static int rk_pio_matrix(struct rk3128_dev *d)
++{
++	static const u8 plain[16] = {
++		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
++		0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
++	};
++	static const u8 expected[16] = {
++		0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
++		0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a,
++	};
++	static const u8 des_key[8] = { 0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1 };
++	static const u8 des_plain[8] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
++	static const u8 des_expected[8] = { 0x85, 0xe8, 0x13, 0x54, 0x0f, 0x0a, 0xb4, 0x05 };
++	u8 key[16], result[16];
++	unsigned int row, i, passed = 0;
++	u32 mode, status, ctrl, ints, control, din, dout, keyreg, sts, start;
++	bool des, input_first, flush, change;
++	int err = rk_begin(d), poll;
++
++	if (err)
++		return err;
++	if (d->dma_started) {
++		err = -EINVAL;
++		goto out;
++	}
++	for (i = 0; i < sizeof(key); i++)
++		key[i] = i;
++	rk_irq_off(d);
++	for (row = 0; row < 9; row++) {
++		des = row == 8;
++		input_first = row & 2;
++		flush = row & 4;
++		change = !(row & 1);
++		dev_info(d->dev, "PIO row=%u des=%u input_first=%u flush=%u keychange=%u: reset with clocks held\n",
++			 row, des, input_first, flush, change);
++		err = reset_control_assert(d->reset);
++		if (err)
++			goto out;
++		udelay(10);
++		err = reset_control_deassert(d->reset);
++		if (err)
++			goto out;
++		if (flush)
++			rk_flush(d, RK_CRYPTO_BLOCK_FLUSH);
++		control = des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL;
++		din = des ? RK_CRYPTO_TDES_DIN_0 : RK_CRYPTO_AES_DIN_0;
++		dout = des ? RK_CRYPTO_TDES_DOUT_0 : RK_CRYPTO_AES_DOUT_0;
++		keyreg = des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0;
++		sts = des ? RK_CRYPTO_TDES_STS : RK_CRYPTO_AES_STS;
++		start = des ? RK_CRYPTO_TDES_START : RK_CRYPTO_AES_START;
++		mode = des ? RK_CRYPTO_TDES_BYTESWAP_KEY | RK_CRYPTO_TDES_BYTESWAP_IV |
++			     RK_CRYPTO_TDES_BYTESWAP_DI | RK_CRYPTO_TDES_BYTESWAP_DO :
++			     RK_CRYPTO_AES_BYTESWAP_KEY | RK_CRYPTO_AES_BYTESWAP_IV |
++			     RK_CRYPTO_AES_BYTESWAP_DI | RK_CRYPTO_AES_BYTESWAP_DO |
++			     (change ? RK_CRYPTO_AES_KEY_CHANGE : 0);
++		if (input_first || des)
++			for (i = 0; i < (des ? 8 : 16); i += 4)
++				rk_write(d, din + i,
++					 get_unaligned_le32((des ? des_plain : plain) + i));
++		for (i = 0; i < (des ? 8 : 16); i += 4)
++			rk_write(d, keyreg + i, get_unaligned_le32((des ? des_key : key) + i));
++		rk_write(d, control, mode);
++		if (!input_first && !des)
++			for (i = 0; i < 16; i += 4)
++				rk_write(d, din + i, get_unaligned_le32(plain + i));
++		rk_write(d, RK_CRYPTO_INTENA, 3);
++		dev_info(d->dev, "PIO row=%u before START: mode=%08x key0=%08x din0=%08x ctrl=%08x\n",
++			 row, readl(d->reg + control), readl(d->reg + keyreg),
++			 readl(d->reg + din), readl(d->reg + RK_CRYPTO_CTRL));
++		rk_dma_start(d, start); /* conservative pin, but this starts PIO only */
++		poll = readl_poll_timeout(d->reg + sts, status, status & BIT(0), 10, 10000);
++		ctrl = readl(d->reg + RK_CRYPTO_CTRL);
++		ints = readl(d->reg + RK_CRYPTO_INTSTS);
++		for (i = 0; i < (des ? 8 : 16); i += 4)
++			put_unaligned_le32(readl(d->reg + dout + i), result + i);
++		if (!poll && !memcmp(result, des ? des_expected : expected, des ? 8 : 16))
++			passed++;
++		dev_info(d->dev, "PIO row=%u poll=%d status=%08x ctrl=%08x ints=%08x result=%*phN correct=%u\n",
++			 row, poll, status, ctrl, ints, des ? 8 : 16, result,
++			 !memcmp(result, des ? des_expected : expected, des ? 8 : 16));
++	}
++	dev_info(d->dev, "PIO matrix completed rows=9 accepted=%u; no DMA or APIs\n", passed);
++out:
++	/* Even on success, no unbind/reset/gate after leaving the diagnostic. */
++	d->broken = true;
++	rk_irq_off(d);
++	mutex_unlock(&d->lock);
++	pm_runtime_put_noidle(d->dev);
++	return err;
++}
++
++/* Exclusive PIO known-answer matrix; reset only with clocks held and no DMA. */
++static int rk_native_modes_probe(struct rk3128_dev *d)
+ {
+-	static const u8 expected[SHA256_DIGEST_SIZE] = {
+-		0xf5, 0xa5, 0xfd, 0x42, 0xd1, 0x6a, 0x20, 0x30,
+-		0x27, 0x98, 0xef, 0x6e, 0xd3, 0x09, 0x97, 0x9b,
+-		0x43, 0x00, 0x3d, 0x23, 0x20, 0xd9, 0xf0, 0xe8,
+-		0xea, 0x98, 0x31, 0xa9, 0x27, 0x59, 0xfb, 0x4b,
++	static const u8 key[16] = {
++		0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
++		0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+ 	};
+-	u8 digest[SHA256_DIGEST_SIZE];
+-	u32 v;
+-	unsigned int i;
++	static const u8 plain[16] = {
++		0x6b, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96,
++		0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93, 0x17, 0x2a,
++	};
++	static const u8 cbc[16] = {
++		0x76, 0x49, 0xab, 0xac, 0x81, 0x19, 0xb2, 0x46,
++		0xce, 0xe9, 0x8e, 0x9b, 0x12, 0xe9, 0x19, 0x7d,
++	};
++	static const u8 ctr[16] = {
++		0x87, 0x4d, 0x61, 0x91, 0xb6, 0x20, 0xe3, 0x26,
++		0x1b, 0xef, 0x68, 0x64, 0x99, 0x0d, 0xb6, 0xce,
++	};
++	u8 iv[16], result[16], readback[16], countback[16];
++	u32 mode, status, ivreg;
++	unsigned int row, i, good = 0;
++	bool counter, swap, after;
+ 	int err = rk_begin(d);
+ 
+ 	if (err)
+ 		return err;
+-	memset(d->in, 0, 64);
+-	rk_flush(d, RK_CRYPTO_HASH_FLUSH);
+-	memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
+-	rk_write(d, RK_CRYPTO_HASH_CTRL, RK_CRYPTO_HASH_SHA256 | RK_CRYPTO_HASH_SWAP_DO);
+-	rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_HRFIFO);
+-	rk_write(d, RK_CRYPTO_HASH_MSG_LEN, 64);
+-	rk_arm(d, RK_CRYPTO_HRDMA_ERR_ENA | RK_CRYPTO_HRDMA_DONE_ENA);
+-	rk_write(d, RK_CRYPTO_HRDMAS, d->in_dma);
+-	rk_write(d, RK_CRYPTO_HRDMAL, 16);
+-	dma_wmb();
+-	dev_info(d->dev, "single hash DMA: src=%pad bytes=64 words=16 ctrl=%08x conf=%08x\n",
+-		 &d->in_dma, readl(d->reg + RK_CRYPTO_CTRL),
+-		 readl(d->reg + RK_CRYPTO_CONF));
+-	rk_dma_start(d, RK_CRYPTO_HASH_START);
+-	err = rk_wait(d, RK_CRYPTO_HRDMA_DONE_INT);
++	rk_irq_off(d);
++	for (row = 0; row < 8; row++) {
++		counter = row & 4;
++		swap = row & 1;
++		after = row & 2;
++		err = reset_control_assert(d->reset);
++		if (err)
++			break;
++		udelay(10);
++		err = reset_control_deassert(d->reset);
++		if (err)
++			break;
++		for (i = 0; i < 16; i++)
++			iv[i] = counter ? 0xf0 + i : i;
++		mode = RK_CRYPTO_AES_BYTESWAP_KEY | RK_CRYPTO_AES_BYTESWAP_DI |
++			RK_CRYPTO_AES_BYTESWAP_DO | RK_CRYPTO_AES_KEY_CHANGE |
++			(counter ? RK_CRYPTO_AES_CTR_MODE : RK_CRYPTO_AES_CBC_MODE);
++		if (swap)
++			mode |= counter ? RK_CRYPTO_AES_BYTESWAP_CNT : RK_CRYPTO_AES_BYTESWAP_IV;
++		ivreg = counter ? RK_CRYPTO_AES_CNT_0 : RK_CRYPTO_AES_IV_0;
++		for (i = 0; i < 16; i += 4)
++			rk_write(d, RK_CRYPTO_AES_KEY_0 + i, get_unaligned_le32(key + i));
++		if (!after)
++			for (i = 0; i < 16; i += 4)
++				rk_write(d, ivreg + i, get_unaligned_le32(iv + i));
++		rk_write(d, RK_CRYPTO_AES_CTRL, mode);
++		if (after)
++			for (i = 0; i < 16; i += 4)
++				rk_write(d, ivreg + i, get_unaligned_le32(iv + i));
++		for (i = 0; i < 16; i += 4)
++			rk_write(d, RK_CRYPTO_AES_DIN_0 + i, get_unaligned_le32(plain + i));
++		rk_dma_start(d, RK_CRYPTO_AES_START);
++		err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, status,
++					 !(status & RK_CRYPTO_AES_START), 1, 10000);
++		if (err) {
++			rk_abort(d, err);
++			break;
++		}
++		for (i = 0; i < 16; i += 4) {
++			put_unaligned_le32(readl(d->reg + RK_CRYPTO_AES_DOUT_0 + i), result + i);
++			put_unaligned_le32(readl(d->reg + RK_CRYPTO_AES_IV_0 + i), readback + i);
++			put_unaligned_le32(readl(d->reg + RK_CRYPTO_AES_CNT_0 + i), countback + i);
++		}
++		good += !memcmp(result, counter ? ctr : cbc, 16);
++		dev_info(d->dev, "native PIO row=%u ctr=%u swap=%u after_mode=%u mode=%x result=%*phN correct=%u iv=%*phN count=%*phN\n",
++			row, counter, swap, after, mode, 16, result,
++			!memcmp(result, counter ? ctr : cbc, 16), 16, readback, 16, countback);
++	}
++	dev_info(d->dev, "native PIO matrix rows=%u correct=%u err=%d; no DMA/APIs\n",
++		 row, good, err);
++	/* Public values only. Do not reuse or reset the device after this probe. */
++	d->broken = true;
++	rk_irq_off(d);
++	mutex_unlock(&d->lock);
++	pm_runtime_put_noidle(d->dev);
++	return err;
++}
++
++/* Exclusive public-vector progression: no block flush, alias or power-down. */
++static int rk_aes_dma_step(struct rk3128_dev *d, bool matrix)
++{
++	static const u8 fips[16] = {
++		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
++		0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
++	};
++	struct crypto_skcipher *sw = NULL;
++	struct skcipher_request *req = NULL;
++	struct scatterlist src, dst;
++	u8 *input, *expected, key[32], iv[16], sw_iv[16], observed[16];
++	unsigned int row, i, bytes, keylen, rows = matrix ? 10 : probe_count;
++	u32 mode, status, control, keyreg, ivreg;
++	const char *name;
++	bool des, cbc, ctr;
++	int err;
++
++	if (!normal_dma || d->in_dma < BIT_ULL(31) ||
++	    d->out_dma < BIT_ULL(31) || d->in_dma == d->out_dma)
++		return -ERANGE;
++	input = kmalloc(2 * RK_CHUNK, GFP_KERNEL);
++	if (!input)
++		return -ENOMEM;
++	expected = input + RK_CHUNK;
++	err = rk_begin(d);
+ 	if (err)
+-		goto out;
+-	err = readl_poll_timeout(d->reg + RK_CRYPTO_HASH_STS, v,
+-				 v & RK_CRYPTO_HASH_DONE, 10, 10000);
+-	if (err) {
+-		rk_abort(d, err);
+-		goto out;
++		goto free_input;
++	for (row = 0; row < rows; row++) {
++		des = matrix && row >= 8;
++		cbc = matrix && ((row >= 2 && row <= 4) || des);
++		ctr = matrix && row >= 5 && row <= 7;
++		keylen = !matrix ? 16 : des ? (row == 8 ? 8 : 24) :
++			 row < 2 ? 24 + 8 * row : 16 + 8 * ((row - 2) % 3);
++		bytes = matrix ? (des ? 8 : 16) : minimal_bytes;
++		name = des ? (row == 8 ? "cbc(des)" : "cbc(des3_ede)") :
++			ctr ? "ctr-aes-lib" : cbc ? "cbc-aes-lib" : "ecb-aes-lib";
++		sw = crypto_alloc_skcipher(name, 0,
++			CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK);
++		if (IS_ERR(sw)) {
++			err = PTR_ERR(sw);
++			sw = NULL;
++			break;
++		}
++		req = skcipher_request_alloc(sw, GFP_KERNEL);
++		if (!req) {
++			err = -ENOMEM;
++			break;
++		}
++		skcipher_request_set_callback(req, 0, NULL, NULL);
++		for (i = 0; i < keylen; i++)
++			key[i] = i + (matrix ? 0x21 : row);
++		for (i = 0; i < sizeof(iv); i++)
++			iv[i] = ctr ? 0xf0 + i : i;
++		memcpy(sw_iv, iv, sizeof(iv));
++		for (i = 0; i < bytes; i++)
++			input[i] = fips[i % 16] ^ row ^ (i / 16);
++		err = crypto_skcipher_setkey(sw, key, keylen);
++		if (err)
++			break;
++		sg_init_one(&src, input, bytes);
++		sg_init_one(&dst, expected, bytes);
++		skcipher_request_set_crypt(req, &src, &dst, bytes, sw_iv);
++		err = crypto_skcipher_encrypt(req);
++		if (err)
++			break;
++		memcpy(d->in, input, bytes);
++		memset(d->out, 0xa5, bytes);
++		mode = des ? RK_CRYPTO_TDES_FIFO_MODE | RK_CRYPTO_TDES_BYTESWAP_KEY |
++			RK_CRYPTO_TDES_BYTESWAP_IV | RK_CRYPTO_TDES_CHAINMODE_CBC |
++			(row == 9 ? RK_CRYPTO_TDES_SELECT : 0) :
++			RK_CRYPTO_AES_FIFO_MODE | RK_CRYPTO_AES_KEY_CHANGE |
++			RK_CRYPTO_AES_BYTESWAP_KEY | RK_CRYPTO_AES_BYTESWAP_IV |
++			(keylen == 24 ? RK_CRYPTO_AES_192BIT_key :
++			 keylen == 32 ? RK_CRYPTO_AES_256BIT_key : 0) |
++			(cbc ? RK_CRYPTO_AES_CBC_MODE : ctr ? RK_CRYPTO_AES_CTR_MODE |
++			 RK_CRYPTO_AES_BYTESWAP_CNT : 0);
++		control = des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL;
++		keyreg = des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0;
++		ivreg = des ? RK_CRYPTO_TDES_IV_0 : ctr ? RK_CRYPTO_AES_CNT_0 : RK_CRYPTO_AES_IV_0;
++		for (i = 0; i < keylen; i += 4)
++			rk_write(d, keyreg + i, get_unaligned_le32(key + i));
++		rk_write(d, control, mode);
++		if (cbc || ctr)
++			for (i = 0; i < (des ? 8 : 16); i += 4)
++				rk_write(d, ivreg + i, get_unaligned_le32(iv + i));
++		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_BRFIFO |
++			 RK_CRYPTO_BYTESWAP_BTFIFO | (des ? RK_CRYPTO_DESSEL : 0));
++		rk_arm(d, RK_CRYPTO_BCDMA_ERR_ENA | RK_CRYPTO_BCDMA_DONE_ENA);
++		rk_write(d, RK_CRYPTO_BRDMAS, d->in_dma);
++		rk_write(d, RK_CRYPTO_BRDMAL, bytes / 4);
++		rk_write(d, RK_CRYPTO_BTDMAS, d->out_dma);
++		dma_wmb();
++		dev_info(d->dev, "DMA step row=%u %s key=%u bytes=%u mode=%x; START\n",
++			 row, name, keylen, bytes, mode);
++		rk_dma_start(d, RK_CRYPTO_BLOCK_START);
++		err = rk_wait(d, RK_CRYPTO_BCDMA_DONE_INT);
++		if (err)
++			break;
++		err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, status,
++			!(status & RK_CRYPTO_BLOCK_START), 1, 10000);
++		if (err || memcmp(d->out, expected, bytes)) {
++			dev_err(d->dev, "DMA step row=%u err=%d got=%*phN expected=%*phN\n",
++				row, err, min(bytes, 32U), d->out, min(bytes, 32U), expected);
++			err = rk_abort(d, err ?: -EBADMSG);
++			break;
++		}
++		for (i = 0; i < (des ? 8 : 16); i += 4)
++			put_unaligned_le32(readl(d->reg + ivreg + i), observed + i);
++		dev_info(d->dev, "DMA step row=%u PASS output=%*phN iv_count=%*phN\n",
++			 row, min(bytes, 16U), d->out, des ? 8 : 16, observed);
++		skcipher_request_free(req);
++		crypto_free_skcipher(sw);
++		req = NULL;
++		sw = NULL;
+ 	}
+-	for (i = 0; i < sizeof(digest); i += 4)
+-		put_unaligned_le32(readl(d->reg + RK_CRYPTO_HASH_DOUT_0 + i), digest + i);
+-	err = memcmp(digest, expected, sizeof(digest)) ? -EIO : 0;
+-	dev_info(d->dev, "single hash DMA: %s digest=%*phN\n",
+-		 err ? "FAIL" : "PASS", (int)sizeof(digest), digest);
+-	if (err)
++	if (err && !d->broken && d->dma_started)
+ 		rk_abort(d, err);
++	dev_info(d->dev, "AES DMA step %s transfers=%u bytes=%u matrix=%u err=%d\n",
++		 err ? "FAIL" : "PASS", row, minimal_bytes, matrix, err);
++	/* Public coherent buffers remain pinned; no post-DMA flush or reset. */
++	pm_runtime_put_noidle(d->dev);
++	mutex_unlock(&d->lock);
++free_input:
++	skcipher_request_free(req);
++	if (sw)
++		crypto_free_skcipher(sw);
++	kfree_sensitive(input);
++	return err;
++}
++
++/* FIPS 197 AES128 example: fixed public key/plaintext, no production data. */
++static int rk_cipher_probe(struct rk3128_dev *d, bool pio)
++{
++	static const u8 plain[16] = {
++		0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
++		0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
++	};
++	static const u8 expected[16] = {
++		0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30,
++		0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a,
++	};
++	static const u8 dk[8] = { 0x13, 0x34, 0x57, 0x79, 0x9b, 0xbc, 0xdf, 0xf1 };
++	static const u8 dp[8] = { 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef };
++	static const u8 de[8] = { 0x85, 0xe8, 0x13, 0x54, 0x0f, 0x0a, 0xb4, 0x05 };
++	u8 key[16], result[16];
++	const u8 *input = des_probe ? dp : plain, *expect = des_probe ? de : expected;
++	const char *name = des_probe ? "DES" : "AES";
++	void *output = inplace_probe ? d->in : d->out;
++	dma_addr_t output_dma = inplace_probe ? d->in_dma : d->out_dma;
++	u32 mode, status, control, din, dout, keyreg, start;
++	unsigned int i, bytes = des_probe ? 8 : 16;
++	int err = rk_begin(d);
++
++	if (err)
++		return err;
++	for (i = 0; i < sizeof(key); i++)
++		key[i] = des_probe && i < 8 ? dk[i] : i;
++	if (!minimal_probe)
++		rk_flush(d, RK_CRYPTO_BLOCK_FLUSH);
++	control = des_probe ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL;
++	din = des_probe ? RK_CRYPTO_TDES_DIN_0 : RK_CRYPTO_AES_DIN_0;
++	dout = des_probe ? RK_CRYPTO_TDES_DOUT_0 : RK_CRYPTO_AES_DOUT_0;
++	keyreg = des_probe ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0;
++	start = des_probe ? RK_CRYPTO_TDES_START : RK_CRYPTO_AES_START;
++	mode = des_probe ? RK_CRYPTO_TDES_BYTESWAP_KEY | RK_CRYPTO_TDES_BYTESWAP_IV :
++		RK_CRYPTO_AES_KEY_CHANGE | RK_CRYPTO_AES_BYTESWAP_KEY | RK_CRYPTO_AES_BYTESWAP_IV;
++	if (pio)
++		mode |= des_probe ? RK_CRYPTO_TDES_BYTESWAP_DI | RK_CRYPTO_TDES_BYTESWAP_DO :
++				    RK_CRYPTO_AES_BYTESWAP_DI | RK_CRYPTO_AES_BYTESWAP_DO;
++	else
++		mode |= des_probe ? RK_CRYPTO_TDES_FIFO_MODE : RK_CRYPTO_AES_FIFO_MODE;
++	/* Exact PIO input->key->control order; explicit documented word access. */
++	if (pio)
++		for (i = 0; i < bytes; i += 4)
++			rk_write(d, din + i, get_unaligned_le32(input + i));
++	for (i = 0; i < bytes; i += 4)
++		rk_write(d, keyreg + i, get_unaligned_le32(key + i));
++	rk_write(d, control, mode);
++	if (pio) {
++		dev_info(d->dev, "%s PIO probe: ctrl=%08x mode=%08x; starting one block\n",
++			 name, readl(d->reg + RK_CRYPTO_CTRL), readl(d->reg + control));
++		rk_dma_start(d, start);
++		/* NetBSD independently uses self-clearing START. The board's STS
++		 * DONE stays zero even when all output bytes match (matrix #758).
++		 */
++		err = readl_poll_timeout(d->reg + RK_CRYPTO_CTRL, status,
++					 !(status & start), 10, 10000);
++		if (err) {
++			rk_abort(d, err);
++			goto out;
++		}
++		for (i = 0; i < bytes; i += 4)
++			put_unaligned_le32(readl(d->reg + dout + i), result + i);
++	} else {
++		d->dma_in_used = d->dma_out_used = bytes;
++		memcpy(d->in, input, bytes);
++		if (!inplace_probe)
++			memset(d->out, 0xa5, bytes);
++		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_BRFIFO | RK_CRYPTO_BYTESWAP_BTFIFO |
++			 (des_probe ? RK_CRYPTO_DESSEL : 0));
++		rk_arm(d, RK_CRYPTO_BCDMA_ERR_ENA | RK_CRYPTO_BCDMA_DONE_ENA);
++		/* Match the shipped vendor order: source, word count, destination. */
++		rk_write(d, RK_CRYPTO_BRDMAS, d->in_dma);
++		rk_write(d, RK_CRYPTO_BRDMAL, bytes / 4);
++		rk_write(d, RK_CRYPTO_BTDMAS, output_dma);
++		dma_wmb();
++		dev_info(d->dev, "%s DMA probe: src=%08x dst=%08x words=%u ctrl=%08x mode=%08x conf=%08x minimal=%u; starting\n",
++			 name, readl(d->reg + RK_CRYPTO_BRDMAS), readl(d->reg + RK_CRYPTO_BTDMAS),
++			 readl(d->reg + RK_CRYPTO_BRDMAL), readl(d->reg + RK_CRYPTO_CTRL),
++			 readl(d->reg + control), readl(d->reg + RK_CRYPTO_CONF), minimal_probe);
++		rk_dma_start(d, RK_CRYPTO_BLOCK_START);
++		dev_info(d->dev, "%s DMA probe: START write returned\n", name);
++		err = rk_wait(d, RK_CRYPTO_BCDMA_DONE_INT);
++		if (err)
++			goto out;
++		memcpy(result, output, bytes);
++	}
++	err = memcmp(result, expect, bytes) ? rk_abort(d, -EBADMSG) : 0;
++	dev_info(d->dev, "%s %s probe: %s result=%*phN\n",
++		 name, pio ? "PIO" : "DMA", err ? "FAIL" : "PASS", bytes, result);
+ out:
+-	rk_end(d);
++	if (minimal_probe) {
++		/* Public diagnostic data only, retained privately until reboot.
++		 * Isolate DMA without introducing a post-DMA flush/reset/gate.
++		 */
++		pm_runtime_put_noidle(d->dev);
++		mutex_unlock(&d->lock);
++	} else {
++		rk_end(d, false);
++	}
++	return err;
++}
++
++/* Deliberately outside crypto API: exactly one start, 64 zero bytes. */
++static int rk_hash_probe(struct rk3128_dev *d)
++{
++	struct crypto_shash *sw;
++	struct shash_desc *desc;
++	u8 expected[SHA256_DIGEST_SIZE], digest[SHA256_DIGEST_SIZE];
++	u32 v;
++	unsigned int i, run;
++	int err;
++
++	sw = crypto_alloc_shash("sha256", 0, 0);
++	if (IS_ERR(sw))
++		return PTR_ERR(sw);
++	desc = kzalloc(sizeof(*desc) + crypto_shash_descsize(sw), GFP_KERNEL);
++	if (!desc) {
++		crypto_free_shash(sw);
++		return -ENOMEM;
++	}
++	desc->tfm = sw;
++	err = rk_begin(d);
++	if (err)
++		goto free;
++	d->dma_in_used = probe_bytes;
++	for (run = 0; run < probe_count; run++) {
++		for (i = 0; i < probe_bytes; i++)
++			((u8 *)d->in)[i] = (i * 17 + run * 29) & 255;
++		memset(d->in + probe_bytes, 0, round_up(probe_bytes, 4) - probe_bytes);
++		err = crypto_shash_digest(desc, d->in, probe_bytes, expected);
++		if (err)
++			break;
++		rk_flush(d, RK_CRYPTO_HASH_FLUSH);
++		memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++		rk_write(d, RK_CRYPTO_HASH_CTRL, RK_CRYPTO_HASH_SHA256 | RK_CRYPTO_HASH_SWAP_DO);
++		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_HRFIFO);
++		rk_write(d, RK_CRYPTO_HASH_MSG_LEN, probe_bytes);
++		rk_arm(d, RK_CRYPTO_HRDMA_ERR_ENA | RK_CRYPTO_HRDMA_DONE_ENA);
++		rk_write(d, RK_CRYPTO_HRDMAS, d->in_dma);
++		rk_write(d, RK_CRYPTO_HRDMAL, round_up(probe_bytes, 4) / 4);
++		dma_wmb();
++		dev_info(d->dev, "hash probe %u/%u: src=%pad bytes=%u\n",
++			 run + 1, probe_count, &d->in_dma, probe_bytes);
++		rk_dma_start(d, RK_CRYPTO_HASH_START);
++		err = rk_wait(d, RK_CRYPTO_HRDMA_DONE_INT);
++		if (err)
++			break;
++		err = readl_poll_timeout(d->reg + RK_CRYPTO_HASH_STS, v,
++					 v & RK_CRYPTO_HASH_DONE, 10, 10000);
++		if (err) {
++			rk_abort(d, err);
++			break;
++		}
++		for (i = 0; i < sizeof(digest); i += 4)
++			put_unaligned_le32(readl(d->reg + RK_CRYPTO_HASH_DOUT_0 + i), digest + i);
++		if (memcmp(digest, expected, sizeof(digest))) {
++			err = rk_abort(d, -EIO);
++			break;
++		}
++	}
++	dev_info(d->dev, "hash probe: %s %u transfers of %u bytes\n",
++		 err ? "FAIL" : "PASS", run, probe_bytes);
++	rk_end(d, false);
++free:
++	kfree_sensitive(desc);
++	crypto_free_shash(sw);
+ 	return err;
+ }
+ 
+@@ -682,21 +1538,40 @@
+ 	unsigned int nc = 0, nh = 0;
+ 	int err;
+ 
+-	if (hash_probe && enable_dma)
++	err = rk3128_crypto_ensure_active(dev);
++	if (err)
++		return err;
++	if (!IS_ENABLED(CONFIG_CRYPTO_SELFTESTS_FULL) &&
++	    (native_dma_probe || native_probe || des_map_probe || minimal_probe ||
++	     des_probe || pio_matrix || pio_probe ||
++	     block_probe || inplace_probe || normal_dma || hash_probe))
++		return dev_err_probe(dev, -EPERM,
++				     "diagnostics require the explicit full-test kernel\n");
++	if (fallback_bytes > SZ_64K || dma_stage < 1 || dma_stage > 4 ||
++	    !probe_count || probe_count > 128 ||
++	    !probe_bytes || probe_bytes > RK_CHUNK)
++		return -EINVAL;
++	if (!minimal_bytes || minimal_bytes > RK_CHUNK || minimal_bytes % 16)
++		return -EINVAL;
++	if (native_dma_probe && (hash_probe || pio_probe || block_probe || pio_matrix ||
++		native_probe || des_map_probe || enable_dma || enable_rng))
++		return dev_err_probe(dev, -EINVAL, "native DMA probe must be exclusive\n");
++	if (native_probe && (des_map_probe || hash_probe || pio_probe || block_probe ||
++		pio_matrix || enable_dma || enable_rng))
++		return dev_err_probe(dev, -EINVAL, "native PIO matrix must be exclusive\n");
++	if (des_map_probe && (hash_probe || pio_probe || block_probe || pio_matrix ||
++			      enable_dma || enable_rng || minimal_probe))
++		return dev_err_probe(dev, -EINVAL, "DES mapping must be exclusive\n");
++	if (minimal_probe && (!block_probe || hash_probe || pio_probe || pio_matrix ||
++			      enable_dma || enable_rng))
++		return dev_err_probe(dev, -EINVAL, "minimal probe requires fresh block DMA only\n");
++	if (des_probe && !block_probe && !pio_probe)
++		return -EINVAL;
++	if (pio_matrix && (hash_probe || pio_probe || block_probe || enable_dma || enable_rng))
++		return dev_err_probe(dev, -EINVAL, "PIO matrix must be exclusive\n");
++	if ((hash_probe || pio_probe || block_probe) && (enable_dma || enable_rng))
+ 		return dev_err_probe(dev, -EINVAL,
+ 				     "single hash probe cannot register algorithms\n");
+-	/* Post-DMA reset/clock gating is unaccepted. Pin through reboot. */
+-	if (hash_probe || enable_dma) {
+-		unsigned long flags;
+-		bool pinned;
+-
+-		spin_lock_irqsave(&dev->power.lock, flags);
+-		pinned = !dev->power.runtime_auto;
+-		spin_unlock_irqrestore(&dev->power.lock, flags);
+-		if (!pinned)
+-			return dev_err_probe(dev, -EPERM,
+-					     "pin power/control=on before diagnostic DMA\n");
+-	}
+ 	d = devm_kzalloc(dev, sizeof(*d), GFP_KERNEL);
+ 	if (!d)
+ 		return -ENOMEM;
+@@ -713,8 +1588,9 @@
+ 	if (err)
+ 		return dev_err_probe(dev, err, "clocks\n");
+ 	/* The vendor's clock ceiling; never change a shared parent. */
+-	if (clk_get_rate(d->clks[0].clk) > 150000000)
+-		return dev_err_probe(dev, -EINVAL, "crypto clock exceeds 150 MHz\n");
++	if (clk_get_rate(d->clks[0].clk) != 148500000 ||
++	    clk_get_rate(d->clks[1].clk) != 74250000)
++		return dev_err_probe(dev, -EINVAL, "unmeasured crypto/TRNG clock rates\n");
+ 	d->reset = devm_reset_control_get_exclusive(dev, NULL);
+ 	if (IS_ERR(d->reset))
+ 		return dev_err_probe(dev, PTR_ERR(d->reset), "reset\n");
+@@ -732,7 +1608,7 @@
+ 	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+ 	if (err)
+ 		return err;
+-	if (hash_probe) {
++	if (!normal_dma && of_find_property(dev->of_node, "memory-region", NULL)) {
+ 		err = devm_of_reserved_mem_device_init(dev);
+ 		if (err)
+ 			return dev_err_probe(dev, err, "diagnostic low-DDR pool\n");
+@@ -741,7 +1617,22 @@
+ 	d->out = dmam_alloc_coherent(dev, RK_CHUNK, &d->out_dma, GFP_KERNEL);
+ 	if (!d->in || !d->out)
+ 		return -ENOMEM;
+-	if (hash_probe && (d->in_dma >= BIT_ULL(31) || d->out_dma >= BIT_ULL(31)))
++	/* The diagnostic low-DDR write path hung. Admit cipher DMA only in
++	 * the measured upper-DDR aperture, with physically separate buffers.
++	 * Hash-only diagnostics may still use the verified low-DDR read path.
++	 */
++	if (enable_dma && dma_stage != 1 &&
++	    (!cipher_pio || (des_dma && dma_stage != 2)) &&
++	    (d->in_dma < BIT_ULL(31) || d->out_dma < BIT_ULL(31) ||
++	     d->in_dma == d->out_dma))
++		return dev_err_probe(dev, -ERANGE, "cipher DMA outside validated DDR aperture\n");
++	if (enable_dma && cipher_pio && dma_stage != 1) {
++		d->pio_in = devm_kzalloc(dev, RK_CHUNK, GFP_KERNEL);
++		d->pio_out = devm_kzalloc(dev, RK_CHUNK, GFP_KERNEL);
++		if (!d->pio_in || !d->pio_out)
++			return -ENOMEM;
++	}
++	if (hash_probe && !normal_dma && (d->in_dma >= BIT_ULL(31) || d->out_dma >= BIT_ULL(31)))
+ 		return dev_err_probe(dev, -ERANGE, "probe buffers outside low DDR\n");
+ 	rk_trace(d, "probe: DMA in=%pad out=%pad\n", &d->in_dma, &d->out_dma);
+ 	d->irq = platform_get_irq(pdev, 0);
+@@ -767,11 +1658,46 @@
+ 		goto exit_engine;
+ 	}
+ 	pm_runtime_enable(dev);
+-	if (hash_probe) {
+-		err = rk_hash_probe(d);
++	/* Hold both clocks for the entire binding: no post-DMA runtime gate.
++	 * Normal begin/end calls take/drop only their own extra references.
++	 */
++	err = pm_runtime_resume_and_get(dev);
++	if (err < 0)
++		goto unregister;
++	d->lifetime_ref = true;
++	if (native_dma_probe || (block_probe && minimal_probe && !des_probe && !inplace_probe)) {
++		err = rk_aes_dma_step(d, native_dma_probe);
++		if (err)
++			goto unregister;
++		return 0;
++	}
++	if (native_probe) {
++		err = rk_native_modes_probe(d);
+ 		if (err)
+ 			goto unregister;
+-		dev_info(dev, "single hash diagnostic passed; power/resources pinned until reboot\n");
++		return 0;
++	}
++	if (des_map_probe) {
++		err = rk_des_map_probe(d);
++		if (err)
++			goto unregister;
++		return 0;
++	}
++	if (pio_matrix) {
++		err = rk_pio_matrix(d);
++		if (err)
++			goto unregister;
++		return 0;
++	}
++	if (hash_probe || pio_probe || block_probe) {
++		err = hash_probe ? rk_hash_probe(d) : 0;
++		if (!err && pio_probe)
++			err = rk_cipher_probe(d, true);
++		if (!err && block_probe)
++			err = rk_cipher_probe(d, false);
++		if (err)
++			goto unregister;
++		dev_info(dev, "bounded diagnostic passed; power/resources pinned until reboot\n");
+ 		return 0;
+ 	}
+ 	if (!enable_dma) {
+@@ -780,8 +1706,12 @@
+ 	}
+ 	memcpy(d->ciphers, rk_cipher_templates, sizeof(d->ciphers));
+ 	memcpy(d->hashes, rk_hash_templates, sizeof(d->hashes));
+-	for (; nc < RK_NCIPHER; nc++) {
++	if (dma_stage == 4)
++		memmove(d->ciphers, d->ciphers + 3, 4 * sizeof(d->ciphers[0]));
++	for (; nc < (dma_stage == 1 ? 0 : dma_stage == 2 ? 3 : dma_stage == 4 ? 4 : 7); nc++) {
+ 		d->ciphers[nc].dev = d;
++		d->ciphers[nc].alg.base.base.cra_priority =
++			cipher_pio && !(d->ciphers[nc].des && des_dma) ? 1 : 400;
+ 		rk_trace(d, "probe: register cipher %u\n", nc);
+ 		err = crypto_engine_register_skcipher(&d->ciphers[nc].alg);
+ 		if (err)
+@@ -789,14 +1719,29 @@
+ 	}
+ 	for (; nh < RK_NHASH; nh++) {
+ 		d->hashes[nh].dev = d;
++		err = rk_hash_statesize(&d->hashes[nh]);
++		if (err)
++			goto unregister;
+ 		rk_trace(d, "probe: register hash %u\n", nh);
+ 		err = crypto_engine_register_ahash(&d->hashes[nh].alg);
+ 		if (err)
+ 			goto unregister;
+ 	}
++	if (enable_rng) {
++		d->rng.name = "rk3128-trng";
++		d->rng.init = rk_rng_init;
++		d->rng.cleanup = rk_rng_cleanup;
++		d->rng.read = rk_rng_read;
++		d->rng.quality = RK_RNG_QUALITY;
++		err = hwrng_register(&d->rng);
++		if (err)
++			goto unregister;
++		d->rng_registered = true;
++	}
+ 	d->nc = nc;
+ 	d->nh = nh;
+-	dev_info(dev, "RK3128 crypto v1: %u ciphers, %u hashes, priority 1\n", nc, nh);
++	dev_info(dev, "%u ciphers, %u hashes; DMA priority 400, PIO 1; lifetime clocks\n",
++		 nc, nh);
+ 	return 0;
+ unregister:
+ 	return rk_probe_failed(d, nc, nh, err);
+@@ -809,10 +1754,16 @@
+ {
+ 	struct rk3128_dev *d = platform_get_drvdata(pdev);
+ 
++	if (d->rng_registered)
++		hwrng_unregister(&d->rng);
+ 	rk_unregister(d, d->nc, d->nh);
+ 	/* A DMA start permanently pins this module; only pre-DMA removal is possible. */
+ 	crypto_engine_stop(d->engine);
+ 	pm_runtime_disable(d->dev);
++	if (d->lifetime_ref) {
++		pm_runtime_put_noidle(d->dev);
++		d->lifetime_ref = false;
++	}
+ 	mutex_lock(&d->lock);
+ 	d->broken = true;
+ 	rk_irq_off(d);
+diff --git a/drivers/crypto/Kconfig b/drivers/crypto/Kconfig
+--- a/drivers/crypto/Kconfig
++++ b/drivers/crypto/Kconfig
+@@ -674,10 +674,12 @@
+ 	  Supporting cbc/ecb chainmode, and aes/des/des3_ede cipher mode.
+ 
+ config CRYPTO_DEV_RK3128
+-	tristate "Rockchip RK3128 crypto v1 (unaccepted DMA prototype)"
++	tristate "Rockchip RK3128 crypto v1 and health-tested oscillator"
+ 	depends on OF && (ARCH_ROCKCHIP || COMPILE_TEST)
+-	depends on PM && CRYPTO_SELFTESTS
++	depends on PM && CRYPTO_SELFTESTS && HAS_IOMEM
++	select MFD_SYSCON
+ 	select CRYPTO_ENGINE
++	select HW_RANDOM
+ 	select CRYPTO_AES
+ 	select CRYPTO_DES
+ 	select CRYPTO_LIB_DES
+@@ -686,11 +688,15 @@
+ 	select CRYPTO_SHA256
+ 	select CRYPTO_HASH
+ 	select CRYPTO_SKCIPHER
++	select CRYPTO_ECB
++	select CRYPTO_CBC
++	select CRYPTO_CTR
+ 	help
+-	  Experimental RK3128 AES ECB/CBC/CTR, DES/3DES and hashes.
+-	  The first DMA operation hangs the tested frame; keep its DT node
+-	  disabled. No cipher/hash has passed hardware acceptance.
+-	  PKA is unsupported; the oscillator has a separate exclusive hwrng driver.
++	  RK3128 AES ECB/CBC/CTR, DES/3DES and MD5/SHA1/SHA256 with
++	  the accepted raw oscillator and unchanged continuous health tests.
++	  One owner serializes DMA and oscillator access. Both clocks remain
++	  enabled while bound; no unsafe post-DMA runtime reset/gate is used.
++	  PKA and unaccepted modes are not registered.
+ 	  Uses private coherent DMA buffers, bounded hardware deadlines and
+ 	  a serialized crypto engine. Streaming hashes use software fallback.
+ 
+diff --git a/drivers/char/hw_random/rk3128-rng.c b/drivers/char/hw_random/rk3128-rng.c
+--- a/drivers/char/hw_random/rk3128-rng.c
++++ b/drivers/char/hw_random/rk3128-rng.c
+@@ -13,6 +13,7 @@
+ #include <linux/reset.h>
+ #include <linux/unaligned.h>
+ #include "rk3128-rng-health.h"
++#include "rk3128-rng-pmu.h"
+ 
+ #define RK_RNG_CTRL 0x008
+ #define RK_RNG_START BIT(8)
+@@ -143,6 +144,9 @@
+ 	struct rk3128_rng *r;
+ 	int err;
+ 
++	err = rk3128_crypto_ensure_active(dev);
++	if (err)
++		return err;
+ 	r = devm_kzalloc(dev, sizeof(*r), GFP_KERNEL);
+ 	if (!r)
+ 		return -ENOMEM;
+diff --git a/drivers/char/hw_random/Kconfig b/drivers/char/hw_random/Kconfig
+--- a/drivers/char/hw_random/Kconfig
++++ b/drivers/char/hw_random/Kconfig
+@@ -614,11 +614,13 @@
+ 	tristate "Rockchip RK3128 crypto-v1 oscillator"
+ 	depends on OF && (ARCH_ROCKCHIP || COMPILE_TEST)
+ 	depends on HAS_IOMEM
++	depends on !CRYPTO_DEV_RK3128
++	select MFD_SYSCON
+ 	help
+ 	  Raw oscillator output from RK3128 crypto v1, with continuous
+ 	  repetition-count and adaptive-proportion health tests. Entropy is
+ 	  conservatively credited at 128/1024 after board measurements.
+-	  Claims the whole crypto block: cannot coexist with crypto diagnostics.
++	  Claims the whole crypto block, exclusively of the combined crypto owner.
+ 	  No DMA, cipher/hash PRNG or PKA is used. Module: rk3128-rng.
+ 
+ config HW_RANDOM_ROCKCHIP
+diff --git a/drivers/char/hw_random/rk3128-rng-pmu.h b/drivers/char/hw_random/rk3128-rng-pmu.h
+--- /dev/null
++++ b/drivers/char/hw_random/rk3128-rng-pmu.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef RK3128_RNG_PMU_H
++#define RK3128_RNG_PMU_H
++
++#include <linux/bits.h>
++#include <linux/device.h>
++#include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
++#include <linux/regmap.h>
++
++/* RK312x PMU chapter: crypto request +0xc bit7, idle/ack +0x10 bits7/23.
++ * Check the always-on PMU before ANY crypto-register access. A previous
++ * interrupted diagnostic may have left the master port isolated across reset.
++ * Release only crypto's request, never another domain or power-mode policy.
++ */
++static inline int rk3128_crypto_ensure_active(struct device *dev)
++{
++	struct regmap *pmu;
++	u32 status, request;
++	int err;
++
++	pmu = syscon_regmap_lookup_by_compatible("rockchip,rk3128-pmu");
++	if (IS_ERR(pmu))
++		return dev_err_probe(dev, PTR_ERR(pmu), "crypto PMU syscon\n");
++	err = regmap_read(pmu, 0xc, &request);
++	if (!err)
++		err = regmap_read(pmu, 0x10, &status);
++	if (err)
++		return dev_err_probe(dev, err, "crypto PMU state\n");
++	if (!(request & BIT(7)) && !(status & (BIT(7) | BIT(23))))
++		return 0;
++	err = regmap_update_bits(pmu, 0xc, BIT(7), 0);
++	if (!err)
++		err = regmap_read_poll_timeout(pmu, 0x10, status,
++			!(status & (BIT(7) | BIT(23))), 1, 10000);
++	if (err)
++		return dev_err_probe(dev, err, "crypto remains idled; refusing register access\n");
++	dev_warn(dev, "released retained crypto PMU idle request before probe\n");
++	return 0;
++}
++#endif

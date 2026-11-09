@@ -1,0 +1,210 @@
+Linux port power-off on mains (development record #390): a power-off of last resort that halts
+and waits for the power key.
+
+On the board's wall adapter the SoC cannot cut its own supply: the GPIO3_C7 latch sequence of
+gpio-poweroff runs, nothing happens, and the power-off returns into do_exit() of PID 1, so the
+board panics and panic= reboots it (#357 attempt 28). The vendor 3.10 kernel does no better: its
+kernel_power_off() calls arm_pm_restart('h', "charge") when pm_power_off returns, and this
+u-boot, which has no PMIC and no charger, prints "reboot charge." and boots normally.
+
+This driver registers a SYS_OFF_PRIO_LOW power-off handler (after gpio-poweroff). By the time it
+runs, device_shutdown() has turned the backlight and the display off. It stops the dw_wdt through
+the CRU soft reset (dw_wdt can only be stopped by its reset line, and giving the watchdog node a
+reset would also stop it on every restart through the core's stop-on-reboot), halts, and restarts
+the board once the power key has been released and then pressed for 100 ms. The power key belongs
+to gpio-keys, so it is looked up non-exclusively in the sleepable POWER_OFF_PREPARE stage.
+halt_poweroff.test_restart_s=N restarts it after N s halted (hardware test without a person).
+
+diff -urN a/drivers/power/reset/halt-poweroff.c b/drivers/power/reset/halt-poweroff.c
+--- a/drivers/power/reset/halt-poweroff.c	1969-12-31 18:00:00.000000000 -0600
++++ b/drivers/power/reset/halt-poweroff.c	2026-11-06 17:11:17.211827187 -0600
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Power-off of last resort for boards that cannot cut their own supply: a
++ * clean halt that waits for the power key.
++ *
++ * Some boards only lose power when a battery-side latch drops (gpio-poweroff)
++ * and keep running from a wall adapter whatever the SoC does. Without a
++ * handler that works, a power-off either returns into do_exit() of PID 1 (a
++ * panic, then panic= reboots) or, with no handler at all, becomes a halt that
++ * a running hardware watchdog turns into a reset. This handler runs after
++ * every other one (SYS_OFF_PRIO_LOW): by then device_shutdown() has already
++ * switched the backlight and the display off. It stops the watchdog through
++ * its reset line (dw_wdt cannot be stopped otherwise, and the core's
++ * stop-on-reboot is not wanted on a restart), then holds the CPU until the
++ * power key is released and pressed again, and restarts the board.
++ *
++ * development record #390, docs/RK3128-LINUX.md "PMIC (RT5036)".
++ */
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/kernel.h>
++#include <linux/module.h>
++#include <linux/moduleparam.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/reboot.h>
++#include <linux/reset.h>
++
++#define POLL_MS		10
++#define RELEASE_MS	100	/* the key must read released this long first */
++#define PRESS_MS	100	/* then pressed this long */
++#define LOG_EVERY_MS	10000
++
++/* Test only: restart by itself after this many seconds halted (0 = never). */
++static unsigned int test_restart_s;
++module_param(test_restart_s, uint, 0444);
++MODULE_PARM_DESC(test_restart_s, "restart after this many seconds halted (test only, 0 = wait for the key)");
++
++struct halt_poweroff {
++	struct device *dev;
++	struct reset_control *wdt_rst;
++	struct gpio_desc *key;
++};
++
++/*
++ * Sleepable: runs before the CPUs stop. The power key belongs to gpio-keys,
++ * so it is looked up only now, non-exclusively, and never released.
++ */
++static int halt_poweroff_prepare(struct sys_off_data *data)
++{
++	struct halt_poweroff *hp = data->cb_data;
++	struct gpio_desc *key;
++
++	key = gpiod_get_optional(hp->dev, "power-key", GPIOD_IN | GPIOD_FLAGS_BIT_NONEXCLUSIVE);
++	if (IS_ERR(key))
++		dev_warn(hp->dev, "no power key (%pe): only a power cycle restarts the board\n",
++			 key);
++	else
++		hp->key = key;
++	return NOTIFY_DONE;
++}
++
++static int halt_poweroff_do(struct sys_off_data *data)
++{
++	struct halt_poweroff *hp = data->cb_data;
++	unsigned int released = 0, pressed = 0;
++	unsigned long ms = 0;
++	bool armed = false;
++
++	if (hp->wdt_rst) {
++		reset_control_assert(hp->wdt_rst);
++		udelay(10);	/* atomic context: no usleep_range() */
++		reset_control_deassert(hp->wdt_rst);
++	}
++	pr_emerg("halt-poweroff: the supply stays on: halted, watchdog %s, %s\n",
++		 hp->wdt_rst ? "stopped" : "left running",
++		 hp->key ? "press the power key to start again" : "power cycle to start again");
++
++	for (;;) {
++		mdelay(POLL_MS);
++		ms += POLL_MS;
++
++		if (hp->key) {
++			if (gpiod_get_value(hp->key) > 0) {
++				released = 0;
++				pressed += POLL_MS;
++				if (armed && pressed >= PRESS_MS) {
++					pr_emerg("halt-poweroff: power key after %lu ms halted: restart\n",
++						 ms);
++					break;
++				}
++			} else {
++				pressed = 0;
++				released += POLL_MS;
++				if (released >= RELEASE_MS)
++					armed = true;
++			}
++		}
++		if (test_restart_s && ms >= test_restart_s * 1000UL) {
++			pr_emerg("halt-poweroff: test_restart_s=%u reached: restart\n",
++				 test_restart_s);
++			break;
++		}
++		if (!(ms % LOG_EVERY_MS))
++			pr_emerg("halt-poweroff: halted for %lu s%s\n", ms / 1000,
++				 hp->key ? (armed ? ", key armed" : ", key held") : "");
++	}
++
++	emergency_restart();
++	return NOTIFY_DONE;	/* not reached */
++}
++
++static int halt_poweroff_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct halt_poweroff *hp;
++	int ret;
++
++	hp = devm_kzalloc(dev, sizeof(*hp), GFP_KERNEL);
++	if (!hp)
++		return -ENOMEM;
++	hp->dev = dev;
++
++	hp->wdt_rst = devm_reset_control_get_optional_exclusive(dev, "watchdog");
++	if (IS_ERR(hp->wdt_rst))
++		return dev_err_probe(dev, PTR_ERR(hp->wdt_rst), "watchdog reset\n");
++
++	ret = devm_register_sys_off_handler(dev, SYS_OFF_MODE_POWER_OFF_PREPARE, SYS_OFF_PRIO_LOW,
++					    halt_poweroff_prepare, hp);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot register the prepare handler\n");
++	ret = devm_register_sys_off_handler(dev, SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_LOW,
++					    halt_poweroff_do, hp);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot register the power-off handler\n");
++
++	dev_info(dev, "power-off of last resort: halt, watchdog %s%s\n",
++		 hp->wdt_rst ? "stopped" : "not stopped",
++		 test_restart_s ? " (test restart armed)" : "");
++	return 0;
++}
++
++static const struct of_device_id halt_poweroff_match[] = {
++	{ .compatible = "rockchip,rk3128-halt-poweroff" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, halt_poweroff_match);
++
++static struct platform_driver halt_poweroff_driver = {
++	.probe = halt_poweroff_probe,
++	.driver = {
++		.name = "halt-poweroff",
++		.of_match_table = halt_poweroff_match,
++	},
++};
++module_platform_driver(halt_poweroff_driver);
++
++MODULE_DESCRIPTION("Halt and wait for the power key when the supply cannot be cut");
++MODULE_LICENSE("GPL");
+diff -urN a/drivers/power/reset/Kconfig b/drivers/power/reset/Kconfig
+--- a/drivers/power/reset/Kconfig	2026-11-06 16:38:28.001462523 -0600
++++ b/drivers/power/reset/Kconfig	2026-11-06 16:39:00.307894710 -0600
+@@ -103,6 +103,15 @@
+ 	  If your board needs a GPIO high/low to power down, say Y and
+ 	  create a binding in your devicetree.
+ 
++config POWER_RESET_HALT
++	bool "Halt and wait for the power key at power-off"
++	depends on OF
++	help
++	  A power-off handler of last resort for boards whose supply cannot
++	  be cut by the SoC (a wall adapter past the power latch): it stops
++	  the watchdog through its reset line, halts, and restarts the board
++	  when the power key is pressed. Use it next to gpio-poweroff.
++
+ config POWER_RESET_GPIO_RESTART
+ 	bool "GPIO restart driver"
+ 	depends on OF
+diff -urN a/drivers/power/reset/Makefile b/drivers/power/reset/Makefile
+--- a/drivers/power/reset/Makefile	2026-11-06 16:38:28.001492681 -0600
++++ b/drivers/power/reset/Makefile	2026-11-06 16:39:00.307996778 -0600
+@@ -10,6 +10,7 @@
+ obj-$(CONFIG_POWER_RESET_EP93XX) += ep93xx-restart.o
+ obj-$(CONFIG_POWER_RESET_GEMINI_POWEROFF) += gemini-poweroff.o
+ obj-$(CONFIG_POWER_RESET_GPIO) += gpio-poweroff.o
++obj-$(CONFIG_POWER_RESET_HALT) += halt-poweroff.o
+ obj-$(CONFIG_POWER_RESET_GPIO_RESTART) += gpio-restart.o
+ obj-$(CONFIG_POWER_RESET_HISI) += hisi-reboot.o
+ obj-$(CONFIG_POWER_RESET_LINKSTATION) += linkstation-poweroff.o

@@ -1,0 +1,162 @@
+lima/ppir: let the result combiner multiply a vector by a scalar (a third multiply port)
+
+Blob evidence. The Mali-400 PP's result combiner can take dest_vec = src_vec = 1, in which case the
+opcode field is reused for a vector argument's source and swizzle (arg1), the scalar argument stays
+arg0 and the destination is a masked vector. lima's own codegen.h already describes that encoding and
+its disassembler prints it (`mul.s2 <dest> <scalar> <vector>`), but the scheduler never allowed a
+non-scalar destination in the slot, so the vector form was dead code.
+
+The blob uses the slot that way in nearly every program; captured instructions
+(/var/tmp/mali-re/capture/demo/compare-26.2.6/, decoded field by field with beat-shader/ppdec.py):
+  - program 40 `vec4(t.rgb * u_gain, t.a)`, one instruction:
+      load.v ^discard 0.xy, texld 0, load.u 1.x, mov.s1 $0.w ^texture.w,
+      mul.s2 $0.xyz ^uniform.x ^texture.xyzz, sync, stop
+    combine field: dest_vec=1 src_vec=1 dest=$0 mask=7 arg0=uniform.x arg1=texture.xyzz
+  - program 4 (the 5-tap blur) at @18, the x0.3162 scale of a whole vec4 riding along with the
+    vec4 accumulator's add: `add.v1 $2 ^texture $0, mul.s2 $0 ^const0.x $1`
+  - program 43 at @31 and the reference UI rounded rect (capture/games prog 3) at @42
+    `mul.s2 $1 $0.y ^uniform`
+
+What lima did. ppir_instr_insert_node() rejected the combine slot unless ppir_target_is_scalar(dest),
+so every vector-times-scalar multiply went to the vec4 multiply slot and needed its own instruction
+when that slot was taken. codegen also hardcoded src[0] as the scalar operand and src[1] as the
+vector one, which is the wrong way round for NIR's usual fmul(vec, scalar) order.
+
+This patch adds ppir_combine_mul_scalar_src(): the node fits the slot when it is a two-source
+multiply with no shift, one source whose value is the same for every written component (arg0
+addresses a single register component) and no negate/absolute on the other one (the vector form has
+no modifier bits for arg1). The scheduler uses it as the gate and codegen uses it to order the
+operands, so both agree.
+
+Effect. The Demo's PP instructions fall from 48 to 46 (program 4: 7 -> 6 = the blob's, program 43:
+8 -> 7 = the blob's), code 289 -> 278 words. Fill-weighted against the blob's per-job PP counters
+(beat-shader/fillest.py): finale 10.76 -> 10.29 ms per frame, tunnel 12.57 -> 12.40, chrome
+13.16 -> 13.01, horizon 13.61 -> 13.46. reference UI counts unchanged on their own (the saving there needs
+0012 as well).
+
+Pictures: BIT-IDENTICAL. The same multiply of the same two fp16 operands, moved to another unit;
+multiplication is commutative and exact under round-to-nearest, so swapping the operand order
+changes nothing. No arithmetic is reassociated and no rounding is added or removed.
+
+Applies to Mesa 26.2.6 + 0001-0007.
+diff --git a/src/gallium/drivers/lima/ir/pp/codegen.c b/src/gallium/drivers/lima/ir/pp/codegen.c
+index dd04c4b..8a8207d 100644
+--- a/src/gallium/drivers/lima/ir/pp/codegen.c
++++ b/src/gallium/drivers/lima/ir/pp/codegen.c
+@@ -605,12 +605,20 @@ static void ppir_codegen_encode_combine(ppir_node *node, void *code)
+       f->vector.dest = index >> 2;
+       f->vector.mask = dest->write_mask << dest_shift;
+ 
+-      ppir_src *src = alu->src;
++      /* arg0 is the scalar operand, arg1 the vector one; which source of the
++       * multiply is which is decided by ppir_combine_mul_scalar_src(), the same
++       * test the scheduler used to put the node here. */
++      int scl = ppir_combine_mul_scalar_src(node);
++      assert(scl >= 0);
++      if (scl < 0)
++         scl = 0;
++
++      ppir_src *src = alu->src + scl;
+       f->scalar.arg0_src = get_scl_reg_index(src, 0);
+       f->scalar.arg0_absolute = src->absolute;
+       f->scalar.arg0_negate = src->negate;
+ 
+-      src = alu->src + 1;
++      src = alu->src + 1 - scl;
+       index = ppir_target_get_src_reg_index(src);
+       f->vector.arg1_source = index >> 2;
+       f->vector.arg1_swizzle = encode_swizzle(src->swizzle, index & 0x3, dest_shift);
+diff --git a/src/gallium/drivers/lima/ir/pp/instr.c b/src/gallium/drivers/lima/ir/pp/instr.c
+index 0befd2c..eeeb19f 100644
+--- a/src/gallium/drivers/lima/ir/pp/instr.c
++++ b/src/gallium/drivers/lima/ir/pp/instr.c
+@@ -57,6 +57,45 @@ void ppir_instr_add_dep(ppir_instr *succ, ppir_instr *pred)
+    list_addtail(&dep->succ_link, &pred->succ_list);
+ }
+ 
++/* The result combiner can also work as a third multiply port: with dest_vec and
++ * src_vec both set, its opcode field is reused for a vector argument's source
++ * and swizzle (arg1), the scalar argument stays arg0 and the destination is a
++ * masked vector. That is the Mali blob's `mul.s2 $0.xyz <scalar> <vector>`,
++ * which it emits in nearly every program (e.g. the Demo's blur, program 4, and
++ * its tint, program 40).
++ *
++ * Returns the index of the source the combiner takes as its scalar operand, or
++ * -1 when the node does not fit the slot. arg0 addresses one register component
++ * (swizzle[0]), so that source's value must be the same for every written
++ * component; the vector argument has no negate/absolute bits in this form and
++ * the multiply has no shift field (the opcode bits are the vector argument).
++ */
++int ppir_combine_mul_scalar_src(ppir_node *node)
++{
++   if (node->op != ppir_op_mul)
++      return -1;
++
++   ppir_alu_node *alu = ppir_node_to_alu(node);
++   if (alu->num_src != 2 || alu->shift)
++      return -1;
++
++   for (int i = 0; i < 2; i++) {
++      ppir_src *scl = alu->src + i, *vec = alu->src + 1 - i;
++
++      if (scl->swizzle[0] != scl->swizzle[1] ||
++          scl->swizzle[0] != scl->swizzle[2] ||
++          scl->swizzle[0] != scl->swizzle[3])
++         continue;
++
++      if (vec->negate || vec->absolute)
++         continue;
++
++      return i;
++   }
++
++   return -1;
++}
++
+ void ppir_instr_insert_mul_node(ppir_node *add, ppir_node *mul)
+ {
+    ppir_instr *instr = add->instr;
+@@ -343,22 +382,22 @@ bool ppir_instr_insert_node(ppir_instr *instr, ppir_node *node)
+             if (instr->slots[PPIR_INSTR_SLOT_BRANCH])
+                continue;
+ 
+-            if (!ppir_target_is_scalar(dest))
+-               continue;
+             /* Combiner doesn't have pipeline destination */
+             if (dest->type == ppir_target_pipeline)
+                continue;
+ 
+-            /* No modifiers on vector output */
+-            if (node->op == ppir_op_mul && dest->modifier != ppir_outmod_none)
+-               continue;
++            if (node->op == ppir_op_mul) {
++               /* No modifiers on vector output */
++               if (dest->modifier != ppir_outmod_none)
++                  continue;
+ 
+-            /* No modifiers on vector source on combiner */
+-            if (ppir_node_get_src_num(node) == 2) {
+-               ppir_src *src = ppir_node_get_src(node, 1);
+-               if (src->negate || src->absolute)
++               /* scalar x vector multiply: needs a scalar operand, and no
++                * modifiers on the vector one */
++               if (ppir_combine_mul_scalar_src(node) < 0)
+                   continue;
+             }
++            else if (!ppir_target_is_scalar(dest))
++               continue;
+          }
+ 
+          if (pos == PPIR_INSTR_SLOT_ALU_SCL_MUL ||
+diff --git a/src/gallium/drivers/lima/ir/pp/ppir.h b/src/gallium/drivers/lima/ir/pp/ppir.h
+index 6b4bc83..5c2c12b 100644
+--- a/src/gallium/drivers/lima/ir/pp/ppir.h
++++ b/src/gallium/drivers/lima/ir/pp/ppir.h
+@@ -744,6 +744,7 @@ static bool ppir_src_swizzle_is_identity(ppir_src *src)
+ 
+ ppir_instr *ppir_instr_create(ppir_block *block);
+ bool ppir_instr_insert_node(ppir_instr *instr, ppir_node *node);
++int ppir_combine_mul_scalar_src(ppir_node *node);
+ void ppir_instr_add_dep(ppir_instr *succ, ppir_instr *pred);
+ void ppir_instr_print_list(ppir_compiler *comp);
+ void ppir_instr_print_dep(ppir_compiler *comp);

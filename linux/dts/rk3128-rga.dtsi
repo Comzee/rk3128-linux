@@ -1,0 +1,20 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/* #619/#722: verified RGA1-plus subset, enabled in product images. */
+#ifndef RK3128_RGA
+#define RK3128_RGA "okay"
+#endif
+
+/ {
+	rga1: rga@1010c000 {
+		compatible = "rockchip,rk3128-rga";
+		reg = <0x1010c000 0x1000>;
+		interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cru ACLK_RGA>, <&cru HCLK_RGA>;
+		clock-names = "aclk", "hclk";
+		resets = <&cru SRST_RGA_A>, <&cru SRST_RGA_H>;
+		reset-names = "axi", "ahb";
+		power-domains = <&power RK3128_PD_VIO>;
+		/* The driver owns the internal MMU. There is no external IOMMU. */
+		status = RK3128_RGA;
+	};
+};

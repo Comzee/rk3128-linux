@@ -1,0 +1,33 @@
+diff --git a/linux/config/hardening.config b/linux/config/hardening.config
+new file mode 100644
+index 0000000000000000000000000000000000000000..f80beff2f7ff70367eef116c71b392a2d8ed9674
+--- /dev/null
++++ b/linux/config/hardening.config
+@@ -0,0 +1,6 @@
++# Cheap corruption checks for the Cortex-A7 product kernel (#613). ARM selects per-task canaries when the compiler
++# supports them. Keep the existing stack zero initialization and strict RWX. Allocation/free page clearing remains
++# default-off: its additional shared-DDR traffic has no measured acceptable cost for this appliance.
++CONFIG_STACKPROTECTOR=y
++CONFIG_STACKPROTECTOR_STRONG=y
++CONFIG_FORTIFY_SOURCE=y
+diff --git a/linux/modules/ssv6x5x/include/ssv6xxx_common.h b/linux/modules/ssv6x5x/include/ssv6xxx_common.h
+index f3a3789d5977dea51de53366b9a41f10d97543a5..a2c13efa4861a2f3a3da1a5066d746d7e2353fd7 100644
+--- a/linux/modules/ssv6x5x/include/ssv6xxx_common.h
++++ b/linux/modules/ssv6x5x/include/ssv6xxx_common.h
+@@ -17,0 +18 @@
++#include <linux/stddef.h>
+@@ -97,3 +98,5 @@ typedef struct cfg_host_cmd {
+-        u8 dat8[0];
+-        u16 dat16[0];
+-        u32 dat32[0];
++        /* Firmware payload follows the 8-byte prefix. The dummy keeps the legacy 12-byte storage layout; each
++         * payload view must be a real flexible array so FORTIFY does not bound it to dummy's four bytes (#613). */
++        DECLARE_FLEX_ARRAY(u8, dat8);
++        DECLARE_FLEX_ARRAY(u16, dat16);
++        DECLARE_FLEX_ARRAY(u32, dat32);
+@@ -102 +105,4 @@ typedef struct cfg_host_cmd {
+-#define HOST_CMD_HDR_LEN ((size_t)(((HDR_HostCmd *)100)->dat8)-100U)
++#define HOST_CMD_HDR_LEN offsetof(HDR_HostCmd, dat8)
++_Static_assert(HOST_CMD_HDR_LEN == 8 && offsetof(HDR_HostCmd, dat16) == 8 &&
++               offsetof(HDR_HostCmd, dat32) == 8, "firmware command payload offset changed");
++_Static_assert(sizeof(HDR_HostCmd) == 12, "firmware command storage layout changed");

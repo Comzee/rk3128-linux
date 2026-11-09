@@ -1,0 +1,222 @@
+From: RK3128 reference <frame@localhost>
+Subject: [PATCH] drm/lima: expose live buffer residency in debugfs
+
+GPL-2.0. fdinfo totals cannot deduplicate sharing, and lima heaps
+reserve more space than they populate. gem_names lists only FLINK
+objects. Add a 0400 read-only object/client snapshot, including objects
+retained without handles. Use shmem's real page count, not the
+reservation or heap growth target; imports remain fully DMA-mapped. No
+page faults, runtime-PM references or MMIO reads. The serial is
+diagnostic, not a userspace ABI or a kernel pointer. dma-buf inode
+identifies imported/exported storage. The end record detects truncated
+reads.
+
+
+---
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -319,6 +319,7 @@
+ static const struct drm_driver lima_drm_driver = {
+ 	.driver_features    = DRIVER_RENDER | DRIVER_GEM | DRIVER_SYNCOBJ,
+ 	.show_fdinfo        = lima_show_fdinfo,
++	.debugfs_init       = lima_memory_debugfs_init,
+ 	.open               = lima_drm_driver_open,
+ 	.postclose          = lima_drm_driver_postclose,
+ 	.ioctls             = lima_drm_driver_ioctls,
+@@ -331,6 +332,7 @@
+ 	.patchlevel         = 0,
+ 
+ 	.gem_create_object  = lima_gem_create_object,
++	.gem_prime_import   = lima_gem_prime_import,
+ 	.gem_prime_import_sg_table = drm_gem_shmem_prime_import_sg_table,
+ };
+ 
+diff --git a/drivers/gpu/drm/lima/lima_gem.c b/drivers/gpu/drm/lima/lima_gem.c
+--- a/drivers/gpu/drm/lima/lima_gem.c
++++ b/drivers/gpu/drm/lima/lima_gem.c
+@@ -2,6 +2,9 @@
+ /* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+ 
+ #include <linux/mm.h>
++#include <linux/debugfs.h>
++#include <linux/dma-buf.h>
++#include <linux/seq_file.h>
+ #include <linux/iosys-map.h>
+ #include <linux/sync_file.h>
+ #include <linux/pagemap.h>
+@@ -9,6 +12,8 @@
+ #include <linux/dma-mapping.h>
+ 
+ #include <drm/drm_file.h>
++#include <drm/drm_device.h>
++#include <drm/drm_prime.h>
+ #include <drm/drm_syncobj.h>
+ #include <drm/drm_utils.h>
+ 
+@@ -18,6 +23,111 @@
+ #include "lima_gem.h"
+ #include "lima_vm.h"
+ #include "lima_sched.h"
++
++/* No PM reference, page fault or GPU lock: telemetry must not wake the GPU.
++ * Register initialized objects before native page allocation/handle publication.
++ * The registry owns no references and includes objects retained by jobs, mmaps
++ * or dma-bufs after their last userspace handle disappears.
++ */
++static DEFINE_MUTEX(lima_memory_lock);
++static LIST_HEAD(lima_memory_objects);
++static u64 lima_memory_serial;
++
++static void lima_memory_register(struct drm_gem_object *obj)
++{
++	struct lima_bo *bo = to_lima_bo(obj);
++
++	mutex_lock(&lima_memory_lock);
++	if (!bo->memory_id) {
++		bo->memory_id = ++lima_memory_serial;
++		list_add_tail(&bo->memory_node, &lima_memory_objects);
++	}
++	mutex_unlock(&lima_memory_lock);
++}
++
++struct drm_gem_object *lima_gem_prime_import(struct drm_device *dev,
++					  struct dma_buf *dma_buf)
++{
++	struct drm_gem_object *obj = drm_gem_prime_import(dev, dma_buf);
++
++	/* The core has finished attachment/reservation initialization. Also
++	 * handles self-import, where registration is already complete.
++	 */
++	if (!IS_ERR(obj))
++		lima_memory_register(obj);
++	return obj;
++}
++
++static int lima_memory_show(struct seq_file *m, void *unused)
++{
++	struct drm_device *dev = m->private;
++	struct lima_bo *bo;
++	struct drm_file *file;
++	unsigned int count = 0;
++
++	/* close removes filelist membership before freeing its handle table.
++	 * Handle open/close never takes memory_lock while holding table_lock.
++	 * PRIME import holds object_name_lock when registering the new object:
++	 * keep that lock before memory_lock here too. Final GEM free drops
++	 * memory_lock before releasing shmem resources or imported dma-bufs.
++	 */
++	mutex_lock(&dev->filelist_mutex);
++	mutex_lock(&dev->object_name_lock);
++	mutex_lock(&lima_memory_lock);
++	seq_puts(m, "lima-memory-v1\n");
++	list_for_each_entry(bo, &lima_memory_objects, memory_node) {
++		struct drm_gem_object *obj = &bo->base.base;
++		u64 resident, inode = 0;
++		bool shared;
++
++		if (obj->dev != dev)
++			continue;
++		/* Native heap reservations can greatly exceed their real pages.
++		 * nrpages also includes pages allocated by an incomplete heap grow.
++		 * Imports have a pinned DMA mapping for their whole lifetime.
++		 */
++		resident = obj->import_attach ? obj->size :
++			(u64)READ_ONCE(obj->filp->f_mapping->nrpages) << PAGE_SHIFT;
++		/* Multiple handles alone do not imply multiple owners. The reader
++		 * resolves that from ref rows; dma-bufs also have external users.
++		 */
++		shared = obj->import_attach || obj->dma_buf;
++		if (obj->import_attach)
++			inode = file_inode(obj->import_attach->dmabuf->file)->i_ino;
++		else if (obj->dma_buf)
++			inode = file_inode(obj->dma_buf->file)->i_ino;
++		seq_printf(m, "bo %llu %zu %llu %u %llu\n", bo->memory_id,
++			   obj->size, resident, shared, inode);
++		count++;
++	}
++	list_for_each_entry(file, &dev->filelist, lhead) {
++		struct drm_gem_object *obj;
++		int id;
++
++		spin_lock(&file->table_lock);
++		idr_for_each_entry(&file->object_idr, obj, id) {
++			/* Reserved handle slots are NULL during open/close. */
++			if (obj) {
++				bo = to_lima_bo(obj);
++				seq_printf(m, "ref %llu %llu\n", bo->memory_id,
++					   file->client_id);
++			}
++		}
++		spin_unlock(&file->table_lock);
++	}
++	seq_printf(m, "end %u\n", count);
++	mutex_unlock(&lima_memory_lock);
++	mutex_unlock(&dev->object_name_lock);
++	mutex_unlock(&dev->filelist_mutex);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(lima_memory);
++
++void lima_memory_debugfs_init(struct drm_minor *minor)
++{
++	debugfs_create_file("lima_memory", 0400, minor->debugfs_root,
++			    minor->dev, &lima_memory_fops);
++}
+ 
+ int lima_heap_alloc(struct lima_bo *bo, struct lima_vm *vm)
+ {
+@@ -121,6 +231,7 @@
+ 		return PTR_ERR(shmem);
+ 
+ 	obj = &shmem->base;
++	lima_memory_register(obj);
+ 
+ 	/* Mali Utgard GPU can only support 32bit address space */
+ 	mask = mapping_gfp_mask(obj->filp->f_mapping);
+@@ -154,6 +265,10 @@
+ static void lima_gem_free_object(struct drm_gem_object *obj)
+ {
+ 	struct lima_bo *bo = to_lima_bo(obj);
++
++	mutex_lock(&lima_memory_lock);
++	list_del_init(&bo->memory_node);
++	mutex_unlock(&lima_memory_lock);
+ 
+ 	if (!list_empty(&bo->va))
+ 		dev_err(obj->dev->dev, "lima gem free bo still has va\n");
+@@ -233,6 +348,7 @@
+ 
+ 	mutex_init(&bo->lock);
+ 	INIT_LIST_HEAD(&bo->va);
++	INIT_LIST_HEAD(&bo->memory_node);
+ 	bo->base.map_wc = true;
+ 	bo->base.base.funcs = &lima_gem_funcs;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_gem.h b/drivers/gpu/drm/lima/lima_gem.h
+--- a/drivers/gpu/drm/lima/lima_gem.h
++++ b/drivers/gpu/drm/lima/lima_gem.h
+@@ -16,6 +16,10 @@
+ 	struct list_head va;
+ 
+ 	size_t heap_size;
++
++	/* Initialized objects stay here until final free, including dma-buf-only BOs. */
++	struct list_head memory_node;
++	u64 memory_id;
+ };
+ 
+ static inline struct lima_bo *
+@@ -42,6 +46,12 @@
+ int lima_gem_submit(struct drm_file *file, struct lima_submit *submit);
+ int lima_gem_wait(struct drm_file *file, u32 handle, u32 op, s64 timeout_ns);
+ 
++struct dma_buf;
++struct drm_gem_object *lima_gem_prime_import(struct drm_device *dev,
++					  struct dma_buf *dma_buf);
++struct drm_minor;
++void lima_memory_debugfs_init(struct drm_minor *minor);
++
+ void lima_set_vma_flags(struct vm_area_struct *vma);
+ 
+ #endif

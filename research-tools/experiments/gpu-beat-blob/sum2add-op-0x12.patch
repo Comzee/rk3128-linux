@@ -1,0 +1,267 @@
+lima/ppir: fuse fadd(fsum2(a), b) into the vec4 accumulator's op 0x12 (sum2add)
+
+This is tools/malitrace/lima-patches/dot2-add.patch, rebased onto 26.2.6 + 0001-0010 and with the
+op's semantics now confirmed from the blob two ways. #375 dropped it for moving reference UI polygon-fill
+edge pixels; the numbers below say those pixels were wrong before, not after.
+
+Blob evidence, the encoding. capture/games/compare-26.2.6/prog-6.blob.pp.bin, every edge of the
+polygon fill `dot(u_e.xy, v_px) + u_e.z` is one instruction; decoded field by field with
+beat-shader/ppdec.py (lima's disassembler drops arg1 of an op it does not know and printed only
+`op18.v1 $1.x ^v0.xyyy`):
+    varying  alignment=1 index=0 dest=$0 mask=3            (v_px.xy)
+    uniform  alignment=2 index=4                           (u_e3)
+    vec4_mul op=0 arg0=uniform.xyyy arg1=$0.xyyy mask=0    (-> ^v0: ex*x, ey*y)
+    vec4_acc op=0x12 mul_in=1 arg0=^v0.xyyy arg1=uniform.zzzz dest=$1 mask=1
+So op 0x12 is dest.x = arg0.x + arg0.y + arg1.x, and arg1 is a real source (its swizzle zzzz selects
+u_e.z). The alternative readings are excluded by the picture: with arg1 ignored the term +u_e.z
+disappears and |m| is in the hundreds everywhere, so clamp(m+0.5) would be 0 or 1 over the whole
+quad; with arg0.xyz summed the swizzle xyyy would double ey*y.
+
+Blob evidence, the compiler. libGLES_mali.so r6p0-01rel1 ("Mali online shader compiler r6p0-01rel1
+[Revision 96995]") maps its backend IR opcode to the hardware's accumulator opcode in the function at
+0x000e56e0 (a 58-entry jump table at 0xe56fc, indexed by [node+4] - 2). IR 9, 10 and 11 land on
+hardware 0x10, 0x11 and 0x12 at 0xe590c, 0xe58fc and 0xe58ec; 0x10 and 0x11 are lima's known sum3 and
+sum4, so 0x12 is the third member of that family. All three are emitted only when the second argument
+of the mapper is zero (`cmp r1,#0; mvnne lr,#0; moveq lr,#18`), the same guard the horizontal sums
+carry, which is why this patch keeps the unshifted-destination encoding sum3/sum4 use.
+
+What lima did. lima_nir_algebraic lowered every fsum2 to a scalar fadd of its two components, so each
+edge cost a uniform move plus two scalar multiply-add pairs.
+
+Effect. reference UI polygon fill (capture/games program 6, shared by Games, Photos, Home and Clock): 11 -> 7
+PP instructions, the blob's count, 69 -> 41 code words, and the edge instruction matches the blob's
+field for field except the unused .zw lanes of mul.v0 and the destination register. Demo and Photos
+unchanged (they do not use that shader's shape).
+Scenes: Home draws it 215 times a frame (home-swipe) and 145 (home-idle), Clock 21, Games 8. The
+saving is exactly 4 instructions x the pixels it covers. From the blob's own counter the covered area
+is at most counter/7, so the bound per frame is Home <= 3.2 ms, Clock <= 2.3 ms, and for Games the
+covered area is measured (968 px) so it is 0.003 ms. Home and Clock have no memory dump in the
+capture, so their true coverage is not measured here.
+
+Pictures: NOT BIT-IDENTICAL, and that is the point. PP registers are fp16. lima computes
+(ex*x + ez) + ey*y, rounding a large intermediate (|ez| is half the element's size in pixels, so tens
+to a thousand, where an fp16 step is 0.03 to 1.0); the blob's op 0x12 rounds once. A float16 model of
+both forms against float64 (beat-shader/out/sum2add-rounding.txt) gives this worst-case alpha error on
+edge pixels, by element half-extent: 61 px 17/255, 122 px 32/255, 300 px 71/255, 540 px 132/255,
+960 px 156/255 for lima, and 0/255 for op 0x12. #375 saw 16 edge pixels move by up to 82/255 against
+lima build A, which is in that range for an element a few hundred pixels wide: the patch moves those
+pixels onto the blob's values. The model assumes the accumulator keeps the two products at the
+multiplier's precision and rounds once; if it rounds each product first, op 0x12 is still one rounding
+of a large value better than lima's. HARDWARE CHECK MUST BE AGAINST AN ANDROID SHOT, not against
+lima's own build (hardware change 407).
+
+Applies to Mesa 26.2.6 + 0001-0010.
+diff --git a/src/gallium/drivers/lima/ir/lima_nir_algebraic.py b/src/gallium/drivers/lima/ir/lima_nir_algebraic.py
+index fb0e53b..7d0336b 100644
+--- a/src/gallium/drivers/lima/ir/lima_nir_algebraic.py
++++ b/src/gallium/drivers/lima/ir/lima_nir_algebraic.py
+@@ -42,7 +42,9 @@ lower_fdot = [
+    (('fdot2', 'a', 'b'), ('fsum2', ('fmul', 'a', 'b'))),
+    (('fdot3', 'a', 'b'), ('fsum3', ('fmul', 'a', 'b'))),
+    (('fdot4', 'a', 'b'), ('fsum4', ('fmul', 'a', 'b'))),
+-   (('fsum2', 'a'), ('fadd', 'a.x', 'a.y')),
++   # An fsum2 whose only users are fadds stays: ppir fuses fadd(fsum2(a), b)
++   # into the vec4 accumulator's sum2add (op 0x12), one instruction.
++   (('fsum2(is_not_only_used_by_fadd)', 'a'), ('fadd', 'a.x', 'a.y')),
+ ]
+ 
+ # PP fuse clamp_positive. Shared with Midgard/Bifrost
+diff --git a/src/gallium/drivers/lima/ir/pp/codegen.c b/src/gallium/drivers/lima/ir/pp/codegen.c
+index 8a8207d..2f05a22 100644
+--- a/src/gallium/drivers/lima/ir/pp/codegen.c
++++ b/src/gallium/drivers/lima/ir/pp/codegen.c
+@@ -388,6 +388,10 @@ static void ppir_codegen_encode_vec_add(ppir_node *node, void *code)
+    case ppir_op_mov:
+       f->op = ppir_codegen_vec4_acc_op_mov;
+       break;
++   case ppir_op_sum2add:
++      f->op = ppir_codegen_vec4_acc_op_sum2add;
++      dest_shift = 0;
++      break;
+    case ppir_op_sum3:
+       f->op = ppir_codegen_vec4_acc_op_sum3;
+       dest_shift = 0;
+diff --git a/src/gallium/drivers/lima/ir/pp/codegen.h b/src/gallium/drivers/lima/ir/pp/codegen.h
+index 055e952..3319489 100644
+--- a/src/gallium/drivers/lima/ir/pp/codegen.h
++++ b/src/gallium/drivers/lima/ir/pp/codegen.h
+@@ -187,6 +187,7 @@ typedef enum {
+    ppir_codegen_vec4_acc_op_max   = 0x0F,
+    ppir_codegen_vec4_acc_op_sum3  = 0x10, /* dest.xyzw = (arg0.x + arg0.y + arg0.z) */
+    ppir_codegen_vec4_acc_op_sum4  = 0x11, /* dest.xyzw = (arg0.x + arg0.y + arg0.z + arg0.w) */
++   ppir_codegen_vec4_acc_op_sum2add = 0x12, /* dest.xyzw = (arg0.x + arg0.y + arg1.x); inferred from the Mali blob, unverified on hardware */
+    ppir_codegen_vec4_acc_op_dFdx  = 0x14,
+    ppir_codegen_vec4_acc_op_dFdy  = 0x15,
+    ppir_codegen_vec4_acc_op_sel   = 0x17, /* result = (^fmul ? arg0 : arg1) */
+diff --git a/src/gallium/drivers/lima/ir/pp/disasm.c b/src/gallium/drivers/lima/ir/pp/disasm.c
+index 7bf6238..cc613c7 100644
+--- a/src/gallium/drivers/lima/ir/pp/disasm.c
++++ b/src/gallium/drivers/lima/ir/pp/disasm.c
+@@ -432,6 +432,7 @@ static const asm_op vec4_acc_ops[] = {
+    CASE(ceil, 1),
+    CASE(min, 2),
+    CASE(max, 2),
++   CASE(sum2add, 2),
+    CASE(sum3, 1),
+    CASE(sum4, 1),
+    CASE(dFdx, 2),
+diff --git a/src/gallium/drivers/lima/ir/pp/nir.c b/src/gallium/drivers/lima/ir/pp/nir.c
+index 93c407e..f87187a 100644
+--- a/src/gallium/drivers/lima/ir/pp/nir.c
++++ b/src/gallium/drivers/lima/ir/pp/nir.c
+@@ -180,6 +180,7 @@ static int nir_to_ppir_opcodes[nir_num_opcodes] = {
+    [nir_op_fabs] = ppir_op_abs,
+    [nir_op_fneg] = ppir_op_neg,
+    [nir_op_fadd] = ppir_op_add,
++   [nir_op_fsum2] = ppir_op_add,
+    [nir_op_fsum3] = ppir_op_sum3,
+    [nir_op_fsum4] = ppir_op_sum4,
+    [nir_op_frsq] = ppir_op_rsqrt,
+@@ -206,6 +207,94 @@ static int nir_to_ppir_opcodes[nir_num_opcodes] = {
+    [nir_op_fmad] = ppir_op_fmad,
+ };
+ 
++/* The vec4 accumulator's op 0x12 (sum2add) computes arg0.x + arg0.y + arg1.x,
++ * so fadd(fsum2(a), b) is one instruction, with a = fmul(...) read straight
++ * from ^vmul (the shape of dot(u.xy, v) + u.z). An fsum2 is fused into its
++ * fadd only when a is a two-component fmul used by nothing else and that fadd,
++ * in the same block, is the fsum2's only use; otherwise it is a scalar add of
++ * its two components.
++ */
++static nir_alu_instr *ppir_fsum2_fused_fadd(nir_alu_instr *fsum2)
++{
++   if (fsum2->op != nir_op_fsum2 || !list_is_singular(&fsum2->def.uses))
++      return NULL;
++
++   /* only the shape the blob uses: fsum2 of a two-component fmul (read
++    * from ^vmul), used by nothing else; every other fsum2 stays a scalar add */
++   nir_instr *src = nir_def_instr(fsum2->src[0].src.ssa);
++   if (src->type != nir_instr_type_alu)
++      return NULL;
++   nir_alu_instr *fmul = nir_instr_as_alu(src);
++   if (fmul->op != nir_op_fmul || fmul->def.num_components != 2 ||
++       !list_is_singular(&fmul->def.uses) ||
++       fsum2->src[0].swizzle[0] != 0 || fsum2->src[0].swizzle[1] != 1 ||
++       fmul->instr.block != fsum2->instr.block)
++      return NULL;
++
++   nir_src *use = list_first_entry(&fsum2->def.uses, nir_src, use_link);
++   if (nir_src_is_if(use))
++      return NULL;
++
++   nir_instr *user = nir_src_use_instr(use);
++   if (user->type != nir_instr_type_alu || user->block != fsum2->instr.block)
++      return NULL;
++
++   nir_alu_instr *fadd = nir_instr_as_alu(user);
++   if (fadd->op != nir_op_fadd || fadd->def.num_components != 1)
++      return NULL;
++
++   return fadd;
++}
++
++/* the source of a scalar fadd that is fused into it, or -1 */
++static int ppir_fadd_fused_src(nir_alu_instr *fadd)
++{
++   if (fadd->op != nir_op_fadd || fadd->def.num_components != 1)
++      return -1;
++
++   for (int i = 0; i < 2; i++) {
++      nir_instr *parent = nir_def_instr(fadd->src[i].src.ssa);
++      if (parent->type == nir_instr_type_alu &&
++          ppir_fsum2_fused_fadd(nir_instr_as_alu(parent)) == fadd)
++         return i;
++   }
++   return -1;
++}
++
++static bool ppir_emit_sum2(ppir_block *block, nir_alu_instr *instr,
++                           nir_alu_instr *fsum2, nir_alu_src *addend)
++{
++   nir_def *def = &instr->def;
++   int op = addend ? ppir_op_sum2add : ppir_op_add;
++   ppir_alu_node *node = ppir_node_create_dest(block, op, def, 0x1);
++   if (!node)
++      return false;
++
++   nir_alu_src *sum_src = fsum2->src;
++   ppir_src *ps = node->src;
++
++   if (addend) {
++      /* arg0 reads two components (the rest repeat the last, as the blob
++       * encodes it), arg1 one (repeated) */
++      node->num_src = 2;
++      for (int i = 0; i < 4; i++)
++         ps[0].swizzle[i] = sum_src->swizzle[MIN2(i, 1)];
++      ppir_node_add_src(block->comp, &node->node, ps, &sum_src->src, 0b0011);
++      for (int i = 0; i < 4; i++)
++         ps[1].swizzle[i] = addend->swizzle[0];
++      ppir_node_add_src(block->comp, &node->node, ps + 1, &addend->src, 0x1);
++   } else {
++      node->num_src = 2;
++      for (int i = 0; i < 2; i++) {
++         memset(ps[i].swizzle, sum_src->swizzle[i], sizeof(ps[i].swizzle));
++         ppir_node_add_src(block->comp, &node->node, ps + i, &sum_src->src, 0x1);
++      }
++   }
++
++   list_addtail(&node->node.list, &block->node_list);
++   return true;
++}
++
+ static bool ppir_emit_alu(ppir_block *block, nir_instr *ni)
+ {
+    nir_alu_instr *instr = nir_instr_as_alu(ni);
+@@ -221,6 +310,23 @@ static bool ppir_emit_alu(ppir_block *block, nir_instr *ni)
+       return ppir_emit_fmad(block, ni);
+    }
+ 
++   if (instr->op == nir_op_fsum2) {
++      /* emitted by the fadd it is fused into */
++      nir_alu_instr *fadd = ppir_fsum2_fused_fadd(instr);
++      int i = fadd ? ppir_fadd_fused_src(fadd) : -1;
++      if (i >= 0 && fadd->src[i].src.ssa == &instr->def)
++         return true;
++      return ppir_emit_sum2(block, instr, instr, NULL);
++   }
++
++   if (instr->op == nir_op_fadd) {
++      int i = ppir_fadd_fused_src(instr);
++      if (i >= 0) {
++         nir_alu_instr *fsum2 = nir_instr_as_alu(nir_def_instr(instr->src[i].src.ssa));
++         return ppir_emit_sum2(block, instr, fsum2, instr->src + 1 - i);
++      }
++   }
++
+    unsigned mask = nir_component_mask(def->num_components);
+    ppir_alu_node *node = ppir_node_create_dest(block, op, def, mask);
+    if (!node)
+diff --git a/src/gallium/drivers/lima/ir/pp/node.c b/src/gallium/drivers/lima/ir/pp/node.c
+index ef39f7c..d65c4e3 100644
+--- a/src/gallium/drivers/lima/ir/pp/node.c
++++ b/src/gallium/drivers/lima/ir/pp/node.c
+@@ -70,6 +70,12 @@ const ppir_op_info ppir_op_infos[] = {
+          PPIR_INSTR_SLOT_END
+       },
+    },
++   [ppir_op_sum2add] = {
++      .name = "sum2add",
++      .slots = (int []) {
++         PPIR_INSTR_SLOT_ALU_VEC_ADD, PPIR_INSTR_SLOT_END
++      },
++   },
+    [ppir_op_sum3] = {
+       .name = "sum3",
+       .slots = (int []) {
+diff --git a/src/gallium/drivers/lima/ir/pp/ppir.h b/src/gallium/drivers/lima/ir/pp/ppir.h
+index 5c2c12b..a9c2d56 100644
+--- a/src/gallium/drivers/lima/ir/pp/ppir.h
++++ b/src/gallium/drivers/lima/ir/pp/ppir.h
+@@ -48,6 +48,7 @@ typedef enum {
+    ppir_op_sin_lut,
+    ppir_op_cos_lut,
+ 
++   ppir_op_sum2add,
+    ppir_op_sum3,
+    ppir_op_sum4,
+ 

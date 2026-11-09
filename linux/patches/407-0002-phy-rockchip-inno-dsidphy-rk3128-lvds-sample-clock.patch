@@ -1,0 +1,46 @@
+Linux-port render parity (development record #407): phy: rockchip: inno-dsidphy: RK3128 LVDS sample clock and VOCM as u-boot.
+
+Two LVDS PHY settings of the RK3128 path differed from the state the board's u-boot leaves and
+Android runs with (the vendor 3.10 kernel never runs its LVDS init while u-boot's picture is up:
+rk312x_lcdc_open() skips trsm_ops->enable() under support_uboot_display()):
+
+- analog register 0x08 bit 4, the sample clock direction: the 4.4 BSP flow (and mainline's)
+  sets it to reverse; the 3.10 driver never writes the register and u-boot leaves it forward
+  (0x4c; ours read 0x5c). The RK3128's VOP inverts the LVDS dclk instead (patch 407-0001).
+- LVDS register 0x04, VOCM (bits 5:4): u-boot leaves 2 (0xaa), #292's patch 0002 wrote the 3.10
+  driver's 0 (0x8a). DIFF_V (bits 7:6) is 2 in both.
+
+Keep the forward sample clock and VOCM 2 for rockchip,rk3128-dsi-dphy (lvds_analog_init); the
+other SoCs keep the reverse direction.
+
+--- a/drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c
++++ b/drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c
+@@ -611,19 +611,24 @@
+ 	u16 fbdiv = 28;
+ 
+ 	if (inno->pdata->lvds_analog_init) {
+-		/* Common-mode voltage 900 mV, differential swing 350 mV */
++		/* Common-mode voltage and differential swing as u-boot sets them */
+ 		phy_update_bits(inno, REGISTER_PART_LVDS, 0x04,
+ 				LVDS_VOCM_MASK | LVDS_DIFF_V_MASK,
+-				LVDS_VOCM(0) | LVDS_DIFF_V(2));
++				LVDS_VOCM(2) | LVDS_DIFF_V(2));
+ 		/* The MSB of each pixel component is on D7 */
+ 		phy_update_bits(inno, REGISTER_PART_LVDS, 0x00,
+ 				LVDS_MSB_SEL_MASK, LVDS_MSB_SEL_D7);
+ 	}
+ 
+-	/* Sample clock reverse direction */
++	/*
++	 * Sample clock reverse direction; the RK3128 keeps the forward one its
++	 * u-boot leaves (the VOP inverts the LVDS dclk there instead).
++	 */
+ 	phy_update_bits(inno, REGISTER_PART_ANALOG, 0x08,
+ 			SAMPLE_CLOCK_DIRECTION_MASK | LOWFRE_EN_MASK,
+-			SAMPLE_CLOCK_DIRECTION_REVERSE |
++			(inno->pdata->lvds_analog_init ?
++			 SAMPLE_CLOCK_DIRECTION_FORWARD :
++			 SAMPLE_CLOCK_DIRECTION_REVERSE) |
+ 			PLL_OUTPUT_FREQUENCY_DIV_BY_1);
+ 
+ 	/* Select LVDS mode */

@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Sat, 7 Nov 2026 19:07:04 -0600
+Subject: [PATCH] Input: silead: restore the RK3128 reference board firmware host calibration
+
+
+diff --git a/Documentation/devicetree/bindings/input/touchscreen/silead,gsl1680.yaml b/Documentation/devicetree/bindings/input/touchscreen/silead,gsl1680.yaml
+index 5381a96..0700ac9 100644
+--- a/Documentation/devicetree/bindings/input/touchscreen/silead,gsl1680.yaml
++++ b/Documentation/devicetree/bindings/input/touchscreen/silead,gsl1680.yaml
+@@ -14,12 +14,20 @@ allOf:
+ 
+ properties:
+   compatible:
+-    enum:
+-      - silead,gsl1680
+-      - silead,gsl1688
+-      - silead,gsl3670
+-      - silead,gsl3675
+-      - silead,gsl3692
++    oneOf:
++      - enum:
++          - silead,gsl1680
++          - silead,gsl1688
++          - silead,gsl3670
++          - silead,gsl3675
++          - silead,gsl3692
++      - items:
++          - const: rockchip,rk3128-reference-gslx680
++          - const: silead,gsl1680
++        description: >
++          RK3128 reference board with GSLX670_FW (gslx680-d708.fw). Applies the panel's
++          vendor host calibration, including X inversion. Advertise the
++          calibrated ranges (X 0..800, Y 0..1280); do not invert X again.
+ 
+   reg:
+     maxItems: 1
+diff --git a/drivers/input/touchscreen/silead.c b/drivers/input/touchscreen/silead.c
+index 44d7141..52a37c2 100644
+--- a/drivers/input/touchscreen/silead.c
++++ b/drivers/input/touchscreen/silead.c
+@@ -26,6 +26,8 @@
+ 
+ #include <linux/unaligned.h>
+ 
++#include "silead_d708.h"
++
+ #define SILEAD_TS_NAME		"silead_ts"
+ 
+ #define SILEAD_REG_RESET	0xE0
+@@ -77,6 +79,7 @@ struct silead_ts_data {
+ 	int id[SILEAD_MAX_FINGERS];
+ 	u32 efi_fw_min_max[4];
+ 	bool efi_fw_min_max_set;
++	bool d708_calibration;
+ 	bool pen_supported;
+ 	bool pen_down;
+ 	u32 pen_x_res;
+@@ -288,9 +291,14 @@ static void silead_ts_read_data(struct i2c_client *client)
+ 		 */
+ 		data->id[touch_nr] = (bufp[SILEAD_POINT_X_MSB_OFF] &
+ 				      SILEAD_EXTRA_DATA_MASK) >> 4;
+-		touchscreen_set_mt_pos(&data->pos[touch_nr], &data->prop,
+-			get_unaligned_le16(&bufp[SILEAD_POINT_X_OFF]) & 0xfff,
+-			get_unaligned_le16(&bufp[SILEAD_POINT_Y_OFF]) & 0xfff);
++		{
++			int x = get_unaligned_le16(&bufp[SILEAD_POINT_X_OFF]) & 0xfff;
++			int y = get_unaligned_le16(&bufp[SILEAD_POINT_Y_OFF]) & 0xfff;
++
++			if (data->d708_calibration)
++				silead_d708_calibrate(&x, &y);
++			touchscreen_set_mt_pos(&data->pos[touch_nr], &data->prop, x, y);
++		}
+ 		touch_nr++;
+ 	}
+ 
+@@ -664,6 +672,7 @@ static int silead_ts_probe(struct i2c_client *client)
+ 
+ 	i2c_set_clientdata(client, data);
+ 	data->client = client;
++	data->d708_calibration = device_get_match_data(dev) != NULL;
+ 
+ 	error = silead_ts_set_default_fw_name(data, id);
+ 	if (error)
+@@ -803,7 +812,10 @@ MODULE_DEVICE_TABLE(acpi, silead_ts_acpi_match);
+ #endif
+ 
+ #ifdef CONFIG_OF
++static const bool silead_d708_calibration = true;
++
+ static const struct of_device_id silead_ts_of_match[] = {
++	{ .compatible = "rockchip,rk3128-reference-gslx680", .data = &silead_d708_calibration },
+ 	{ .compatible = "silead,gsl1680" },
+ 	{ .compatible = "silead,gsl1688" },
+ 	{ .compatible = "silead,gsl3670" },
+diff --git a/drivers/input/touchscreen/silead_d708.h b/drivers/input/touchscreen/silead_d708.h
+new file mode 100644
+index 0000000..d5bb217
+--- /dev/null
++++ b/drivers/input/touchscreen/silead_d708.h
+@@ -0,0 +1,25 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* RK3128 reference board GSLX670_FW: vendor ScreenResolution() calibration, #579. */
++#ifndef _SILEAD_D708_H
++#define _SILEAD_D708_H
++
++static inline int silead_d708_axis(int raw, int gain, int offset,
++				  int extent, int maximum)
++{
++	int fixed = ((raw - offset) * gain + 2048) / 4096;
++	int value = fixed * maximum / extent;
++
++	/* The vendor excludes ten counts at each edge, then clips inside it. */
++	if (value <= 10)
++		value = 11;
++	else if (value >= maximum - 10)
++		value = maximum - 11;
++	return value;
++}
++
++static inline void silead_d708_calibrate(int *x, int *y)
++{
++	*x = 800 - silead_d708_axis(*x, 4161, 8, 1024, 800);
++	*y = silead_d708_axis(*y, 4115, 3, 640, 1280);
++}
++#endif

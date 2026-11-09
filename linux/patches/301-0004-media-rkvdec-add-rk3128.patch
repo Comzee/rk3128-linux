@@ -1,0 +1,270 @@
+From d3f370cd9d7f0d8a9ef23c008785ec9e125c4b36 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 10:37:05 -0600
+Subject: [PATCH 4/5] media: rkvdec: Add RK3128 support
+
+The RK3128 HEVC decoder is the RK3288 block (hardware id 0x6867, 68
+registers, HEVC only), limited to 1080p, behind a bus it shares with the
+Hantro VPU.
+
+Add the variant:
+ - the RK3288 register count and HEVC backend, with a 1920x1088 limit;
+ - RKVDEC_QUIRK_NO_CHROMA_CACHE: this block has one prefetch cache
+   command register (0x410). The vendor driver clears only that one for
+   it (VDEC_CLR_CACHE0); 0x450 is the second cache of the later RKVDEC
+   and lies in the IOMMU's first bank here (ZAP_ONE_LINE);
+ - RKVDEC_QUIRK_VCODEC_COMBO: the block joins the bus arbiter in probe,
+   before its IRQ and runtime PM, and its runtime resume takes the bus
+   before the clocks and its runtime suspend gives it back after them.
+   Its IOMMU does the same in its own callbacks, and is resumed first
+   (device link), so a job's resume waits for the VPU to let go of the
+   bus and fails if it does not. The threaded IRQ handler reads no
+   register unless the device is runtime-active and has a job. The
+   hardware id is logged once, at the first job, as the first proof
+   that the bus switch works.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+ .../media/platform/rockchip/rkvdec/Kconfig    |  1 +
+ .../platform/rockchip/rkvdec/rkvdec-hevc.c    |  3 +-
+ .../media/platform/rockchip/rkvdec/rkvdec.c   | 96 ++++++++++++++++++-
+ .../media/platform/rockchip/rkvdec/rkvdec.h   |  8 ++
+ 4 files changed, 105 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/rockchip/rkvdec/Kconfig b/drivers/media/platform/rockchip/rkvdec/Kconfig
+index 5f3bdd848..a670b9551 100644
+--- a/drivers/media/platform/rockchip/rkvdec/Kconfig
++++ b/drivers/media/platform/rockchip/rkvdec/Kconfig
+@@ -9,6 +9,7 @@ config VIDEO_ROCKCHIP_VDEC
+ 	select V4L2_MEM2MEM_DEV
+ 	select V4L2_H264
+ 	select V4L2_VP9
++	select ROCKCHIP_VCODEC_COMBO if ARCH_ROCKCHIP && ARM && OF
+ 	help
+ 	  Support for the Rockchip Video Decoder IP present on Rockchip SoCs,
+ 	  which accelerates video decoding.
+diff --git a/drivers/media/platform/rockchip/rkvdec/rkvdec-hevc.c b/drivers/media/platform/rockchip/rkvdec/rkvdec-hevc.c
+index 88e90c438..c6c65ff27 100644
+--- a/drivers/media/platform/rockchip/rkvdec/rkvdec-hevc.c
++++ b/drivers/media/platform/rockchip/rkvdec/rkvdec-hevc.c
+@@ -561,7 +561,8 @@ static int rkvdec_hevc_run(struct rkvdec_ctx *ctx)
+ 	schedule_delayed_work(&rkvdec->watchdog_work, msecs_to_jiffies(2000));
+ 
+ 	writel(1, rkvdec->regs + RKVDEC_REG_PREF_LUMA_CACHE_COMMAND);
+-	writel(1, rkvdec->regs + RKVDEC_REG_PREF_CHR_CACHE_COMMAND);
++	if (!(rkvdec->variant->quirks & RKVDEC_QUIRK_NO_CHROMA_CACHE))
++		writel(1, rkvdec->regs + RKVDEC_REG_PREF_CHR_CACHE_COMMAND);
+ 
+ 	if (rkvdec->variant->quirks & RKVDEC_QUIRK_DISABLE_QOS)
+ 		rkvdec_quirks_disable_qos(ctx);
+diff --git a/drivers/media/platform/rockchip/rkvdec/rkvdec.c b/drivers/media/platform/rockchip/rkvdec/rkvdec.c
+index 061281f90..c335222a6 100644
+--- a/drivers/media/platform/rockchip/rkvdec/rkvdec.c
++++ b/drivers/media/platform/rockchip/rkvdec/rkvdec.c
+@@ -27,6 +27,7 @@
+ #include <media/v4l2-mem2mem.h>
+ #include <media/videobuf2-core.h>
+ #include <media/videobuf2-vmalloc.h>
++#include <soc/rockchip/rockchip_vcodec_combo.h>
+ 
+ #include "rkvdec.h"
+ #include "rkvdec-regs.h"
+@@ -510,6 +511,25 @@ static const struct rkvdec_coded_fmt_desc rk3288_coded_fmts[] = {
+ 	}
+ };
+ 
++/* RK3128: the RK3288 block, limited to 1080p */
++static const struct rkvdec_coded_fmt_desc rk3128_coded_fmts[] = {
++	{
++		.fourcc = V4L2_PIX_FMT_HEVC_SLICE,
++		.frmsize = {
++			.min_width = 64,
++			.max_width = 1920,
++			.step_width = 64,
++			.min_height = 64,
++			.max_height = 1088,
++			.step_height = 16,
++		},
++		.ctrls = &rkvdec_hevc_ctrls,
++		.ops = &rkvdec_hevc_fmt_ops,
++		.num_decoded_fmts = ARRAY_SIZE(rkvdec_hevc_decoded_fmts),
++		.decoded_fmts = rkvdec_hevc_decoded_fmts,
++	}
++};
++
+ static const struct rkvdec_coded_fmt_desc vdpu381_coded_fmts[] = {
+ 	{
+ 		.fourcc = V4L2_PIX_FMT_HEVC_SLICE,
+@@ -1168,12 +1188,22 @@ static void rkvdec_device_run(void *priv)
+ 	if (WARN_ON(!desc))
+ 		return;
+ 
++	/*
++	 * With a shared bus (RK3128) the resume of the IOMMU and of the block
++	 * waits for the bus; it fails if the other decoder keeps it.
++	 */
+ 	ret = pm_runtime_resume_and_get(rkvdec->dev);
+ 	if (ret < 0) {
+ 		rkvdec_job_finish_no_pm(ctx, VB2_BUF_STATE_ERROR);
+ 		return;
+ 	}
+ 
++	if (rkvdec->combo && !rkvdec->hw_id_logged) {
++		rkvdec->hw_id_logged = true;
++		dev_info(rkvdec->dev, "hardware id %#06x\n",
++			 readl(rkvdec->regs) >> 16);
++	}
++
+ 	ret = desc->ops->run(ctx);
+ 	if (ret)
+ 		rkvdec_job_finish(ctx, VB2_BUF_STATE_ERROR);
+@@ -1520,8 +1550,22 @@ static irqreturn_t rkvdec_irq_handler(int irq, void *priv)
+ 	struct rkvdec_dev *rkvdec = priv;
+ 	struct rkvdec_ctx *ctx = v4l2_m2m_get_curr_priv(rkvdec->m2m_dev);
+ 	const struct rkvdec_variant *variant = rkvdec->variant;
++	irqreturn_t ret;
++
++	if (!rkvdec->combo)
++		return variant->ops->irq_handler(ctx);
+ 
+-	return variant->ops->irq_handler(ctx);
++	/*
++	 * A shared bus may point at the other decoder whenever this one is
++	 * not runtime-active: read no register then, nor without a job.
++	 */
++	if (pm_runtime_get_if_active(rkvdec->dev) <= 0)
++		return IRQ_NONE;
++
++	ret = ctx ? variant->ops->irq_handler(ctx) : IRQ_NONE;
++	pm_runtime_put_autosuspend(rkvdec->dev);
++
++	return ret;
+ }
+ 
+ /*
+@@ -1660,6 +1704,15 @@ static const struct rkvdec_variant_ops rk3399_variant_ops = {
+ 	.flatten_matrices = transpose_and_flatten_matrices,
+ };
+ 
++static const struct rkvdec_variant rk3128_rkvdec_variant = {
++	.num_regs = 68,
++	.coded_fmts = rk3128_coded_fmts,
++	.num_coded_fmts = ARRAY_SIZE(rk3128_coded_fmts),
++	.ops = &rk3399_variant_ops,
++	.has_single_reg_region = true,
++	.quirks = RKVDEC_QUIRK_NO_CHROMA_CACHE | RKVDEC_QUIRK_VCODEC_COMBO,
++};
++
+ static const struct rkvdec_variant rk3288_rkvdec_variant = {
+ 	.num_regs = 68,
+ 	.coded_fmts = rk3288_coded_fmts,
+@@ -1740,6 +1793,10 @@ static const struct rkvdec_variant vdpu383_variant = {
+ };
+ 
+ static const struct of_device_id of_rkvdec_match[] = {
++	{
++		.compatible = "rockchip,rk3128-vdec",
++		.data = &rk3128_rkvdec_variant,
++	},
+ 	{
+ 		.compatible = "rockchip,rk3288-vdec",
+ 		.data = &rk3288_rkvdec_variant,
+@@ -1764,6 +1821,24 @@ static const struct of_device_id of_rkvdec_match[] = {
+ };
+ MODULE_DEVICE_TABLE(of, of_rkvdec_match);
+ 
++/*
++ * Join the arbiter of the bus shared with the VPU. Before the IRQ is
++ * requested (so it is freed first) and before runtime PM is enabled: the
++ * runtime PM callbacks take and give back the bus.
++ */
++static int rkvdec_combo_init(struct rkvdec_dev *rkvdec)
++{
++	struct rockchip_vcodec_combo_client *combo;
++
++	combo = devm_rockchip_vcodec_combo_get(rkvdec->dev);
++	if (IS_ERR_OR_NULL(combo))
++		return dev_err_probe(rkvdec->dev, combo ? PTR_ERR(combo) : -ENODEV,
++				     "no arbiter for the bus shared with the VPU\n");
++
++	rkvdec->combo = combo;
++	return 0;
++}
++
+ static int rkvdec_probe(struct platform_device *pdev)
+ {
+ 	const struct rkvdec_variant *variant;
+@@ -1817,6 +1892,12 @@ static int rkvdec_probe(struct platform_device *pdev)
+ 
+ 	vb2_dma_contig_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
+ 
++	if (rkvdec->variant->quirks & RKVDEC_QUIRK_VCODEC_COMBO) {
++		ret = rkvdec_combo_init(rkvdec);
++		if (ret)
++			return ret;
++	}
++
+ 	irq = platform_get_irq(pdev, 0);
+ 	if (irq < 0)
+ 		return irq;
+@@ -1881,8 +1962,18 @@ static void rkvdec_remove(struct platform_device *pdev)
+ static int rkvdec_runtime_resume(struct device *dev)
+ {
+ 	struct rkvdec_dev *rkvdec = dev_get_drvdata(dev);
++	int ret;
+ 
+-	return clk_bulk_prepare_enable(rkvdec->num_clocks, rkvdec->clocks);
++	/* the shared bus (RK3128) first: no-op without one */
++	ret = rockchip_vcodec_combo_power_on(rkvdec->combo);
++	if (ret)
++		return ret;
++
++	ret = clk_bulk_prepare_enable(rkvdec->num_clocks, rkvdec->clocks);
++	if (ret)
++		rockchip_vcodec_combo_power_off(rkvdec->combo);
++
++	return ret;
+ }
+ 
+ static int rkvdec_runtime_suspend(struct device *dev)
+@@ -1890,6 +1981,7 @@ static int rkvdec_runtime_suspend(struct device *dev)
+ 	struct rkvdec_dev *rkvdec = dev_get_drvdata(dev);
+ 
+ 	clk_bulk_disable_unprepare(rkvdec->num_clocks, rkvdec->clocks);
++	rockchip_vcodec_combo_power_off(rkvdec->combo);
+ 	return 0;
+ }
+ #endif
+diff --git a/drivers/media/platform/rockchip/rkvdec/rkvdec.h b/drivers/media/platform/rockchip/rkvdec/rkvdec.h
+index a24be6638..91da58550 100644
+--- a/drivers/media/platform/rockchip/rkvdec/rkvdec.h
++++ b/drivers/media/platform/rockchip/rkvdec/rkvdec.h
+@@ -24,6 +24,10 @@
+ #include <media/videobuf2-dma-contig.h>
+ 
+ #define RKVDEC_QUIRK_DISABLE_QOS	BIT(0)
++/* the HEVC-only block has one prefetch cache, no chroma cache at 0x450 */
++#define RKVDEC_QUIRK_NO_CHROMA_CACHE	BIT(1)
++/* the bus is shared with the Hantro VPU through a GRF switch (RK3128) */
++#define RKVDEC_QUIRK_VCODEC_COMBO	BIT(2)
+ 
+ #define RKVDEC_1080P_PIXELS		(1920 * 1088)
+ #define RKVDEC_4K_PIXELS		(4096 * 2304)
+@@ -31,6 +35,7 @@
+ 
+ struct rkvdec_ctx;
+ struct rkvdec_rcb_config;
++struct rockchip_vcodec_combo_client;
+ 
+ struct rkvdec_ctrl_desc {
+ 	struct v4l2_ctrl_config cfg;
+@@ -142,6 +147,9 @@ struct rkvdec_dev {
+ 	struct iommu_domain *iommu_domain;
+ 	struct iommu_domain *empty_domain;
+ 	const struct rkvdec_variant *variant;
++	/* RKVDEC_QUIRK_VCODEC_COMBO */
++	struct rockchip_vcodec_combo_client *combo;
++	bool hw_id_logged;
+ };
+ 
+ struct rkvdec_ctx {

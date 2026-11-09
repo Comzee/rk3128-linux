@@ -1,0 +1,74 @@
+From: RK3128 reference maintainers
+Subject: [PATCH] v4l2codecs: keep HEVC conformance windows in CropMeta
+
+A downstream that supports VideoMeta and CropMeta can scan out a cropped
+view of the capture DMA-BUF without reading it on the CPU. Use that contract
+instead of unconditionally copying every conformance-window picture.
+Sinks that cannot apply a crop retain the existing copy path. Set the crop
+on the unique pool buffer before it is shared with the decoder request / DPB.
+Recompute copy_frames per sequence so a prior layout cannot make it sticky.
+
+Based on Debian gst-plugins-bad 1.26.2-3+deb13u3; LGPL-2.0-or-later.
+
+--- a/sys/v4l2codecs/gstv4l2codech265dec.c
++++ b/sys/v4l2codecs/gstv4l2codech265dec.c
+@@ -110,6 +110,7 @@
+   GstV4l2CodecPool *src_pool;
+   gint min_pool_size;
+   gboolean has_videometa;
++  gboolean has_cropmeta;
+   gboolean streaming;
+   gboolean copy_frames;
+   gboolean need_sequence;
+@@ -494,6 +495,8 @@
+ 
+   self->has_videometa = gst_query_find_allocation_meta (query,
+       GST_VIDEO_META_API_TYPE, NULL);
++  self->has_cropmeta = gst_query_find_allocation_meta (query,
++      GST_VIDEO_CROP_META_API_TYPE, NULL);
+ 
+   gst_query_parse_allocation (query, &caps, NULL);
+   if (!caps) {
+@@ -993,6 +996,10 @@
+     }
+   }
+ 
++  /* The conformance window is a view of the decoded picture. Keep the
++   * capture buffer when downstream can apply that view without a pixel copy. */
++  self->copy_frames = self->need_crop && !self->has_cropmeta;
++
+   /* Check if we can zero-copy buffers */
+   if (!self->has_videometa) {
+     GstVideoInfo ref_vinfo;
+@@ -1011,8 +1018,6 @@
+         break;
+       }
+     }
+-  } else {
+-    self->copy_frames = self->need_crop;
+   }
+ 
+   return GST_FLOW_OK;
+@@ -1349,6 +1354,22 @@
+     return FALSE;
+   }
+ 
++  /* Attach before the buffer is shared with the request / DPB. The pool
++   * removes non-pooled metadata when recycling the buffer; a later sequence
++   * must not inherit an earlier picture's conformance window. */
++  if (self->need_crop && !self->copy_frames) {
++    GstVideoCropMeta *crop = gst_buffer_add_video_crop_meta (buffer);
++
++    if (!crop) {
++      gst_buffer_unref (buffer);
++      return FALSE;
++    }
++    crop->x = self->crop_rect_x;
++    crop->y = self->crop_rect_y;
++    crop->width = self->crop_rect_width;
++    crop->height = self->crop_rect_height;
++  }
++
+   frame->output_buffer = buffer;
+   return TRUE;
+ }

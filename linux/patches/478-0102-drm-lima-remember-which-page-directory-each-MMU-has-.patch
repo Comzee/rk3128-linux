@@ -1,0 +1,266 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: w478 <w478@local>
+Date: Sat, 7 Nov 2026 07:44:24 -0600
+Subject: [PATCH] drm/lima: remember which page directory each MMU has loaded
+
+This is the bug that made the #375 prototype series (375-0101..0105) fault
+on the board: `gpmmu page fault at ... of type read`, `gp task error`,
+`ppmmu0/1 page fault`, `gp job timeout` on the first GP job of every Demo
+run, with the runtime switches either way.
+
+375-0102 decided "same page tables, a TLB zap is enough" from
+`pipe->current_vm == task->vm`. `pipe->current_vm` is a per-pipe software
+pointer that nothing clears on a power transition, while the MMU's page
+directory register does not survive one:
+
+  lima_pm_busy() -> pm_runtime_resume_and_get() -> lima_device_resume()
+  -> lima_mmu_resume() -> lima_mmu_hw_init(), which HARD_RESETs the MMU and
+  writes LIMA_MMU_DTE_ADDR = dev->empty_vm->pd.dma.
+
+lima's autosuspend delay is 200 ms, so every gap in rendering (app start-up,
+asset loading, a scene change, the pause between two runs) suspends the GPU.
+On the next task `pipe->current_vm` still equals `task->vm`, 375-0102 only
+zapped the TLB, and the GPU then walked the all-zero empty page directory:
+every access is a page fault of type read. lima_mmu_page_fault_resume()
+(the timeout handler) leaves the MMU on the empty page directory the same
+way.
+
+The vendor Utgard r6p0 driver does not have this hole because it tracks the
+page directory per *group*, next to the hardware it describes, and clears it
+on every power and reset transition:
+
+  mali_group_start_gp_job  0xc0391e7c  ldm r4,{r0,r3}; cmp r3,r6
+                                       -> group->session == job->session ?
+                                          mali_mmu_zap_tlb_without_stall
+                                          : mali_mmu_activate_page_directory
+                                            + group->session = job->session
+  mali_group_start_pp_job  0xc0391fdc  the same test
+  mali_group_power_down    0xc0391ad8  if (group->session)
+                                         mali_mmu_activate_empty_page_directory
+                                         group->session = NULL
+  mali_group_recovery_reset 0xc03916b0 ... mali_mmu_reset; group->session = NULL
+  mali_executor_abort_session 0xc039057c activates the empty page directory
+                                       for each of its groups
+
+Keep the same invariant in lima, as the physical address actually written to
+LIMA_MMU_DTE_ADDR (ip->data.pd_dma), so it cannot drift from the register:
+
+- lima_mmu_hw_init() (probe and every runtime resume) and
+  lima_mmu_page_fault_resume() set it to empty_vm's page directory,
+- lima_mmu_switch_vm() sets it to the VM it just programmed,
+- lima_mmu_activate_vm() zaps the TLB when the MMU already has that page
+  directory and does the full stall-and-switch otherwise.
+
+Comparing the DMA address rather than the struct lima_vm pointer also makes
+the check safe without taking a VM reference from the IRQ path: if a freed
+VM's page directory page is reused by a new VM, the register genuinely
+points at the new VM's page directory, and the TLB zap covers the stale
+translations.
+
+lima.mmu_zap_tlb (0644, default Y) turns the cheap path off at runtime for
+the A/B; N is exactly lima's old stall-and-reprogram-every-task behaviour.
+
+Risk to pictures: none. No arithmetic changes, no change to what the GPU
+reads; the TLB zap is the same maintenance lima already relies on in
+lima_sched_recover_work() after a heap grow writes new PTEs.
+
+Spike: RK3128 reference #478 (beat-kernel), not for upstream as is.
+---
+ drivers/gpu/drm/lima/lima_device.h |  2 ++
+ drivers/gpu/drm/lima/lima_drv.c    |  4 +++
+ drivers/gpu/drm/lima/lima_drv.h    |  1 +
+ drivers/gpu/drm/lima/lima_mmu.c    | 36 ++++++++++++++++++++++++
+ drivers/gpu/drm/lima/lima_mmu.h    |  2 ++
+ drivers/gpu/drm/lima/lima_sched.c  | 44 ++++++++++++++++++++++++------
+ 6 files changed, 80 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/gpu/drm/lima/lima_device.h b/drivers/gpu/drm/lima/lima_device.h
+index 41b9d7b..c62cee0 100644
+--- a/drivers/gpu/drm/lima/lima_device.h
++++ b/drivers/gpu/drm/lima/lima_device.h
+@@ -66,6 +66,8 @@ struct lima_ip {
+ 		spinlock_t lock;
+ 		/* pmu/bcast */
+ 		u32 mask;
++		/* mmu: page directory currently in LIMA_MMU_DTE_ADDR */
++		dma_addr_t pd_dma;
+ 	} data;
+ };
+ 
+diff --git a/drivers/gpu/drm/lima/lima_drv.c b/drivers/gpu/drm/lima/lima_drv.c
+index 6a3d5e2..deec16d 100644
+--- a/drivers/gpu/drm/lima/lima_drv.c
++++ b/drivers/gpu/drm/lima/lima_drv.c
+@@ -22,6 +22,7 @@ uint lima_heap_init_nr_pages = 8;
+ uint lima_max_error_tasks;
+ uint lima_job_hang_limit;
+ int lima_l2_max_reads = 0x1c;
++bool lima_mmu_zap_tlb = true;
+ 
+ MODULE_PARM_DESC(sched_timeout_ms, "task run timeout in ms");
+ module_param_named(sched_timeout_ms, lima_sched_timeout_ms, int, 0444);
+@@ -38,6 +39,9 @@ module_param_named(job_hang_limit, lima_job_hang_limit, uint, 0444);
+ MODULE_PARM_DESC(l2_max_reads, "L2 cache MAX_READS (outstanding reads); -1 keeps the hardware reset value like the vendor driver (default 0x1c)");
+ module_param_named(l2_max_reads, lima_l2_max_reads, int, 0444);
+ 
++MODULE_PARM_DESC(mmu_zap_tlb, "with the page directory the MMU already has, only zap the TLB instead of stalling and reprogramming it, like the vendor driver (default Y)");
++module_param_named(mmu_zap_tlb, lima_mmu_zap_tlb, bool, 0644);
++
+ static int lima_ioctl_get_param(struct drm_device *dev, void *data, struct drm_file *file)
+ {
+ 	struct drm_lima_get_param *args = data;
+diff --git a/drivers/gpu/drm/lima/lima_drv.h b/drivers/gpu/drm/lima/lima_drv.h
+index 81697c6..c6d0faf 100644
+--- a/drivers/gpu/drm/lima/lima_drv.h
++++ b/drivers/gpu/drm/lima/lima_drv.h
+@@ -12,6 +12,7 @@
+ extern int lima_sched_timeout_ms;
+ extern uint lima_heap_init_nr_pages;
+ extern int lima_l2_max_reads;
++extern bool lima_mmu_zap_tlb;
+ extern uint lima_max_error_tasks;
+ extern uint lima_job_hang_limit;
+ 
+diff --git a/drivers/gpu/drm/lima/lima_mmu.c b/drivers/gpu/drm/lima/lima_mmu.c
+index 6611e28..c884a1c 100644
+--- a/drivers/gpu/drm/lima/lima_mmu.c
++++ b/drivers/gpu/drm/lima/lima_mmu.c
+@@ -74,6 +74,14 @@ static int lima_mmu_hw_init(struct lima_ip *ip)
+ 	mmu_write(LIMA_MMU_INT_MASK,
+ 		  LIMA_MMU_INT_PAGE_FAULT | LIMA_MMU_INT_READ_BUS_ERROR);
+ 	mmu_write(LIMA_MMU_DTE_ADDR, dev->empty_vm->pd.dma);
++	/*
++	 * The hard reset above dropped whatever page directory this MMU had.
++	 * It now walks the empty one, so no VM is loaded any more. Every
++	 * runtime-PM resume goes through here (lima_mmu_resume), so a caller
++	 * that decides "same VM, TLB zap is enough" has to look at this and
++	 * not at a per-pipe VM pointer that survives the suspend.
++	 */
++	ip->data.pd_dma = dev->empty_vm->pd.dma;
+ 	return lima_mmu_send_command(LIMA_MMU_COMMAND_ENABLE_PAGING,
+ 				     LIMA_MMU_STATUS, v,
+ 				     v & LIMA_MMU_STATUS_PAGING_ENABLED);
+@@ -131,6 +139,31 @@ void lima_mmu_flush_tlb(struct lima_ip *ip)
+ 	mmu_write(LIMA_MMU_COMMAND, LIMA_MMU_COMMAND_ZAP_CACHE);
+ }
+ 
++bool lima_mmu_has_vm(struct lima_ip *ip, struct lima_vm *vm)
++{
++	return ip->data.pd_dma == vm->pd.dma;
++}
++
++/*
++ * The vendor Utgard driver's mali_group_start_gp_job/_pp_job
++ * (0xc0391e7c/0xc0391fdc): compare the job's session with the one the group
++ * has loaded, then either mali_mmu_activate_page_directory (0xc038a888,
++ * stall + DTE + zap + unstall) or just mali_mmu_zap_tlb_without_stall
++ * (0xc038a868, one ZAP_CACHE write). Its group->session is cleared whenever
++ * the group loses power (mali_group_power_down, 0xc0391ad8, which activates
++ * the empty page directory first) or is reset (mali_group_recovery_reset,
++ * 0xc03916b0), so a reset can never leave it claiming a page directory the
++ * MMU does not have. ip->data.pd_dma is the same invariant, kept as the
++ * physical address actually written to LIMA_MMU_DTE_ADDR.
++ */
++void lima_mmu_activate_vm(struct lima_ip *ip, struct lima_vm *vm)
++{
++	if (lima_mmu_has_vm(ip, vm))
++		lima_mmu_flush_tlb(ip);
++	else
++		lima_mmu_switch_vm(ip, vm);
++}
++
+ void lima_mmu_switch_vm(struct lima_ip *ip, struct lima_vm *vm)
+ {
+ 	struct lima_device *dev = ip->dev;
+@@ -148,6 +181,8 @@ void lima_mmu_switch_vm(struct lima_ip *ip, struct lima_vm *vm)
+ 	lima_mmu_send_command(LIMA_MMU_COMMAND_DISABLE_STALL,
+ 			      LIMA_MMU_STATUS, v,
+ 			      !(v & LIMA_MMU_STATUS_STALL_ACTIVE));
++
++	ip->data.pd_dma = vm->pd.dma;
+ }
+ 
+ void lima_mmu_page_fault_resume(struct lima_ip *ip)
+@@ -165,6 +200,7 @@ void lima_mmu_page_fault_resume(struct lima_ip *ip)
+ 				      LIMA_MMU_DTE_ADDR, v, v == 0);
+ 		mmu_write(LIMA_MMU_INT_MASK, LIMA_MMU_INT_PAGE_FAULT | LIMA_MMU_INT_READ_BUS_ERROR);
+ 		mmu_write(LIMA_MMU_DTE_ADDR, dev->empty_vm->pd.dma);
++		ip->data.pd_dma = dev->empty_vm->pd.dma;
+ 		lima_mmu_send_command(LIMA_MMU_COMMAND_ENABLE_PAGING,
+ 				      LIMA_MMU_STATUS, v,
+ 				      v & LIMA_MMU_STATUS_PAGING_ENABLED);
+diff --git a/drivers/gpu/drm/lima/lima_mmu.h b/drivers/gpu/drm/lima/lima_mmu.h
+index f0c97ac..cd651ec 100644
+--- a/drivers/gpu/drm/lima/lima_mmu.h
++++ b/drivers/gpu/drm/lima/lima_mmu.h
+@@ -14,6 +14,8 @@ void lima_mmu_fini(struct lima_ip *ip);
+ 
+ void lima_mmu_flush_tlb(struct lima_ip *ip);
+ void lima_mmu_switch_vm(struct lima_ip *ip, struct lima_vm *vm);
++void lima_mmu_activate_vm(struct lima_ip *ip, struct lima_vm *vm);
++bool lima_mmu_has_vm(struct lima_ip *ip, struct lima_vm *vm);
+ void lima_mmu_page_fault_resume(struct lima_ip *ip);
+ 
+ #endif
+diff --git a/drivers/gpu/drm/lima/lima_sched.c b/drivers/gpu/drm/lima/lima_sched.c
+index 9a1e6b9..5c7d3d9 100644
+--- a/drivers/gpu/drm/lima/lima_sched.c
++++ b/drivers/gpu/drm/lima/lima_sched.c
+@@ -203,6 +203,40 @@ static void lima_pm_idle(struct lima_device *ldev)
+ 	pm_runtime_put_autosuspend(ldev->dev);
+ }
+ 
++static void lima_sched_mmu_activate(struct lima_ip *ip, struct lima_vm *vm)
++{
++	if (READ_ONCE(lima_mmu_zap_tlb))
++		lima_mmu_activate_vm(ip, vm);
++	else
++		lima_mmu_switch_vm(ip, vm);
++}
++
++/*
++ * Put the task's page directory into every MMU of the pipe. With the page
++ * directory the MMU already has (tracked per MMU, so a runtime-PM resume or
++ * any reset makes this false) this is one ZAP_CACHE write instead of a
++ * stall, a DTE write, a zap and an unstall, each with its own register
++ * poll. That is what the vendor driver does for a job of the session the
++ * group already has loaded (mali_group_start_pp_job, 0xc0391fdc).
++ */
++static void lima_sched_activate_vm(struct lima_sched_pipe *pipe,
++				   struct lima_vm *vm)
++{
++	int i;
++
++	if (pipe->current_vm != vm) {
++		lima_vm_put(pipe->current_vm);
++		pipe->current_vm = lima_vm_get(vm);
++	}
++
++	if (pipe->bcast_mmu)
++		lima_sched_mmu_activate(pipe->bcast_mmu, vm);
++	else {
++		for (i = 0; i < pipe->num_mmu; i++)
++			lima_sched_mmu_activate(pipe->mmu[i], vm);
++	}
++}
++
+ static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
+ {
+ 	struct lima_sched_task *task = to_lima_task(job);
+@@ -252,15 +286,7 @@ static struct dma_fence *lima_sched_run_job(struct drm_sched_job *job)
+ 	for (i = 0; i < pipe->num_l2_cache; i++)
+ 		lima_l2_cache_flush(pipe->l2_cache[i]);
+ 
+-	lima_vm_put(pipe->current_vm);
+-	pipe->current_vm = lima_vm_get(task->vm);
+-
+-	if (pipe->bcast_mmu)
+-		lima_mmu_switch_vm(pipe->bcast_mmu, pipe->current_vm);
+-	else {
+-		for (i = 0; i < pipe->num_mmu; i++)
+-			lima_mmu_switch_vm(pipe->mmu[i], pipe->current_vm);
+-	}
++	lima_sched_activate_vm(pipe, task->vm);
+ 
+ 	trace_lima_task_run(task);
+ 

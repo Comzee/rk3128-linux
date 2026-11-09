@@ -1,0 +1,549 @@
+From d0b4b710ee4d18a00da860da7bf921051a224ba8 Mon Sep 17 00:00:00 2001
+From: RK3128 reference <reference@example.invalid>
+Date: Fri, 6 Nov 2026 10:35:53 -0600
+Subject: [PATCH 2/5] soc: rockchip: Add an arbiter for the RK3128 HEVC/VPU
+ shared bus
+
+On RK3128 the HEVC decoder (driven by rkvdec) and the Hantro VPU have no
+bus clocks of their own: both run on ACLK_VDPU/HCLK_VDPU, and
+GRF_SOC_CON1 bit 15 (hevc_vpu_sel, reset value 0 = VPU) connects one of
+them to the shared bus interface. Rockchip's kernels only touch a block
+and its IOMMU while the bit points at it: the IOMMU of the block that
+loses the bus is disabled before the switch, the IOMMU of the block that
+gets it is enabled after (vcodec_service vcodec_enter_mode(), MPP
+vdpu_3036_set_grf()).
+
+Mainline has two independent drivers for the two halves, and the IOMMUs
+are also reached from outside them (driver core resumes an IOMMU for its
+consumer's probe and unbind, and the DMA layer attaches its domain then).
+So arbitrate where every register access is already gated: runtime PM.
+
+The two decoders and their IOMMUs are clients. Each driver calls
+power_on() first in its runtime resume callback and power_off() last in
+its runtime suspend callback, and touches registers only inside those
+callbacks or while RPM_ACTIVE. The arbiter writes the bit, under its
+lock, to a side only when no client of the other side is powered on, and
+back to the VPU when the last HEVC client powers off. So a block or an
+IOMMU is only touched while the bit points at it, whatever path resumed
+it.
+
+A side that wants the bus waits (3 s at most, then -EBUSY, which fails
+the resume without a sticky runtime PM error) for the other side to
+power off, and asks the other side's devices to runtime-suspend now
+instead of after their autosuspend delay. That is only a hint: a device
+that stays active keeps the bus for its side.
+
+Roles come from the devicetree (the decoders by compatible, an IOMMU
+through a decoder's "iommus"), so an IOMMU is a client from its own
+probe on, before any consumer binds. The GRF is found by compatible,
+with the register, bit and decoder compatibles as match data, so no
+binding needs a GRF phandle.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+---
+ drivers/soc/rockchip/Kconfig                 |  12 +
+ drivers/soc/rockchip/Makefile                |   1 +
+ drivers/soc/rockchip/vcodec-combo.c          | 411 +++++++++++++++++++
+ include/soc/rockchip/rockchip_vcodec_combo.h |  43 ++
+ 4 files changed, 467 insertions(+)
+ create mode 100644 drivers/soc/rockchip/vcodec-combo.c
+ create mode 100644 include/soc/rockchip/rockchip_vcodec_combo.h
+
+diff --git a/drivers/soc/rockchip/Kconfig b/drivers/soc/rockchip/Kconfig
+index 785f60c6f..a98af7f57 100644
+--- a/drivers/soc/rockchip/Kconfig
++++ b/drivers/soc/rockchip/Kconfig
+@@ -22,6 +22,18 @@ config ROCKCHIP_IODOMAIN
+ 	  necessary for the io domain setting of the SoC to match the
+ 	  voltage supplied by the regulators.
+ 
++config ROCKCHIP_VCODEC_COMBO
++	bool "Rockchip HEVC/VPU shared bus arbiter" if COMPILE_TEST
++	depends on OF
++	select MFD_SYSCON
++	help
++	  On RK3128 the HEVC decoder and the Hantro VPU share one bus
++	  interface, and a GRF bit selects which of the two is connected.
++	  This arbiter switches the bus from the runtime PM callbacks of the
++	  two decoders and their IOMMUs, so that no block is touched while
++	  the bus points at the other one. It is selected by the Rockchip
++	  IOMMU and decoder drivers.
++
+ config ROCKCHIP_DTPM
+ 	tristate "Rockchip DTPM hierarchy"
+ 	depends on DTPM && m
+diff --git a/drivers/soc/rockchip/Makefile b/drivers/soc/rockchip/Makefile
+index 23d414433..44429ce6f 100644
+--- a/drivers/soc/rockchip/Makefile
++++ b/drivers/soc/rockchip/Makefile
+@@ -5,3 +5,4 @@
+ obj-$(CONFIG_ROCKCHIP_GRF) += grf.o
+ obj-$(CONFIG_ROCKCHIP_IODOMAIN) += io-domain.o
+ obj-$(CONFIG_ROCKCHIP_DTPM) += dtpm.o
++obj-$(CONFIG_ROCKCHIP_VCODEC_COMBO) += vcodec-combo.o
+diff --git a/drivers/soc/rockchip/vcodec-combo.c b/drivers/soc/rockchip/vcodec-combo.c
+new file mode 100644
+index 000000000..80dc468e4
+--- /dev/null
++++ b/drivers/soc/rockchip/vcodec-combo.c
+@@ -0,0 +1,411 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Rockchip "VPU combo" bus arbiter.
++ *
++ * On RK3128 the HEVC decoder (rkvdec) and the Hantro VPU have no bus
++ * clocks of their own: both run on ACLK_VDPU/HCLK_VDPU, and GRF_SOC_CON1
++ * bit 15 connects either the VPU (0, the reset value) or the HEVC decoder
++ * (1) to the shared bus interface. The vendor kernels only touch a block,
++ * and its IOMMU, while the bit points at it.
++ *
++ * The arbiter enforces that through runtime PM. The two decoders and their
++ * two IOMMUs are its clients, and each of their drivers calls
++ * rockchip_vcodec_combo_power_on() at the start of its runtime resume
++ * callback, before its first register access, and
++ * rockchip_vcodec_combo_power_off() at the end of its runtime suspend
++ * callback, after its last one. Those drivers touch their registers only
++ * inside these callbacks or while the device is RPM_ACTIVE, so:
++ *
++ *   a device of one side touches its registers
++ *     => a client of that side is powered on
++ *     => the bit points at that side.
++ *
++ * The second step holds because the bit is only written under the lock:
++ * to a side when no client of the other side is powered on, and back to
++ * the VPU when the last client of the HEVC side powers off. The two sides
++ * are never powered on at the same time.
++ *
++ * A client whose side wants the bus while the other side has clients
++ * powered on waits for them to power off (COMBO_WAIT_MS at most; then
++ * power_on() fails with -EBUSY and so does the runtime resume), and
++ * meanwhile asks the other side's devices to runtime-suspend now rather
++ * than after their autosuspend delay. That request is only a hint: a
++ * device that stays active (a job running, power/control set to "on")
++ * keeps the bus for its side, and nothing is switched under it.
++ *
++ * The role of a device is read from the devicetree: the decoders by
++ * compatible, an IOMMU through a decoder's "iommus" property. An IOMMU so
++ * becomes a client at its own probe, before any consumer binds, and so
++ * before driver core first resumes it for a consumer's probe.
++ */
++
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/export.h>
++#include <linux/jiffies.h>
++#include <linux/list.h>
++#include <linux/mfd/syscon.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/wait.h>
++
++#include <soc/rockchip/rockchip_vcodec_combo.h>
++
++/* the longest a power_on() waits for the other side (its watchdog is 2 s) */
++#define COMBO_WAIT_MS		3000
++/* how often a waiting power_on() asks the other side again to suspend */
++#define COMBO_KICK_MS		10
++/* clients of one side: a decoder and its IOMMU */
++#define COMBO_MAX_CLIENTS	4
++
++enum combo_side {
++	COMBO_VPU,
++	COMBO_HEVC,
++	COMBO_NUM_SIDES,
++};
++
++struct rockchip_vcodec_combo_data {
++	u32 reg;
++	unsigned int bit;	/* set: the HEVC decoder has the bus */
++	const char *decoder[COMBO_NUM_SIDES];	/* compatible of each side */
++};
++
++struct rockchip_vcodec_combo {
++	struct regmap *grf;
++	const struct rockchip_vcodec_combo_data *data;
++
++	spinlock_t lock;	/* protects the bit and everything below */
++	wait_queue_head_t wq;	/* woken when a side has powered off */
++	unsigned int active[COMBO_NUM_SIDES];	/* clients powered on */
++	struct list_head clients[COMBO_NUM_SIDES];
++};
++
++struct rockchip_vcodec_combo_client {
++	struct list_head node;
++	struct rockchip_vcodec_combo *combo;
++	struct device *dev;
++	enum combo_side side;
++	bool is_iommu;
++	bool on;		/* counted in combo->active[side] */
++};
++
++static const char * const combo_side_names[] = {
++	[COMBO_VPU] = "VPU",
++	[COMBO_HEVC] = "HEVC decoder",
++};
++
++static const struct rockchip_vcodec_combo_data rk3128_combo_data = {
++	.reg = 0x144,	/* GRF_SOC_CON1 */
++	.bit = 15,	/* hevc_vpu_sel */
++	.decoder = {
++		[COMBO_VPU] = "rockchip,rk3128-vpu",
++		[COMBO_HEVC] = "rockchip,rk3128-vdec",
++	},
++};
++
++static const struct of_device_id rockchip_vcodec_combo_grf_match[] = {
++	{ .compatible = "rockchip,rk3128-grf", .data = &rk3128_combo_data },
++	{ /* sentinel */ }
++};
++
++/* one SoC, one GRF: the arbiter is made by its first client, never freed */
++static struct rockchip_vcodec_combo *combo_instance;
++static DEFINE_MUTEX(combo_instance_lock);
++
++/* called with combo->lock held: the syscon regmap uses a spinlock */
++static void combo_switch(struct rockchip_vcodec_combo *c, enum combo_side side)
++	__must_hold(&c->lock)
++{
++	u32 mask = BIT(c->data->bit);
++	u32 val = side == COMBO_HEVC ? mask : 0;
++
++	regmap_write(c->grf, c->data->reg, (mask << 16) | val);
++}
++
++static void combo_client_off(struct rockchip_vcodec_combo *c,
++			     struct rockchip_vcodec_combo_client *cl)
++	__must_hold(&c->lock)
++{
++	if (!cl->on)
++		return;
++
++	cl->on = false;
++	if (--c->active[cl->side])
++		return;
++
++	/*
++	 * The side has nothing powered on any more, and the other side had
++	 * nothing either: no block can be touched now. An idle HEVC decoder
++	 * leaves the bus to the VPU, its reset owner.
++	 */
++	if (cl->side == COMBO_HEVC)
++		combo_switch(c, COMBO_VPU);
++	wake_up_all(&c->wq);
++}
++
++/*
++ * Ask the powered-on devices of @side to runtime-suspend now, the decoders
++ * first (an IOMMU cannot suspend while its decoder is active). Only a hint:
++ * a device that is busy, or kept on, refuses, and its side keeps the bus.
++ */
++static void combo_kick(struct rockchip_vcodec_combo *c, enum combo_side side)
++{
++	struct rockchip_vcodec_combo_client *cl;
++	struct device *devs[COMBO_MAX_CLIENTS];
++	unsigned int n = 0, i;
++	int iommus;
++
++	spin_lock_irq(&c->lock);
++	for (iommus = 0; iommus <= 1; iommus++)
++		list_for_each_entry(cl, &c->clients[side], node)
++			if (cl->on && cl->is_iommu == iommus &&
++			    n < ARRAY_SIZE(devs))
++				devs[n++] = get_device(cl->dev);
++	spin_unlock_irq(&c->lock);
++
++	for (i = 0; i < n; i++) {
++		pm_runtime_suspend(devs[i]);
++		put_device(devs[i]);
++	}
++}
++
++/**
++ * rockchip_vcodec_combo_power_on - get the shared bus for a client
++ * @cl: the client from devm_rockchip_vcodec_combo_get(), or NULL
++ *
++ * Call it first in the runtime resume callback, before any register access.
++ * Process context; sleeps while the other side is still powered on.
++ *
++ * Return: 0 when the bus points at @cl's side (also for a NULL @cl, which
++ * is not on a shared bus), -EBUSY when the other side kept the bus for
++ * COMBO_WAIT_MS. -EBUSY leaves no runtime PM error behind, so the next
++ * resume tries again.
++ */
++int rockchip_vcodec_combo_power_on(struct rockchip_vcodec_combo_client *cl)
++{
++	struct rockchip_vcodec_combo *c;
++	enum combo_side me, other;
++	unsigned long deadline;
++
++	if (!cl)
++		return 0;
++
++	might_sleep();
++	c = cl->combo;
++	me = cl->side;
++	other = me == COMBO_HEVC ? COMBO_VPU : COMBO_HEVC;
++	deadline = jiffies + msecs_to_jiffies(COMBO_WAIT_MS);
++
++	for (;;) {
++		spin_lock_irq(&c->lock);
++		if (!c->active[other]) {
++			if (!cl->on) {
++				cl->on = true;
++				c->active[me]++;
++			}
++			/*
++			 * Written again even when the side already has the bus
++			 * (one register write): a lost GRF state then costs
++			 * nothing.
++			 */
++			combo_switch(c, me);
++			spin_unlock_irq(&c->lock);
++			return 0;
++		}
++		spin_unlock_irq(&c->lock);
++
++		if (time_after(jiffies, deadline)) {
++			dev_warn(cl->dev, "the %s kept the shared bus for %u ms\n",
++				 combo_side_names[other], COMBO_WAIT_MS);
++			return -EBUSY;
++		}
++
++		combo_kick(c, other);
++		wait_event_timeout(c->wq, !READ_ONCE(c->active[other]),
++				   msecs_to_jiffies(COMBO_KICK_MS));
++	}
++}
++EXPORT_SYMBOL_GPL(rockchip_vcodec_combo_power_on);
++
++/**
++ * rockchip_vcodec_combo_power_off - a client no longer touches its block
++ * @cl: the client, or NULL
++ *
++ * Call it last in the runtime suspend callback, after the last register
++ * access. Any context. When the last client of its side powers off, the
++ * other side may get the bus.
++ */
++void rockchip_vcodec_combo_power_off(struct rockchip_vcodec_combo_client *cl)
++{
++	struct rockchip_vcodec_combo *c;
++	unsigned long flags;
++
++	if (!cl)
++		return;
++
++	c = cl->combo;
++	spin_lock_irqsave(&c->lock, flags);
++	combo_client_off(c, cl);
++	spin_unlock_irqrestore(&c->lock, flags);
++}
++EXPORT_SYMBOL_GPL(rockchip_vcodec_combo_power_off);
++
++static struct rockchip_vcodec_combo *
++combo_get_instance(struct device_node *grf_np,
++		   const struct rockchip_vcodec_combo_data *data)
++{
++	struct rockchip_vcodec_combo *c;
++	struct regmap *grf;
++	int side;
++
++	mutex_lock(&combo_instance_lock);
++	c = combo_instance;
++	if (c)
++		goto out;
++
++	grf = syscon_node_to_regmap(grf_np);
++	if (IS_ERR(grf)) {
++		c = ERR_CAST(grf);
++		goto out;
++	}
++
++	c = kzalloc_obj(*c);
++	if (!c) {
++		c = ERR_PTR(-ENOMEM);
++		goto out;
++	}
++
++	c->grf = grf;
++	c->data = data;
++	spin_lock_init(&c->lock);
++	init_waitqueue_head(&c->wq);
++	for (side = 0; side < COMBO_NUM_SIDES; side++)
++		INIT_LIST_HEAD(&c->clients[side]);
++
++	/* no client is powered on yet: start on the VPU, the reset value */
++	spin_lock_irq(&c->lock);
++	combo_switch(c, COMBO_VPU);
++	spin_unlock_irq(&c->lock);
++
++	combo_instance = c;
++out:
++	mutex_unlock(&combo_instance_lock);
++	return c;
++}
++
++/* which side @np is on, and whether it is a decoder or a decoder's IOMMU */
++static int combo_find_role(struct device_node *np,
++			   const struct rockchip_vcodec_combo_data *data,
++			   enum combo_side *side, bool *is_iommu)
++{
++	struct device_node *dec, *mmu;
++	int s;
++
++	for (s = 0; s < COMBO_NUM_SIDES; s++) {
++		for_each_compatible_node(dec, NULL, data->decoder[s]) {
++			mmu = of_parse_phandle(dec, "iommus", 0);
++			of_node_put(mmu);
++			if (dec != np && mmu != np)
++				continue;
++
++			*side = s;
++			*is_iommu = dec != np;
++			of_node_put(dec);
++			return 0;
++		}
++	}
++
++	return -ENODEV;
++}
++
++static void combo_client_unregister(void *data)
++{
++	struct rockchip_vcodec_combo_client *cl = data;
++	struct rockchip_vcodec_combo *c = cl->combo;
++
++	/*
++	 * The driver is gone and touches nothing any more: a device it left
++	 * active (power/control set to "on") no longer holds the bus. An IOMMU
++	 * keeps its own client, and its consumer's runtime PM status is reset
++	 * to suspended when the driver unbinds, which lets it suspend too.
++	 */
++	spin_lock_irq(&c->lock);
++	combo_client_off(c, cl);
++	list_del(&cl->node);
++	spin_unlock_irq(&c->lock);
++}
++
++/**
++ * devm_rockchip_vcodec_combo_get - join the bus arbiter, if @dev needs it
++ * @dev: a decoder, or an IOMMU, of the SoC
++ *
++ * Call it in probe before pm_runtime_enable(). The role of @dev comes from
++ * the devicetree, so every Rockchip IOMMU may ask.
++ *
++ * Return: the client; NULL when @dev is not on a shared bus (power_on() and
++ * power_off() accept NULL and do nothing); an ERR_PTR when it is but the
++ * arbiter could not start.
++ */
++struct rockchip_vcodec_combo_client *
++devm_rockchip_vcodec_combo_get(struct device *dev)
++{
++	const struct rockchip_vcodec_combo_data *data;
++	const struct of_device_id *match;
++	struct rockchip_vcodec_combo_client *cl;
++	struct rockchip_vcodec_combo *c;
++	struct device_node *grf_np;
++	enum combo_side side;
++	unsigned int val = 0;
++	bool is_iommu;
++	int ret;
++
++	if (!dev->of_node)
++		return NULL;
++
++	grf_np = of_find_matching_node_and_match(NULL,
++						 rockchip_vcodec_combo_grf_match,
++						 &match);
++	if (!grf_np)
++		return NULL;
++	data = match->data;
++
++	if (combo_find_role(dev->of_node, data, &side, &is_iommu)) {
++		of_node_put(grf_np);
++		return NULL;
++	}
++
++	c = combo_get_instance(grf_np, data);
++	of_node_put(grf_np);
++	if (IS_ERR(c))
++		return ERR_CAST(c);
++
++	cl = devm_kzalloc(dev, sizeof(*cl), GFP_KERNEL);
++	if (!cl)
++		return ERR_PTR(-ENOMEM);
++
++	cl->combo = c;
++	cl->dev = dev;
++	cl->side = side;
++	cl->is_iommu = is_iommu;
++
++	spin_lock_irq(&c->lock);
++	list_add_tail(&cl->node, &c->clients[side]);
++	spin_unlock_irq(&c->lock);
++
++	ret = devm_add_action_or_reset(dev, combo_client_unregister, cl);
++	if (ret)
++		return ERR_PTR(ret);
++
++	regmap_read(c->grf, data->reg, &val);
++	dev_info(dev, "%s %s on the bus shared with the %s (GRF %#x bit %u = %u)\n",
++		 combo_side_names[side], is_iommu ? "IOMMU" : "block",
++		 combo_side_names[!side], data->reg, data->bit,
++		 !!(val & BIT(data->bit)));
++
++	return cl;
++}
++EXPORT_SYMBOL_GPL(devm_rockchip_vcodec_combo_get);
+diff --git a/include/soc/rockchip/rockchip_vcodec_combo.h b/include/soc/rockchip/rockchip_vcodec_combo.h
+new file mode 100644
+index 000000000..3c821fc42
+--- /dev/null
++++ b/include/soc/rockchip/rockchip_vcodec_combo.h
+@@ -0,0 +1,43 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Rockchip "VPU combo" bus arbiter: on RK3128 the HEVC decoder and the
++ * Hantro VPU share one bus interface, selected by a GRF bit. The decoders
++ * and their IOMMUs take it in their runtime PM callbacks.
++ */
++#ifndef __SOC_ROCKCHIP_VCODEC_COMBO_H
++#define __SOC_ROCKCHIP_VCODEC_COMBO_H
++
++#include <linux/types.h>
++
++struct device;
++struct rockchip_vcodec_combo_client;
++
++#if IS_ENABLED(CONFIG_ROCKCHIP_VCODEC_COMBO)
++
++struct rockchip_vcodec_combo_client *
++devm_rockchip_vcodec_combo_get(struct device *dev);
++int rockchip_vcodec_combo_power_on(struct rockchip_vcodec_combo_client *cl);
++void rockchip_vcodec_combo_power_off(struct rockchip_vcodec_combo_client *cl);
++
++#else
++
++static inline struct rockchip_vcodec_combo_client *
++devm_rockchip_vcodec_combo_get(struct device *dev)
++{
++	return NULL;
++}
++
++static inline int
++rockchip_vcodec_combo_power_on(struct rockchip_vcodec_combo_client *cl)
++{
++	return 0;
++}
++
++static inline void
++rockchip_vcodec_combo_power_off(struct rockchip_vcodec_combo_client *cl)
++{
++}
++
++#endif
++
++#endif /* __SOC_ROCKCHIP_VCODEC_COMBO_H */

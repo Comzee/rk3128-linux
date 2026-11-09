@@ -1,0 +1,219 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] pcm: dmix: clear the sum ring behind hw_ptr, never read the slave buffer
+
+The generic mixing loops find a frame the hardware has played (and the kernel has silenced) by reading the slave
+buffer: `if (!*dst) *sum = sample`.  On ARM the slave buffer is the DMA buffer, mapped uncached, so that read is a bus
+transaction per sample, and it was the largest single cost of a dmix client on an RK3128 (development record #460).
+
+Instead, the client that mixes first after the hardware passed a frame zeroes that frame's sum (dmix_clear_sum, under
+the semaphore, before every mix and remix), keeping the cleared position and the slave's recovery count in the shared
+area.  The 16-bit native loops then add, store the clamped sum and only write the slave buffer; the contiguous case
+runs with NEON (8 samples a step) where the build has it.  The x86 lockless loops (taken with direct_memory_access)
+also read the slave buffer and run without the semaphore, so every architecture and configuration uses the generic
+loops (the x86 files are no longer included).  The shared area grows by 16 bytes, which changes the magic: a client of
+an unpatched library cannot join a patched one's mix.
+
+The other formats' loops still read the slave buffer; with the ring cleared they compute the same sums.
+---
+diff --git a/src/pcm/pcm_direct.h b/src/pcm/pcm_direct.h
+index e7d89e5..4fda19f 100644
+--- a/src/pcm/pcm_direct.h
++++ b/src/pcm/pcm_direct.h
+@@ -124,6 +124,13 @@ typedef struct {
+ 		struct {
+ 			unsigned long long chn_mask;
+ 		} dshare;
++		struct {
++			/* the slave position up to which the sum ring is cleared (every frame before it was played and silenced
++			 * by the kernel), and the slave recovery count it belongs to */
++			unsigned long long cleared_ptr;
++			unsigned int cleared_recoveries;
++			unsigned int pad;
++		} dmix;
+ 	} u;
+ } snd_pcm_direct_share_t;
+ 
+diff --git a/src/pcm/pcm_dmix.c b/src/pcm/pcm_dmix.c
+index 55cae3e..3595296 100644
+--- a/src/pcm/pcm_dmix.c
++++ b/src/pcm/pcm_dmix.c
+@@ -141,16 +141,13 @@ static void dmix_server_free(snd_pcm_direct_t *dmix)
+  */
+ 
+ #include "pcm_dmix_generic.c"
+-#if defined(__i386__)
+-#include "pcm_dmix_i386.c"
+-#elif defined(__x86_64__)
+-#include "pcm_dmix_x86_64.c"
+-#else
++/* The x86 loops (pcm_dmix_i386.c, pcm_dmix_x86_64.c, chosen with direct_memory_access) are lockless (use_sem 0) and find a
++ * played frame by reading the slave buffer; dmix_clear_sum() needs every mix under the semaphore, so every architecture and
++ * every configuration takes the generic loops. */
+ #ifndef DOC_HIDDEN
+ #define mix_select_callbacks(x)	generic_mix_select_callbacks(x)
+ #define dmix_supported_format generic_dmix_supported_format
+ #endif
+-#endif
+ 
+ static void mix_areas(snd_pcm_direct_t *dmix,
+ 		      const snd_pcm_channel_area_t *src_areas,
+@@ -306,6 +303,49 @@ static void dmix_up_sem(snd_pcm_direct_t *dmix)
+ }
+ #endif
+ 
++/*
++ *  clear the sum ring behind the slave's hw_ptr (called with the semaphore held)
++ *
++ *  The kernel silences every frame the hardware has played (silence_size = boundary) before it publishes the new hw_ptr,
++ *  so a frame before the hw_ptr this client sees starts the next pass of the ring at zero: its sum is zeroed here, once,
++ *  by whichever client mixes first after the hardware passed it.  The mixing loops then never read the slave buffer,
++ *  which on most ARM boards is uncached DMA memory (a read of it is a bus transaction per sample).
++ */
++static void dmix_clear_sum(snd_pcm_direct_t *dmix)
++{
++	snd_pcm_direct_share_t *sh = dmix->shmptr;
++	snd_pcm_uframes_t hw = dmix->slave_hw_ptr, from, size, n;
++	unsigned int channels = sh->s.channels;
++
++	if (sh->u.dmix.cleared_recoveries != sh->s.recoveries) {
++		/* the slave was restarted (its buffer silenced, hw_ptr from 0): every sum starts again */
++		memset(dmix->u.dmix.sum_buffer, 0,
++		       dmix->slave_buffer_size * channels * sizeof(signed int));
++		sh->u.dmix.cleared_ptr = hw;
++		sh->u.dmix.cleared_recoveries = sh->s.recoveries;
++		return;
++	}
++	size = pcm_frame_diff(hw, sh->u.dmix.cleared_ptr, dmix->slave_boundary);
++	if (size == 0 || size > dmix->slave_boundary / 2)
++		return;	/* nothing new, or another client saw a later hw_ptr than ours */
++	if (size >= dmix->slave_buffer_size) {
++		memset(dmix->u.dmix.sum_buffer, 0,
++		       dmix->slave_buffer_size * channels * sizeof(signed int));
++	} else {
++		from = sh->u.dmix.cleared_ptr % dmix->slave_buffer_size;
++		while (size > 0) {
++			n = size;
++			if (from + n > dmix->slave_buffer_size)
++				n = dmix->slave_buffer_size - from;
++			memset(dmix->u.dmix.sum_buffer + from * channels, 0,
++			       n * channels * sizeof(signed int));
++			size -= n;
++			from = (from + n) % dmix->slave_buffer_size;
++		}
++	}
++	sh->u.dmix.cleared_ptr = hw;
++}
++
+ /*
+  *  synchronize shm ring buffer with hardware
+  */
+@@ -365,6 +405,7 @@ static void snd_pcm_dmix_sync_area(snd_pcm_t *pcm)
+ 	dmix->slave_appl_ptr += size;
+ 	dmix->slave_appl_ptr %= dmix->slave_boundary;
+ 	dmix_down_sem(dmix);
++	dmix_clear_sum(dmix);
+ 	for (;;) {
+ 		transfer = size;
+ 		if (appl_ptr + transfer > pcm->buffer_size)
+@@ -724,6 +765,7 @@ static snd_pcm_sframes_t snd_pcm_dmix_rewind(snd_pcm_t *pcm, snd_pcm_uframes_t f
+ 	dmix->slave_appl_ptr %= dmix->slave_boundary;
+ 	slave_appl_ptr = dmix->slave_appl_ptr % dmix->slave_buffer_size;
+ 	dmix_down_sem(dmix);
++	dmix_clear_sum(dmix);
+ 	for (;;) {
+ 		transfer = size;
+ 		if (appl_ptr + transfer > pcm->buffer_size)
+diff --git a/src/pcm/pcm_dmix_generic.c b/src/pcm/pcm_dmix_generic.c
+index 701c66c..8fc9162 100644
+--- a/src/pcm/pcm_dmix_generic.c
++++ b/src/pcm/pcm_dmix_generic.c
+@@ -125,6 +125,9 @@ static void mix_select_callbacks(snd_pcm_direct_t *dmix)
+ 	 (1ULL << SND_PCM_FORMAT_U8))
+ 
+ #include "bswap.h"
++#ifdef __ARM_NEON
++#include <arm_neon.h>
++#endif
+ 
+ static void generic_mix_areas_16_native(unsigned int size,
+ 					volatile signed short *dst,
+@@ -136,20 +139,40 @@ static void generic_mix_areas_16_native(unsigned int size,
+ {
+ 	register signed int sample;
+ 
+-	for (;;) {
+-		sample = *src;
+-		if (! *dst) {
+-			*sum = sample;
+-			*dst = *src;
+-		} else {
+-			sample += *sum;
+-			*sum = sample;
+-			if (sample > 0x7fff)
+-				sample = 0x7fff;
+-			else if (sample < -0x8000)
+-				sample = -0x8000;
+-			*dst = sample;
++	/* the sum ring is zero for every frame the hardware played since (dmix_clear_sum): add, store the clamped sum,
++	 * never read dst */
++	if (dst_step == sizeof(*dst) && src_step == sizeof(*src) && sum_step == sizeof(*sum)) {
++		signed short *__restrict d = (signed short *)dst;
++		const signed short *__restrict s = src;
++		signed int *__restrict m = (signed int *)sum;
++		unsigned int i = 0;
++
++#ifdef __ARM_NEON
++		/* 8 samples a step: widen-add into the sums, saturate-narrow into the slave buffer */
++		for (; i + 8 <= size; i += 8) {
++			int16x8_t v = vld1q_s16(s + i);
++			int32x4_t lo = vaddw_s16(vld1q_s32(m + i), vget_low_s16(v));
++			int32x4_t hi = vaddw_s16(vld1q_s32(m + i + 4), vget_high_s16(v));
++			vst1q_s32(m + i, lo);
++			vst1q_s32(m + i + 4, hi);
++			vst1q_s16(d + i, vcombine_s16(vqmovn_s32(lo), vqmovn_s32(hi)));
+ 		}
++#endif
++		for (; i < size; i++) {
++			sample = m[i] + s[i];
++			m[i] = sample;
++			d[i] = sample > 0x7fff ? 0x7fff : sample < -0x8000 ? -0x8000 : sample;
++		}
++		return;
++	}
++	for (;;) {
++		sample = *sum + *src;
++		*sum = sample;
++		if (sample > 0x7fff)
++			sample = 0x7fff;
++		else if (sample < -0x8000)
++			sample = -0x8000;
++		*dst = sample;
+ 		if (!--size)
+ 			return;
+ 		src = (signed short *) ((char *)src + src_step);
+@@ -169,18 +192,13 @@ static void generic_remix_areas_16_native(unsigned int size,
+ 	register signed int sample;
+ 
+ 	for (;;) {
+-		sample = *src;
+-		if (! *dst) {
+-			*sum = -sample;
+-			*dst = -sample;
+-		} else {
+-			*sum = sample = *sum - sample;
+-			if (sample > 0x7fff)
+-				sample = 0x7fff;
+-			else if (sample < -0x8000)
+-				sample = -0x8000;
+-			*dst = sample;
+-		}
++		sample = *sum - *src;
++		*sum = sample;
++		if (sample > 0x7fff)
++			sample = 0x7fff;
++		else if (sample < -0x8000)
++			sample = -0x8000;
++		*dst = sample;
+ 		if (!--size)
+ 			return;
+ 		src = (signed short *) ((char *)src + src_step);

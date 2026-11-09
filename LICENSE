@@ -1,0 +1,28 @@
+License scope for rk3128-linux
+==============================
+
+This repository is a collection of reference sources with multiple licenses.
+It is not offered under one license that replaces the licenses of its parts.
+
+Original kernel enablement code, and original supplemental tools, examples,
+configuration and documentation without another stated license, are licensed
+under GNU GPL version 2 only (SPDX: GPL-2.0-only), Copyright (C) 2026 Comzee.
+The original contributions are made available under that grant by their owner.
+Existing per-file grants, including MIT and GPL-2.0-or-later, are preserved.
+Original modifications to existing third-party files follow those files'
+license grants unless a source section expressly states otherwise. This includes
+userspace and experimental patches and modifications within the SSV source tree.
+
+Third-party code, patch context and adaptations retain their upstream licenses
+and copyright notices. A patch is subject to the licenses of its target files
+and its explicitly marked sections. See NOTICE.md, the source headers and
+manifests/licenses.json for scope. In particular, the SSV Wi-Fi reference tree
+contains GPL-3.0-or-later code; it is not relabeled GPL-2.0-only.
+
+Full license texts and the Linux syscall exception are in LICENSES/.
+A file's "or later" choice or dual-license alternatives are not removed by
+the names of those text files. GPL-2.0 and GPL-2.0+ in retained historical SPDX
+headers mean GPL version 2 only and GPL version 2 or later, respectively.
+
+No warranty is provided; the relevant license terms apply. Open-source reuse
+remains subject to those terms. Firmware binaries are not supplied.

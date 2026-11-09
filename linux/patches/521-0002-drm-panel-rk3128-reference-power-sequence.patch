@@ -1,0 +1,235 @@
+From: Comzee <117947104+Comzee@users.noreply.github.com>
+Subject: [PATCH] drm/panel: own the RK3128 reference board panel reset and enable
+
+The shipped Rockchip 3.10 kernel drives GPIO0_A2 high, delays 10 ms,
+drives GPIO0_B4 low and delays 10 ms. Disable inverts the two outputs in
+the same order without delays. Both lines are active low in gpiod terms.
+Request ASIS so the bootloader's lit picture survives probe; prepare sets
+output directions and the active levels without a reset pulse. A dedicated
+panel driver keeps the generic panel-lvds behaviour unchanged.
+
+Reference: rk_disp_pwr_enable (0xc02fe508) and rk_disp_pwr_disable
+(0xc02fe630), shipped Image sha256
+01a2967904b975307884092778f313213a6de2ef2ecc841233ae5c4fe2a24729.
+Readable BSP: rockchip-linux/kernel
+89a3df543d5d6936eaf2b193316a38fecc94a1e4,
+drivers/video/rockchip/rk_fb.c. Board wiring/order: vendor DT power_ctr.
+
+Signed-off-by: Comzee <117947104+Comzee@users.noreply.github.com>
+---
+
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-rk3128-reference.c
+@@ -0,0 +1,182 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * RK3128 reference board board panel power sequence, from the shipped Rockchip 3.10 driver.
++ * Mode parsing and connector setup based on panel-lvds.c:
++ * Copyright (C) 2016 Laurent Pinchart
++ * Copyright (C) 2016 Renesas Electronics Corporation
++ */
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include <drm/drm_crtc.h>
++#include <drm/drm_of.h>
++#include <drm/drm_panel.h>
++
++struct rk3128_reference_panel {
++	struct drm_panel panel;
++	struct drm_display_mode mode;
++	struct gpio_desc *reset;
++	struct gpio_desc *enable;
++	u32 bus_flags;
++	unsigned int bus_format;
++	enum drm_panel_orientation orientation;
++};
++
++static inline struct rk3128_reference_panel *to_rk3128_reference_panel(struct drm_panel *panel)
++{
++	return container_of(panel, struct rk3128_reference_panel, panel);
++}
++
++static int rk3128_reference_panel_prepare(struct drm_panel *panel)
++{
++	struct rk3128_reference_panel *reference = to_rk3128_reference_panel(panel);
++	int ret;
++
++	/*
++	 * Vendor rk_disp_pwr_enable(): DT order is lcd_rst_0, lcd_en, with
++	 * 10 ms after each. Reset is active low, enable is also active low.
++	 * Do not pulse reset: u-boot may already be scanning out a lit picture.
++	 * ASIS at probe followed by direction_output here also works when the
++	 * bootloader left either line as input or the panel was unprepared.
++	 */
++	ret = gpiod_direction_output(reference->reset, 0);
++	if (ret)
++		return ret;
++	usleep_range(10000, 11000);
++	ret = gpiod_direction_output(reference->enable, 1);
++	if (ret) {
++		gpiod_set_value_cansleep(reference->reset, 1);
++		return ret;
++	}
++	usleep_range(10000, 11000);
++
++	return 0;
++}
++
++static int rk3128_reference_panel_unprepare(struct drm_panel *panel)
++{
++	struct rk3128_reference_panel *reference = to_rk3128_reference_panel(panel);
++
++	/* Vendor disable uses the same order, inverted levels, no delays. */
++	gpiod_set_value_cansleep(reference->reset, 1);
++	gpiod_set_value_cansleep(reference->enable, 0);
++	return 0;
++}
++
++static int rk3128_reference_panel_get_modes(struct drm_panel *panel,
++			       struct drm_connector *connector)
++{
++	struct rk3128_reference_panel *reference = to_rk3128_reference_panel(panel);
++	struct drm_display_mode *mode;
++
++	mode = drm_mode_duplicate(connector->dev, &reference->mode);
++	if (!mode)
++		return 0;
++
++	mode->type |= DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
++	drm_mode_probed_add(connector, mode);
++	connector->display_info.width_mm = mode->width_mm;
++	connector->display_info.height_mm = mode->height_mm;
++	drm_display_info_set_bus_formats(&connector->display_info,
++					 &reference->bus_format, 1);
++	connector->display_info.bus_flags = reference->bus_flags;
++	drm_connector_set_panel_orientation(connector, reference->orientation);
++	return 1;
++}
++
++static enum drm_panel_orientation rk3128_reference_panel_get_orientation(struct drm_panel *panel)
++{
++	return to_rk3128_reference_panel(panel)->orientation;
++}
++
++static const struct drm_panel_funcs rk3128_reference_panel_funcs = {
++	.prepare = rk3128_reference_panel_prepare,
++	.unprepare = rk3128_reference_panel_unprepare,
++	.get_modes = rk3128_reference_panel_get_modes,
++	.get_orientation = rk3128_reference_panel_get_orientation,
++};
++
++static int rk3128_reference_panel_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *np = dev->of_node;
++	struct rk3128_reference_panel *reference;
++	int ret;
++
++	reference = devm_drm_panel_alloc(dev, struct rk3128_reference_panel, panel, &rk3128_reference_panel_funcs,
++				   DRM_MODE_CONNECTOR_LVDS);
++	if (IS_ERR(reference))
++		return PTR_ERR(reference);
++
++	ret = of_get_drm_panel_display_mode(np, &reference->mode, &reference->bus_flags);
++	if (ret)
++		return dev_err_probe(dev, ret, "invalid panel timing\n");
++
++	ret = drm_of_lvds_get_data_mapping(np);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "invalid LVDS data mapping\n");
++	reference->bus_format = ret;
++	reference->bus_flags |= of_property_read_bool(np, "data-mirror") ?
++			  DRM_BUS_FLAG_DATA_LSB_TO_MSB : DRM_BUS_FLAG_DATA_MSB_TO_LSB;
++	ret = drm_of_get_panel_orientation(np, &reference->orientation);
++	if (ret)
++		return ret;
++
++	/* No output write, reset pulse or enable toggle during GPIO acquisition. */
++	reference->reset = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
++	if (IS_ERR(reference->reset))
++		return dev_err_probe(dev, PTR_ERR(reference->reset), "failed to get reset GPIO\n");
++	reference->enable = devm_gpiod_get(dev, "enable", GPIOD_ASIS);
++	if (IS_ERR(reference->enable))
++		return dev_err_probe(dev, PTR_ERR(reference->enable), "failed to get enable GPIO\n");
++
++	ret = drm_panel_of_backlight(&reference->panel);
++	if (ret)
++		return ret;
++
++	platform_set_drvdata(pdev, reference);
++	drm_panel_add(&reference->panel);
++	return 0;
++}
++
++static void rk3128_reference_panel_shutdown(struct platform_device *pdev)
++{
++	struct rk3128_reference_panel *reference = platform_get_drvdata(pdev);
++
++	/* The DRM consumer may already have disabled/unprepared us. */
++	if (reference->panel.enabled)
++		drm_panel_disable(&reference->panel);
++	if (reference->panel.prepared)
++		drm_panel_unprepare(&reference->panel);
++}
++
++static void rk3128_reference_panel_remove(struct platform_device *pdev)
++{
++	struct rk3128_reference_panel *reference = platform_get_drvdata(pdev);
++
++	drm_panel_remove(&reference->panel);
++	rk3128_reference_panel_shutdown(pdev);
++}
++
++static const struct of_device_id rk3128_reference_panel_of_match[] = {
++	{ .compatible = "rockchip,rk3128-reference-panel" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, rk3128_reference_panel_of_match);
++
++static struct platform_driver rk3128_reference_panel_driver = {
++	.probe = rk3128_reference_panel_probe,
++	.remove = rk3128_reference_panel_remove,
++	.shutdown = rk3128_reference_panel_shutdown,
++	.driver = {
++		.name = "panel-rk3128-reference",
++		.of_match_table = rk3128_reference_panel_of_match,
++	},
++};
++module_platform_driver(rk3128_reference_panel_driver);
++
++MODULE_DESCRIPTION("RK3128 reference board LVDS panel");
++MODULE_LICENSE("GPL");
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -197,6 +197,17 @@
+ 	help
+ 	  DRM panel driver for DSI command mode panels with support for
+ 	  embedded and external backlights.
++
++config DRM_PANEL_RK3128_REFERENCE
++	tristate "RK3128 reference board LVDS panel assembly"
++	depends on OF && GPIOLIB
++	depends on BACKLIGHT_CLASS_DEVICE
++	select VIDEOMODE_HELPERS
++	help
++	  Panel assembly on the RK3128 reference board RK3128 board. Owns its active-low
++	  reset and enable GPIOs with the vendor power sequence, preserving
++	  the already-lit bootloader handover.
++	  Its timing and LVDS mapping are described by the board DT.
+ 
+ config DRM_PANEL_LVDS
+ 	tristate "Generic LVDS panel driver"
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -13,6 +13,7 @@
+ obj-$(CONFIG_DRM_PANEL_CHIPONE_ICNA35XX) += panel-chipone-icna35xx.o
+ obj-$(CONFIG_DRM_PANEL_CHIPWEALTH_CH13726A) += panel-chipwealth-ch13726a.o
+ obj-$(CONFIG_DRM_PANEL_DSI_CM) += panel-dsi-cm.o
++obj-$(CONFIG_DRM_PANEL_RK3128_REFERENCE) += panel-rk3128-reference.o
+ obj-$(CONFIG_DRM_PANEL_LVDS) += panel-lvds.o
+ obj-$(CONFIG_DRM_PANEL_SIMPLE) += panel-simple.o
+ obj-$(CONFIG_DRM_PANEL_EDP) += panel-edp.o

@@ -1,0 +1,1266 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] crypto: add RK3128 crypto v1 with bounded private DMA
+
+Support the RK3128 crypto v1 block with private DMA buffers, runtime PM,
+bounded deadlines, kernel known answers and conservative priorities.
+DMA registration is explicitly opt-in; a separate exclusive hwrng driver
+handles the raw oscillator. Unsupported PKA remains refused.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/crypto/Kconfig b/drivers/crypto/Kconfig
+--- a/drivers/crypto/Kconfig
++++ b/drivers/crypto/Kconfig
+@@ -673,6 +673,27 @@
+ 	  This driver interfaces with the hardware crypto accelerator.
+ 	  Supporting cbc/ecb chainmode, and aes/des/des3_ede cipher mode.
+ 
++config CRYPTO_DEV_RK3128
++	tristate "Rockchip RK3128 crypto v1 (unaccepted DMA prototype)"
++	depends on OF && (ARCH_ROCKCHIP || COMPILE_TEST)
++	depends on PM && CRYPTO_SELFTESTS
++	select CRYPTO_ENGINE
++	select CRYPTO_AES
++	select CRYPTO_DES
++	select CRYPTO_LIB_DES
++	select CRYPTO_MD5
++	select CRYPTO_SHA1
++	select CRYPTO_SHA256
++	select CRYPTO_HASH
++	select CRYPTO_SKCIPHER
++	help
++	  Experimental RK3128 AES ECB/CBC/CTR, DES/3DES and hashes.
++	  The first DMA operation hangs the tested frame; keep its DT node
++	  disabled. No cipher/hash has passed hardware acceptance.
++	  PKA is unsupported; the oscillator has a separate exclusive hwrng driver.
++	  Uses private coherent DMA buffers, bounded hardware deadlines and
++	  a serialized crypto engine. Streaming hashes use software fallback.
++
+ config CRYPTO_DEV_ROCKCHIP_DEBUG
+ 	bool "Enable Rockchip crypto stats"
+ 	depends on CRYPTO_DEV_ROCKCHIP
+diff --git a/drivers/crypto/Makefile b/drivers/crypto/Makefile
+--- a/drivers/crypto/Makefile
++++ b/drivers/crypto/Makefile
+@@ -27,7 +27,7 @@
+ obj-$(CONFIG_CRYPTO_DEV_PADLOCK_SHA) += padlock-sha.o
+ obj-$(CONFIG_CRYPTO_DEV_PPC4XX) += amcc/
+ obj-$(CONFIG_CRYPTO_DEV_QCE) += qce/
+-obj-$(CONFIG_CRYPTO_DEV_ROCKCHIP) += rockchip/
++obj-y += rockchip/
+ obj-$(CONFIG_CRYPTO_DEV_S5P) += s5p-sss.o
+ obj-$(CONFIG_CRYPTO_DEV_SA2UL) += sa2ul.o
+ obj-$(CONFIG_CRYPTO_DEV_SAHARA) += sahara.o
+diff --git a/drivers/crypto/rockchip/Makefile b/drivers/crypto/rockchip/Makefile
+--- a/drivers/crypto/rockchip/Makefile
++++ b/drivers/crypto/rockchip/Makefile
+@@ -3,3 +3,5 @@
+ rk_crypto-objs := rk3288_crypto.o \
+ 		  rk3288_crypto_skcipher.o \
+ 		  rk3288_crypto_ahash.o
++
++obj-$(CONFIG_CRYPTO_DEV_RK3128) += rk3128-crypto.o
+diff --git a/drivers/crypto/rockchip/rk3128-crypto.c b/drivers/crypto/rockchip/rk3128-crypto.c
+--- /dev/null
++++ b/drivers/crypto/rockchip/rk3128-crypto.c
+@@ -0,0 +1,847 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* RK3128 crypto v1. DMA uses private coherent bounce buffers, never user pages. */
++#include <crypto/algapi.h>
++#include <crypto/engine.h>
++#include <crypto/internal/des.h>
++#include <crypto/internal/hash.h>
++#include <crypto/internal/skcipher.h>
++#include <crypto/scatterwalk.h>
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/reset.h>
++#include <linux/unaligned.h>
++#include "rk3128-regs.h"
++
++#define RK_CHUNK SZ_16K
++#define RK_NCIPHER 9
++#define RK_NHASH 3
++
++/* No DMA on module load without an explicit diagnostic request. */
++static bool enable_dma;
++module_param(enable_dma, bool, 0400);
++MODULE_PARM_DESC(enable_dma, "Register unaccepted cipher/hash algorithms (diagnostic only)");
++static bool hash_probe;
++module_param(hash_probe, bool, 0400);
++MODULE_PARM_DESC(hash_probe, "One bounded 64-byte SHA256 DMA with low DDR buffers; no API registration");
++
++/* Finite bring-up breadcrumbs; omitted from normal kernels. */
++#define rk_trace(d, fmt, ...) do { \
++	if (IS_ENABLED(CONFIG_CRYPTO_SELFTESTS_FULL)) \
++		dev_info((d)->dev, fmt, ##__VA_ARGS__); \
++} while (0)
++#define rk_trace_once(d, fmt, ...) do { \
++	if (IS_ENABLED(CONFIG_CRYPTO_SELFTESTS_FULL)) \
++		dev_info_once((d)->dev, fmt, ##__VA_ARGS__); \
++} while (0)
++
++struct rk3128_dev;
++struct rk3128_cipher {
++	struct skcipher_engine_alg alg;
++	struct rk3128_dev *dev;
++	u32 mode;
++	bool des, ctr;
++};
++struct rk3128_hash {
++	struct ahash_engine_alg alg;
++	struct rk3128_dev *dev;
++	u32 mode;
++};
++struct rk3128_dev {
++	struct device *dev;
++	void __iomem *reg;
++	struct clk_bulk_data clks[2];
++	struct reset_control *reset;
++	struct crypto_engine *engine;
++	struct completion done;
++	int irq;
++	u32 irq_status;
++	void *in, *out;
++	dma_addr_t in_dma, out_dma;
++	bool broken, irq_enabled, dma_started;
++	unsigned int nc, nh;
++	struct mutex lock;
++	struct rk3128_cipher ciphers[RK_NCIPHER];
++	struct rk3128_hash hashes[RK_NHASH];
++};
++struct rk3128_cipher_ctx {
++	struct rk3128_cipher *alg;
++	u8 key[AES_MAX_KEY_SIZE];
++	unsigned int keylen;
++};
++struct rk3128_cipher_req { bool decrypt; };
++struct rk3128_hash_ctx {
++	struct rk3128_hash *alg;
++	struct crypto_ahash *fallback;
++};
++struct rk3128_hash_req {
++	struct ahash_request fallback;
++};
++
++static void rk_write(struct rk3128_dev *d, u32 off, u32 val)
++{
++	writel(val, d->reg + off);
++}
++
++/* TRM: block flush >=20 cycles; hash flush >=10. Read back before delay. */
++static void rk_flush(struct rk3128_dev *d, u32 mask)
++{
++	rk_write(d, RK_CRYPTO_CTRL, mask << 16 | mask);
++	readl(d->reg + RK_CRYPTO_CTRL);
++	udelay(1);
++	rk_write(d, RK_CRYPTO_CTRL, mask << 16);
++}
++
++/* PM callbacks and the active engine worker serialize all IRQ transitions. */
++static void rk_irq_off(struct rk3128_dev *d)
++{
++	if (d->irq_enabled) {
++		disable_irq(d->irq);
++		d->irq_enabled = false;
++	}
++}
++
++static void rk_irq_on(struct rk3128_dev *d)
++{
++	d->irq_enabled = true;
++	enable_irq(d->irq);
++}
++
++static int rk_resume(struct device *dev)
++{
++	struct rk3128_dev *d = dev_get_drvdata(dev);
++	int err;
++
++	if (d->broken)
++		return -EIO;
++	err = clk_bulk_prepare_enable(ARRAY_SIZE(d->clks), d->clks);
++	if (err)
++		return err;
++	err = reset_control_deassert(d->reset);
++	if (err) {
++		clk_bulk_disable_unprepare(ARRAY_SIZE(d->clks), d->clks);
++		return err;
++	}
++	/* A pending IRQ must never read the clock-gated APB register window. */
++	rk_write(d, RK_CRYPTO_INTENA, 0);
++	rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
++	rk_irq_on(d);
++	return 0;
++}
++
++static int rk_suspend(struct device *dev)
++{
++	struct rk3128_dev *d = dev_get_drvdata(dev);
++	int err;
++
++	/* Once DMA starts, even a failed diagnostic must stay powered to reboot. */
++	if (READ_ONCE(d->dma_started))
++		return -EBUSY;
++	rk_irq_off(d);
++	err = reset_control_assert(d->reset);
++	if (err) {
++		d->broken = true;
++		dev_err(dev, "reset assertion failed: %d\n", err);
++		return err;
++	}
++	clk_bulk_disable_unprepare(ARRAY_SIZE(d->clks), d->clks);
++	return 0;
++}
++
++static irqreturn_t rk_irq(int irq, void *arg)
++{
++	struct rk3128_dev *d = arg;
++	u32 status = readl(d->reg + RK_CRYPTO_INTSTS) & 0x3f;
++
++	if (!status)
++		return IRQ_NONE;
++	rk_write(d, RK_CRYPTO_INTSTS, status);
++	WRITE_ONCE(d->irq_status, status);
++	complete(&d->done);
++	return IRQ_HANDLED;
++}
++
++/* Called with d->lock and runtime PM held, before the first start write. */
++static void rk_dma_start(struct rk3128_dev *d, u32 start)
++{
++	if (!d->dma_started) {
++		/* No safe post-DMA power transition is known. No matching puts:
++		 * this diagnostic is reboot-only, on success as well as failure.
++		 * Together with suppress_bind_attrs, the module pin keeps all devm
++		 * mappings, IRQ and coherent buffers alive on this static device.
++		 */
++		__module_get(THIS_MODULE);
++		pm_runtime_get_noresume(d->dev);
++		WRITE_ONCE(d->dma_started, true);
++	}
++	rk_write(d, RK_CRYPTO_CTRL, start << 16 | start);
++}
++
++/* Never reset or touch potentially active DMA buffers after a failed start. */
++static int rk_abort(struct rk3128_dev *d, int err)
++{
++	d->broken = true;
++	rk_irq_off(d);
++	dev_err(d->dev, "crypto failure latched: %d; power/resources retained until reboot\n", err);
++	return err;
++}
++
++static void rk_arm(struct rk3128_dev *d, u32 mask)
++{
++	rk_write(d, RK_CRYPTO_INTENA, 0);
++	synchronize_irq(d->irq);
++	rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
++	reinit_completion(&d->done);
++	WRITE_ONCE(d->irq_status, 0);
++	rk_write(d, RK_CRYPTO_INTENA, mask);
++}
++
++static int rk_wait_timeout(struct rk3128_dev *d, u32 done, unsigned int ms)
++{
++	u32 status;
++
++	if (!wait_for_completion_timeout(&d->done, msecs_to_jiffies(ms)))
++		return rk_abort(d, -ETIMEDOUT);
++	status = READ_ONCE(d->irq_status);
++	if ((status & 0x0a) || !(status & done))
++		return rk_abort(d, -EIO);
++	rk_write(d, RK_CRYPTO_INTENA, 0);
++	/* IRQ completion orders CPU reads after the device's coherent writes. */
++	dma_rmb();
++	return 0;
++}
++
++static int rk_wait(struct rk3128_dev *d, u32 done)
++{
++	return rk_wait_timeout(d, done, 200);
++}
++
++static int rk_begin(struct rk3128_dev *d)
++{
++	int err;
++
++	mutex_lock(&d->lock);
++	err = pm_runtime_resume_and_get(d->dev);
++
++	if (err < 0) {
++		mutex_unlock(&d->lock);
++		return err;
++	}
++	if (d->broken) {
++		pm_runtime_put(d->dev);
++		mutex_unlock(&d->lock);
++		return -EIO;
++	}
++	return 0;
++}
++
++static void rk_end(struct rk3128_dev *d)
++{
++	if (!d->broken) {
++		memzero_explicit(d->in, RK_CHUNK);
++		memzero_explicit(d->out, RK_CHUNK);
++		rk_irq_off(d);
++		rk_write(d, RK_CRYPTO_INTENA, 0);
++		synchronize_irq(d->irq);
++		/* Match v1's per-request flush; reserve CRU reset for PM/faults. */
++		rk_write(d, RK_CRYPTO_CTRL,
++			 (RK_CRYPTO_BLOCK_FLUSH | RK_CRYPTO_HASH_FLUSH) << 16 |
++			 RK_CRYPTO_BLOCK_FLUSH | RK_CRYPTO_HASH_FLUSH);
++		readl(d->reg + RK_CRYPTO_CTRL);
++		udelay(1);
++		memset_io(d->reg + RK_CRYPTO_AES_KEY_0, 0, 32);
++		memset_io(d->reg + RK_CRYPTO_AES_IV_0, 0, 16);
++		memset_io(d->reg + RK_CRYPTO_AES_CNT_0, 0, 16);
++		memset_io(d->reg + RK_CRYPTO_TDES_KEY1_0, 0, 24);
++		memset_io(d->reg + RK_CRYPTO_TDES_IV_0, 0, 8);
++		memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++		rk_write(d, RK_CRYPTO_CTRL,
++			 (RK_CRYPTO_BLOCK_FLUSH | RK_CRYPTO_HASH_FLUSH) << 16);
++		rk_write(d, RK_CRYPTO_INTSTS, 0x3f);
++		rk_irq_on(d);
++	}
++	pm_runtime_mark_last_busy(d->dev);
++	pm_runtime_put_autosuspend(d->dev);
++	mutex_unlock(&d->lock);
++}
++
++static int rk_cipher_init(struct crypto_skcipher *tfm)
++{
++	struct rk3128_cipher_ctx *ctx = crypto_skcipher_ctx(tfm);
++
++	ctx->alg = container_of(crypto_skcipher_alg(tfm), struct rk3128_cipher,
++				alg.base);
++	crypto_skcipher_set_reqsize(tfm, sizeof(struct rk3128_cipher_req));
++	return 0;
++}
++
++static void rk_cipher_exit(struct crypto_skcipher *tfm)
++{
++	memzero_explicit(crypto_skcipher_ctx(tfm), sizeof(struct rk3128_cipher_ctx));
++}
++
++static int rk_setkey(struct crypto_skcipher *tfm, const u8 *key, unsigned int len)
++{
++	struct rk3128_cipher_ctx *ctx = crypto_skcipher_ctx(tfm);
++	int err = 0;
++
++	ctx->keylen = 0;
++	memzero_explicit(ctx->key, sizeof(ctx->key));
++	if (!ctx->alg->des) {
++		if (len != 16 && len != 24 && len != 32)
++			return -EINVAL;
++	} else if (ctx->alg->mode & RK_CRYPTO_TDES_SELECT) {
++		err = verify_skcipher_des3_key(tfm, key);
++	} else {
++		err = verify_skcipher_des_key(tfm, key);
++	}
++	if (err)
++		return err;
++	memcpy(ctx->key, key, len);
++	ctx->keylen = len;
++	return 0;
++}
++
++static int rk_cipher_enqueue(struct skcipher_request *req, bool decrypt)
++{
++	struct rk3128_cipher_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
++	struct rk3128_cipher_req *rctx = skcipher_request_ctx(req);
++	unsigned int block = ctx->alg->des ? 8 : 16;
++
++	if (!ctx->keylen)
++		return -ENOKEY;
++	if (!ctx->alg->ctr && req->cryptlen % block)
++		return -EINVAL;
++	if (!req->cryptlen)
++		return 0;
++	if (sg_nents_for_len(req->src, req->cryptlen) < 0 ||
++	    sg_nents_for_len(req->dst, req->cryptlen) < 0)
++		return -EINVAL;
++	rctx->decrypt = decrypt;
++	return crypto_transfer_skcipher_request_to_engine(ctx->alg->dev->engine, req);
++}
++
++static int rk_encrypt(struct skcipher_request *req)
++{
++	return rk_cipher_enqueue(req, false);
++}
++
++static int rk_decrypt(struct skcipher_request *req)
++{
++	return rk_cipher_enqueue(req, true);
++}
++
++static int rk_cipher_run(struct crypto_engine *engine, void *async_req)
++{
++	struct skcipher_request *req = container_of(async_req, struct skcipher_request, base);
++	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(req);
++	struct rk3128_cipher_ctx *ctx = crypto_skcipher_ctx(tfm);
++	struct rk3128_cipher_req *rctx = skcipher_request_ctx(req);
++	struct rk3128_cipher *alg = ctx->alg;
++	struct rk3128_dev *d = alg->dev;
++	u8 iv[16] = {}, nextiv[16];
++	unsigned int off, n, bytes, block = alg->des ? 8 : 16;
++	u32 mode = alg->mode;
++	int err;
++
++	rk_trace_once(d, "worker: begin\n");
++	err = rk_begin(d);
++	rk_trace_once(d, "worker: power result %d\n", err);
++	if (err)
++		goto finish;
++	if (crypto_skcipher_ivsize(tfm))
++		memcpy(iv, req->iv, block);
++	if (rctx->decrypt && !alg->ctr)
++		mode |= BIT(0);
++	if (alg->des) {
++		mode |= RK_CRYPTO_TDES_FIFO_MODE | RK_CRYPTO_TDES_BYTESWAP_KEY |
++			RK_CRYPTO_TDES_BYTESWAP_IV;
++	} else {
++		mode |= RK_CRYPTO_AES_FIFO_MODE | RK_CRYPTO_AES_KEY_CHANGE |
++			RK_CRYPTO_AES_BYTESWAP_KEY | RK_CRYPTO_AES_BYTESWAP_IV;
++		if (alg->ctr)
++			mode |= RK_CRYPTO_AES_BYTESWAP_CNT;
++		if (ctx->keylen == 24)
++			mode |= RK_CRYPTO_AES_192BIT_key;
++		if (ctx->keylen == 32)
++			mode |= RK_CRYPTO_AES_256BIT_key;
++	}
++	for (off = 0; off < req->cryptlen; off += n) {
++		n = min_t(unsigned int, RK_CHUNK, req->cryptlen - off);
++		bytes = round_up(n, block);
++		memset(d->in, 0, bytes);
++		scatterwalk_map_and_copy(d->in, req->src, off, n, 0);
++		if (rctx->decrypt && !alg->ctr)
++			memcpy(nextiv, d->in + n - block, block);
++		rk_flush(d, RK_CRYPTO_BLOCK_FLUSH);
++		rk_write(d, alg->des ? RK_CRYPTO_TDES_CTRL : RK_CRYPTO_AES_CTRL, mode);
++		memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_KEY1_0 : RK_CRYPTO_AES_KEY_0),
++			    ctx->key, ctx->keylen);
++		memcpy_toio(d->reg + (alg->des ? RK_CRYPTO_TDES_IV_0 : RK_CRYPTO_AES_IV_0),
++			    iv, block);
++		if (alg->ctr)
++			memcpy_toio(d->reg + RK_CRYPTO_AES_CNT_0, iv, AES_BLOCK_SIZE);
++		rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_BTFIFO |
++			 RK_CRYPTO_BYTESWAP_BRFIFO | (alg->des ? RK_CRYPTO_DESSEL : 0));
++		rk_arm(d, RK_CRYPTO_BCDMA_ERR_ENA | RK_CRYPTO_BCDMA_DONE_ENA);
++		rk_write(d, RK_CRYPTO_BRDMAS, d->in_dma);
++		rk_write(d, RK_CRYPTO_BTDMAS, d->out_dma);
++		rk_write(d, RK_CRYPTO_BRDMAL, bytes / 4);
++		dma_wmb();
++		rk_trace_once(d, "cipher: DMA mode=%x bytes=%u\n", mode, bytes);
++		rk_dma_start(d, RK_CRYPTO_BLOCK_START);
++		err = rk_wait(d, RK_CRYPTO_BCDMA_DONE_INT);
++		rk_trace_once(d, "cipher: IRQ result %d\n", err);
++		if (err)
++			break;
++		if (alg->ctr) {
++			unsigned int b;
++
++			for (b = 0; b < bytes; b += block)
++				crypto_inc(iv, block);
++		} else if (rctx->decrypt) {
++			memcpy(iv, nextiv, block);
++		} else {
++			memcpy(iv, d->out + n - block, block);
++		}
++		scatterwalk_map_and_copy(d->out, req->dst, off, n, 1);
++	}
++	if (!err && crypto_skcipher_ivsize(tfm))
++		memcpy(req->iv, iv, block);
++	memzero_explicit(iv, sizeof(iv));
++	memzero_explicit(nextiv, sizeof(nextiv));
++	rk_end(d);
++finish:
++	local_bh_disable();
++	crypto_finalize_skcipher_request(engine, req, err);
++	local_bh_enable();
++	return 0;
++}
++
++static struct ahash_request *rk_fallback(struct ahash_request *req)
++{
++	struct rk3128_hash_ctx *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(req));
++	struct rk3128_hash_req *rctx = ahash_request_ctx(req);
++	struct ahash_request *fb = &rctx->fallback;
++
++	ahash_request_set_tfm(fb, ctx->fallback);
++	ahash_request_set_callback(fb, req->base.flags, req->base.complete, req->base.data);
++	ahash_request_set_crypt(fb, req->src, req->result, req->nbytes);
++	return fb;
++}
++
++static int rk_hash_init(struct ahash_request *req)
++{
++	return crypto_ahash_init(rk_fallback(req));
++}
++static int rk_hash_update(struct ahash_request *req)
++{
++	return crypto_ahash_update(rk_fallback(req));
++}
++static int rk_hash_final(struct ahash_request *req)
++{
++	return crypto_ahash_final(rk_fallback(req));
++}
++static int rk_hash_finup(struct ahash_request *req)
++{
++	return crypto_ahash_finup(rk_fallback(req));
++}
++static int rk_hash_export(struct ahash_request *req, void *out)
++{
++	return crypto_ahash_export(rk_fallback(req), out);
++}
++static int rk_hash_import(struct ahash_request *req, const void *in)
++{
++	return crypto_ahash_import(rk_fallback(req), in);
++}
++static int rk_hash_digest(struct ahash_request *req)
++{
++	struct rk3128_hash_ctx *ctx = crypto_ahash_ctx(crypto_ahash_reqtfm(req));
++
++	if (!req->nbytes)
++		return crypto_ahash_digest(rk_fallback(req));
++	if (sg_nents_for_len(req->src, req->nbytes) < 0)
++		return -EINVAL;
++	return crypto_transfer_hash_request_to_engine(ctx->alg->dev->engine, req);
++}
++
++static int rk_hash_init_tfm(struct crypto_ahash *tfm)
++{
++	struct rk3128_hash_ctx *ctx = crypto_ahash_ctx(tfm);
++
++	ctx->alg = container_of(crypto_ahash_alg(tfm), struct rk3128_hash, alg.base);
++	ctx->fallback = crypto_alloc_ahash(crypto_ahash_alg_name(tfm), 0,
++					 CRYPTO_ALG_NEED_FALLBACK);
++	if (IS_ERR(ctx->fallback))
++		return PTR_ERR(ctx->fallback);
++	crypto_ahash_set_reqsize(tfm, sizeof(struct rk3128_hash_req) +
++				crypto_ahash_reqsize(ctx->fallback));
++	return 0;
++}
++
++static void rk_hash_exit_tfm(struct crypto_ahash *tfm)
++{
++	struct rk3128_hash_ctx *ctx = crypto_ahash_ctx(tfm);
++
++	crypto_free_ahash(ctx->fallback);
++}
++
++static int rk_hash_run(struct crypto_engine *engine, void *async_req)
++{
++	struct ahash_request *req = container_of(async_req, struct ahash_request, base);
++	struct crypto_ahash *tfm = crypto_ahash_reqtfm(req);
++	struct rk3128_hash_ctx *ctx = crypto_ahash_ctx(tfm);
++	struct rk3128_dev *d = ctx->alg->dev;
++	unsigned int off, n, i;
++	u32 v;
++	int err;
++
++	rk_trace_once(d, "worker: begin\n");
++	err = rk_begin(d);
++	rk_trace_once(d, "worker: power result %d\n", err);
++	if (err)
++		goto finish;
++	rk_flush(d, RK_CRYPTO_HASH_FLUSH);
++	memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++	rk_write(d, RK_CRYPTO_HASH_CTRL, ctx->alg->mode | RK_CRYPTO_HASH_SWAP_DO);
++	rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_HRFIFO);
++	rk_write(d, RK_CRYPTO_HASH_MSG_LEN, req->nbytes);
++	for (off = 0; off < req->nbytes; off += n) {
++		n = min_t(unsigned int, RK_CHUNK, req->nbytes - off);
++		memset(d->in, 0, round_up(n, 4));
++		scatterwalk_map_and_copy(d->in, req->src, off, n, 0);
++		rk_arm(d, RK_CRYPTO_HRDMA_ERR_ENA | RK_CRYPTO_HRDMA_DONE_ENA);
++		rk_write(d, RK_CRYPTO_HRDMAS, d->in_dma);
++		rk_write(d, RK_CRYPTO_HRDMAL, round_up(n, 4) / 4);
++		dma_wmb();
++		rk_dma_start(d, RK_CRYPTO_HASH_START);
++		err = rk_wait(d, RK_CRYPTO_HRDMA_DONE_INT);
++		if (err)
++			goto end;
++	}
++	err = readl_poll_timeout(d->reg + RK_CRYPTO_HASH_STS, v,
++				 v & RK_CRYPTO_HASH_DONE, 10, 10000);
++	if (err) {
++		rk_abort(d, err);
++		goto end;
++	}
++	for (i = 0; i < crypto_ahash_digestsize(tfm); i += 4)
++		put_unaligned_le32(readl(d->reg + RK_CRYPTO_HASH_DOUT_0 + i), req->result + i);
++end:
++	rk_end(d);
++finish:
++	local_bh_disable();
++	crypto_finalize_hash_request(engine, req, err);
++	local_bh_enable();
++	return 0;
++}
++
++#define RK_CIPHER(_name, _id, _bs, _iv, _min, _max, _mode, _des, _ctr) \
++	{ .alg = { .base = { .base = { .cra_name = _name, \
++	.cra_driver_name = _id "-rk3128", .cra_priority = 1, \
++	.cra_flags = CRYPTO_ALG_ASYNC, .cra_blocksize = _bs, \
++	.cra_ctxsize = sizeof(struct rk3128_cipher_ctx), .cra_module = THIS_MODULE }, \
++	.init = rk_cipher_init, .exit = rk_cipher_exit, .setkey = rk_setkey, \
++	.encrypt = rk_encrypt, .decrypt = rk_decrypt, .ivsize = _iv, \
++	.min_keysize = _min, .max_keysize = _max, .chunksize = (_ctr ? 16 : _bs) }, \
++	.op.do_one_request = rk_cipher_run }, .mode = _mode, .des = _des, .ctr = _ctr }
++
++static const struct rk3128_cipher rk_cipher_templates[RK_NCIPHER] = {
++	RK_CIPHER("ecb(aes)", "ecb-aes", 16, 0, 16, 32, 0, false, false),
++	RK_CIPHER("cbc(aes)", "cbc-aes", 16, 16, 16, 32, RK_CRYPTO_AES_CBC_MODE, false, false),
++	RK_CIPHER("ctr(aes)", "ctr-aes", 1, 16, 16, 32, RK_CRYPTO_AES_CTR_MODE, false, true),
++	RK_CIPHER("ecb(des)", "ecb-des", 8, 0, 8, 8, 0, true, false),
++	RK_CIPHER("cbc(des)", "cbc-des", 8, 8, 8, 8, RK_CRYPTO_TDES_CHAINMODE_CBC, true, false),
++	RK_CIPHER("ecb(des3_ede)", "ecb-des3-ede", 8, 0, 24, 24,
++		  RK_CRYPTO_TDES_SELECT, true, false),
++	RK_CIPHER("cbc(des3_ede)", "cbc-des3-ede", 8, 8, 24, 24,
++		  RK_CRYPTO_TDES_SELECT | RK_CRYPTO_TDES_CHAINMODE_CBC, true, false),
++	RK_CIPHER("ecb(des3_eee)", "ecb-des3-eee", 8, 0, 24, 24,
++		  RK_CRYPTO_TDES_SELECT | RK_CRYPTO_TDES_EEE, true, false),
++	RK_CIPHER("cbc(des3_eee)", "cbc-des3-eee", 8, 8, 24, 24,
++		  RK_CRYPTO_TDES_SELECT | RK_CRYPTO_TDES_EEE | RK_CRYPTO_TDES_CHAINMODE_CBC,
++		  true, false),
++};
++
++#define RK_HASH(_name, _size, _state, _mode) \
++	{ .alg = { .base = { .init = rk_hash_init, .update = rk_hash_update, \
++	.final = rk_hash_final, .finup = rk_hash_finup, .digest = rk_hash_digest, \
++	.export = rk_hash_export, .import = rk_hash_import, \
++	.init_tfm = rk_hash_init_tfm, .exit_tfm = rk_hash_exit_tfm, \
++	.halg = { .digestsize = _size, .statesize = sizeof(_state), \
++	.base = { .cra_name = _name, .cra_driver_name = _name "-rk3128", \
++	.cra_priority = 1, .cra_flags = CRYPTO_ALG_ASYNC | CRYPTO_ALG_NEED_FALLBACK, \
++	.cra_blocksize = 64, .cra_ctxsize = sizeof(struct rk3128_hash_ctx), \
++	.cra_module = THIS_MODULE } } }, .op.do_one_request = rk_hash_run }, .mode = _mode }
++
++static const struct rk3128_hash rk_hash_templates[RK_NHASH] = {
++	RK_HASH("md5", MD5_DIGEST_SIZE, struct md5_state, RK_CRYPTO_HASH_MD5),
++	RK_HASH("sha1", SHA1_DIGEST_SIZE, struct sha1_state, RK_CRYPTO_HASH_SHA1),
++	RK_HASH("sha256", SHA256_DIGEST_SIZE, struct sha256_state, RK_CRYPTO_HASH_SHA256),
++};
++
++static void rk_unregister(struct rk3128_dev *d, unsigned int nc, unsigned int nh)
++{
++	while (nh--)
++		crypto_engine_unregister_ahash(&d->hashes[nh].alg);
++	while (nc--)
++		crypto_engine_unregister_skcipher(&d->ciphers[nc].alg);
++}
++
++/* Failed post-DMA probe must bind: returning an error would free devm DMA. */
++static int rk_probe_failed(struct rk3128_dev *d, unsigned int nc,
++			   unsigned int nh, int err)
++{
++	bool started;
++
++	/* Serialize with the worker and refuse queued work before unregistering. */
++	mutex_lock(&d->lock);
++	started = d->dma_started;
++	if (started)
++		rk_abort(d, err);
++	else
++		d->broken = true;
++	mutex_unlock(&d->lock);
++	rk_unregister(d, nc, nh);
++	crypto_engine_stop(d->engine);
++	if (started) {
++		dev_err(d->dev,
++			"diagnostic probe FAILED (%d); retained until reboot; no APIs\n", err);
++		return 0;
++	}
++	pm_runtime_disable(d->dev);
++	if (!pm_runtime_status_suspended(d->dev))
++		rk_suspend(d->dev);
++	crypto_engine_exit(d->engine);
++	return err;
++}
++
++/* Deliberately outside crypto API: exactly one start, 64 zero bytes. */
++static int rk_hash_probe(struct rk3128_dev *d)
++{
++	static const u8 expected[SHA256_DIGEST_SIZE] = {
++		0xf5, 0xa5, 0xfd, 0x42, 0xd1, 0x6a, 0x20, 0x30,
++		0x27, 0x98, 0xef, 0x6e, 0xd3, 0x09, 0x97, 0x9b,
++		0x43, 0x00, 0x3d, 0x23, 0x20, 0xd9, 0xf0, 0xe8,
++		0xea, 0x98, 0x31, 0xa9, 0x27, 0x59, 0xfb, 0x4b,
++	};
++	u8 digest[SHA256_DIGEST_SIZE];
++	u32 v;
++	unsigned int i;
++	int err = rk_begin(d);
++
++	if (err)
++		return err;
++	memset(d->in, 0, 64);
++	rk_flush(d, RK_CRYPTO_HASH_FLUSH);
++	memset_io(d->reg + RK_CRYPTO_HASH_DOUT_0, 0, 32);
++	rk_write(d, RK_CRYPTO_HASH_CTRL, RK_CRYPTO_HASH_SHA256 | RK_CRYPTO_HASH_SWAP_DO);
++	rk_write(d, RK_CRYPTO_CONF, RK_CRYPTO_BYTESWAP_HRFIFO);
++	rk_write(d, RK_CRYPTO_HASH_MSG_LEN, 64);
++	rk_arm(d, RK_CRYPTO_HRDMA_ERR_ENA | RK_CRYPTO_HRDMA_DONE_ENA);
++	rk_write(d, RK_CRYPTO_HRDMAS, d->in_dma);
++	rk_write(d, RK_CRYPTO_HRDMAL, 16);
++	dma_wmb();
++	dev_info(d->dev, "single hash DMA: src=%pad bytes=64 words=16 ctrl=%08x conf=%08x\n",
++		 &d->in_dma, readl(d->reg + RK_CRYPTO_CTRL),
++		 readl(d->reg + RK_CRYPTO_CONF));
++	rk_dma_start(d, RK_CRYPTO_HASH_START);
++	err = rk_wait(d, RK_CRYPTO_HRDMA_DONE_INT);
++	if (err)
++		goto out;
++	err = readl_poll_timeout(d->reg + RK_CRYPTO_HASH_STS, v,
++				 v & RK_CRYPTO_HASH_DONE, 10, 10000);
++	if (err) {
++		rk_abort(d, err);
++		goto out;
++	}
++	for (i = 0; i < sizeof(digest); i += 4)
++		put_unaligned_le32(readl(d->reg + RK_CRYPTO_HASH_DOUT_0 + i), digest + i);
++	err = memcmp(digest, expected, sizeof(digest)) ? -EIO : 0;
++	dev_info(d->dev, "single hash DMA: %s digest=%*phN\n",
++		 err ? "FAIL" : "PASS", (int)sizeof(digest), digest);
++	if (err)
++		rk_abort(d, err);
++out:
++	rk_end(d);
++	return err;
++}
++
++static int rk_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct rk3128_dev *d;
++	unsigned int nc = 0, nh = 0;
++	int err;
++
++	if (hash_probe && enable_dma)
++		return dev_err_probe(dev, -EINVAL,
++				     "single hash probe cannot register algorithms\n");
++	/* Post-DMA reset/clock gating is unaccepted. Pin through reboot. */
++	if (hash_probe || enable_dma) {
++		unsigned long flags;
++		bool pinned;
++
++		spin_lock_irqsave(&dev->power.lock, flags);
++		pinned = !dev->power.runtime_auto;
++		spin_unlock_irqrestore(&dev->power.lock, flags);
++		if (!pinned)
++			return dev_err_probe(dev, -EPERM,
++					     "pin power/control=on before diagnostic DMA\n");
++	}
++	d = devm_kzalloc(dev, sizeof(*d), GFP_KERNEL);
++	if (!d)
++		return -ENOMEM;
++	d->dev = dev;
++	mutex_init(&d->lock);
++	platform_set_drvdata(pdev, d);
++	rk_trace(d, "probe: map and clocks\n");
++	d->reg = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(d->reg))
++		return PTR_ERR(d->reg);
++	d->clks[0].id = "sclk";
++	d->clks[1].id = "hclk";
++	err = devm_clk_bulk_get(dev, ARRAY_SIZE(d->clks), d->clks);
++	if (err)
++		return dev_err_probe(dev, err, "clocks\n");
++	/* The vendor's clock ceiling; never change a shared parent. */
++	if (clk_get_rate(d->clks[0].clk) > 150000000)
++		return dev_err_probe(dev, -EINVAL, "crypto clock exceeds 150 MHz\n");
++	d->reset = devm_reset_control_get_exclusive(dev, NULL);
++	if (IS_ERR(d->reset))
++		return dev_err_probe(dev, PTR_ERR(d->reset), "reset\n");
++	err = clk_bulk_prepare_enable(ARRAY_SIZE(d->clks), d->clks);
++	if (err)
++		return err;
++	rk_trace(d, "probe: clocks on, assert reset\n");
++	err = reset_control_assert(d->reset);
++	udelay(10);
++	clk_bulk_disable_unprepare(ARRAY_SIZE(d->clks), d->clks);
++	if (err)
++		return err;
++	rk_trace(d, "probe: allocate DMA buffers\n");
++	/* Keep the documented mask. Private CMA constrains diagnostic addresses. */
++	err = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
++	if (err)
++		return err;
++	if (hash_probe) {
++		err = devm_of_reserved_mem_device_init(dev);
++		if (err)
++			return dev_err_probe(dev, err, "diagnostic low-DDR pool\n");
++	}
++	d->in = dmam_alloc_coherent(dev, RK_CHUNK, &d->in_dma, GFP_KERNEL);
++	d->out = dmam_alloc_coherent(dev, RK_CHUNK, &d->out_dma, GFP_KERNEL);
++	if (!d->in || !d->out)
++		return -ENOMEM;
++	if (hash_probe && (d->in_dma >= BIT_ULL(31) || d->out_dma >= BIT_ULL(31)))
++		return dev_err_probe(dev, -ERANGE, "probe buffers outside low DDR\n");
++	rk_trace(d, "probe: DMA in=%pad out=%pad\n", &d->in_dma, &d->out_dma);
++	d->irq = platform_get_irq(pdev, 0);
++	if (d->irq < 0)
++		return d->irq;
++	init_completion(&d->done);
++	err = devm_request_irq(dev, d->irq, rk_irq, IRQF_NO_AUTOEN, dev_name(dev), d);
++	if (err)
++		return err;
++	rk_trace(d, "probe: IRQ ready, allocate engine\n");
++	d->engine = crypto_engine_alloc_init(dev, false);
++	if (!d->engine)
++		return -ENOMEM;
++	err = crypto_engine_start(d->engine);
++	if (err)
++		goto exit_engine;
++	rk_trace(d, "probe: engine started, enable PM\n");
++	pm_runtime_set_autosuspend_delay(dev, 100);
++	pm_runtime_use_autosuspend(dev);
++	err = pm_runtime_set_suspended(dev);
++	if (err) {
++		crypto_engine_stop(d->engine);
++		goto exit_engine;
++	}
++	pm_runtime_enable(dev);
++	if (hash_probe) {
++		err = rk_hash_probe(d);
++		if (err)
++			goto unregister;
++		dev_info(dev, "single hash diagnostic passed; power/resources pinned until reboot\n");
++		return 0;
++	}
++	if (!enable_dma) {
++		dev_info(dev, "PIO diagnostic only; cipher/hash/RNG/PKA APIs refused\n");
++		return 0;
++	}
++	memcpy(d->ciphers, rk_cipher_templates, sizeof(d->ciphers));
++	memcpy(d->hashes, rk_hash_templates, sizeof(d->hashes));
++	for (; nc < RK_NCIPHER; nc++) {
++		d->ciphers[nc].dev = d;
++		rk_trace(d, "probe: register cipher %u\n", nc);
++		err = crypto_engine_register_skcipher(&d->ciphers[nc].alg);
++		if (err)
++			goto unregister;
++	}
++	for (; nh < RK_NHASH; nh++) {
++		d->hashes[nh].dev = d;
++		rk_trace(d, "probe: register hash %u\n", nh);
++		err = crypto_engine_register_ahash(&d->hashes[nh].alg);
++		if (err)
++			goto unregister;
++	}
++	d->nc = nc;
++	d->nh = nh;
++	dev_info(dev, "RK3128 crypto v1: %u ciphers, %u hashes, priority 1\n", nc, nh);
++	return 0;
++unregister:
++	return rk_probe_failed(d, nc, nh, err);
++exit_engine:
++	crypto_engine_exit(d->engine);
++	return err;
++}
++
++static void rk_remove(struct platform_device *pdev)
++{
++	struct rk3128_dev *d = platform_get_drvdata(pdev);
++
++	rk_unregister(d, d->nc, d->nh);
++	/* A DMA start permanently pins this module; only pre-DMA removal is possible. */
++	crypto_engine_stop(d->engine);
++	pm_runtime_disable(d->dev);
++	mutex_lock(&d->lock);
++	d->broken = true;
++	rk_irq_off(d);
++	if (reset_control_assert(d->reset))
++		dev_err(d->dev, "cannot assert reset during removal\n");
++	if (!pm_runtime_status_suspended(d->dev))
++		rk_suspend(d->dev);
++	mutex_unlock(&d->lock);
++	crypto_engine_exit(d->engine);
++}
++
++static const struct dev_pm_ops rk_pm_ops = {
++	RUNTIME_PM_OPS(rk_suspend, rk_resume, NULL)
++};
++static const struct of_device_id rk_of_match[] = {
++	{ .compatible = "rockchip,rk3128-crypto" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, rk_of_match);
++static struct platform_driver rk_driver = {
++	.probe = rk_probe,
++	.remove = rk_remove,
++	.driver = {
++		.name = "rk3128-crypto",
++		.of_match_table = rk_of_match,
++		.pm = pm_ptr(&rk_pm_ops),
++		.suppress_bind_attrs = true,
++	},
++};
++module_platform_driver(rk_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("Rockchip RK3128 crypto v1");
+diff --git a/drivers/crypto/rockchip/rk3128-regs.h b/drivers/crypto/rockchip/rk3128-regs.h
+--- /dev/null
++++ b/drivers/crypto/rockchip/rk3128-regs.h
+@@ -0,0 +1,184 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef __RK3128_CRYPTO_REGS_H__
++#define __RK3128_CRYPTO_REGS_H__
++
++#include <crypto/aes.h>
++#include <crypto/engine.h>
++#include <crypto/internal/des.h>
++#include <crypto/internal/hash.h>
++#include <crypto/internal/skcipher.h>
++#include <crypto/md5.h>
++#include <crypto/sha1.h>
++#include <crypto/sha2.h>
++#include <linux/dma-mapping.h>
++#include <linux/interrupt.h>
++#include <linux/pm_runtime.h>
++#include <linux/scatterlist.h>
++#include <linux/types.h>
++
++#define _SBF(v, f)			((v) << (f))
++
++/* Crypto control registers*/
++#define RK_CRYPTO_INTSTS		0x0000
++#define RK_CRYPTO_PKA_DONE_INT		BIT(5)
++#define RK_CRYPTO_HASH_DONE_INT		BIT(4)
++#define RK_CRYPTO_HRDMA_ERR_INT		BIT(3)
++#define RK_CRYPTO_HRDMA_DONE_INT	BIT(2)
++#define RK_CRYPTO_BCDMA_ERR_INT		BIT(1)
++#define RK_CRYPTO_BCDMA_DONE_INT	BIT(0)
++
++#define RK_CRYPTO_INTENA		0x0004
++#define RK_CRYPTO_PKA_DONE_ENA		BIT(5)
++#define RK_CRYPTO_HASH_DONE_ENA		BIT(4)
++#define RK_CRYPTO_HRDMA_ERR_ENA		BIT(3)
++#define RK_CRYPTO_HRDMA_DONE_ENA	BIT(2)
++#define RK_CRYPTO_BCDMA_ERR_ENA		BIT(1)
++#define RK_CRYPTO_BCDMA_DONE_ENA	BIT(0)
++
++#define RK_CRYPTO_CTRL			0x0008
++#define RK_CRYPTO_WRITE_MASK		_SBF(0xFFFF, 16)
++#define RK_CRYPTO_TRNG_FLUSH		BIT(9)
++#define RK_CRYPTO_TRNG_START		BIT(8)
++#define RK_CRYPTO_PKA_FLUSH		BIT(7)
++#define RK_CRYPTO_HASH_FLUSH		BIT(6)
++#define RK_CRYPTO_BLOCK_FLUSH		BIT(5)
++#define RK_CRYPTO_PKA_START		BIT(4)
++#define RK_CRYPTO_HASH_START		BIT(3)
++#define RK_CRYPTO_BLOCK_START		BIT(2)
++#define RK_CRYPTO_TDES_START		BIT(1)
++#define RK_CRYPTO_AES_START		BIT(0)
++
++#define RK_CRYPTO_CONF			0x000c
++/* HASH Receive DMA Address Mode:   fix | increment */
++#define RK_CRYPTO_HR_ADDR_MODE		BIT(8)
++/* Block Transmit DMA Address Mode: fix | increment */
++#define RK_CRYPTO_BT_ADDR_MODE		BIT(7)
++/* Block Receive DMA Address Mode:  fix | increment */
++#define RK_CRYPTO_BR_ADDR_MODE		BIT(6)
++#define RK_CRYPTO_BYTESWAP_HRFIFO	BIT(5)
++#define RK_CRYPTO_BYTESWAP_BTFIFO	BIT(4)
++#define RK_CRYPTO_BYTESWAP_BRFIFO	BIT(3)
++/* AES = 0 OR DES = 1 */
++#define RK_CRYPTO_DESSEL				BIT(2)
++#define RK_CYYPTO_HASHINSEL_INDEPENDENT_SOURCE		_SBF(0x00, 0)
++#define RK_CYYPTO_HASHINSEL_BLOCK_CIPHER_INPUT		_SBF(0x01, 0)
++#define RK_CYYPTO_HASHINSEL_BLOCK_CIPHER_OUTPUT		_SBF(0x02, 0)
++
++/* Block Receiving DMA Start Address Register */
++#define RK_CRYPTO_BRDMAS		0x0010
++/* Block Transmitting DMA Start Address Register */
++#define RK_CRYPTO_BTDMAS		0x0014
++/* Block Receiving DMA Length Register */
++#define RK_CRYPTO_BRDMAL		0x0018
++/* Hash Receiving DMA Start Address Register */
++#define RK_CRYPTO_HRDMAS		0x001c
++/* Hash Receiving DMA Length Register */
++#define RK_CRYPTO_HRDMAL		0x0020
++
++/* AES registers */
++#define RK_CRYPTO_AES_CTRL			  0x0080
++#define RK_CRYPTO_AES_BYTESWAP_CNT	BIT(11)
++#define RK_CRYPTO_AES_BYTESWAP_KEY	BIT(10)
++#define RK_CRYPTO_AES_BYTESWAP_IV	BIT(9)
++#define RK_CRYPTO_AES_BYTESWAP_DO	BIT(8)
++#define RK_CRYPTO_AES_BYTESWAP_DI	BIT(7)
++#define RK_CRYPTO_AES_KEY_CHANGE	BIT(6)
++#define RK_CRYPTO_AES_ECB_MODE		_SBF(0x00, 4)
++#define RK_CRYPTO_AES_CBC_MODE		_SBF(0x01, 4)
++#define RK_CRYPTO_AES_CTR_MODE		_SBF(0x02, 4)
++#define RK_CRYPTO_AES_128BIT_key	_SBF(0x00, 2)
++#define RK_CRYPTO_AES_192BIT_key	_SBF(0x01, 2)
++#define RK_CRYPTO_AES_256BIT_key	_SBF(0x02, 2)
++/* Slave = 0 / fifo = 1 */
++#define RK_CRYPTO_AES_FIFO_MODE		BIT(1)
++/* Encryption = 0 , Decryption = 1 */
++#define RK_CRYPTO_AES_DEC		BIT(0)
++
++#define RK_CRYPTO_AES_STS		0x0084
++#define RK_CRYPTO_AES_DONE		BIT(0)
++
++/* AES Input Data 0-3 Register */
++#define RK_CRYPTO_AES_DIN_0		0x0088
++#define RK_CRYPTO_AES_DIN_1		0x008c
++#define RK_CRYPTO_AES_DIN_2		0x0090
++#define RK_CRYPTO_AES_DIN_3		0x0094
++
++/* AES output Data 0-3 Register */
++#define RK_CRYPTO_AES_DOUT_0		0x0098
++#define RK_CRYPTO_AES_DOUT_1		0x009c
++#define RK_CRYPTO_AES_DOUT_2		0x00a0
++#define RK_CRYPTO_AES_DOUT_3		0x00a4
++
++/* AES IV Data 0-3 Register */
++#define RK_CRYPTO_AES_IV_0		0x00a8
++#define RK_CRYPTO_AES_IV_1		0x00ac
++#define RK_CRYPTO_AES_IV_2		0x00b0
++#define RK_CRYPTO_AES_IV_3		0x00b4
++
++/* AES Key Data 0-3 Register */
++#define RK_CRYPTO_AES_KEY_0		0x00b8
++#define RK_CRYPTO_AES_KEY_1		0x00bc
++#define RK_CRYPTO_AES_KEY_2		0x00c0
++#define RK_CRYPTO_AES_KEY_3		0x00c4
++#define RK_CRYPTO_AES_KEY_4		0x00c8
++#define RK_CRYPTO_AES_KEY_5		0x00cc
++#define RK_CRYPTO_AES_KEY_6		0x00d0
++#define RK_CRYPTO_AES_KEY_7		0x00d4
++#define RK_CRYPTO_AES_CNT_0		0x00d8
++
++/* des/tdes */
++#define RK_CRYPTO_TDES_CTRL		0x0100
++#define RK_CRYPTO_TDES_BYTESWAP_KEY	BIT(8)
++#define RK_CRYPTO_TDES_BYTESWAP_IV	BIT(7)
++#define RK_CRYPTO_TDES_BYTESWAP_DO	BIT(6)
++#define RK_CRYPTO_TDES_BYTESWAP_DI	BIT(5)
++/* 0: ECB, 1: CBC */
++#define RK_CRYPTO_TDES_CHAINMODE_CBC	BIT(4)
++/* TDES Key Mode, 0 : EDE, 1 : EEE */
++#define RK_CRYPTO_TDES_EEE		BIT(3)
++/* 0: DES, 1:TDES */
++#define RK_CRYPTO_TDES_SELECT		BIT(2)
++/* 0: Slave, 1:Fifo */
++#define RK_CRYPTO_TDES_FIFO_MODE	BIT(1)
++/* Encryption = 0 , Decryption = 1 */
++#define RK_CRYPTO_TDES_DEC		BIT(0)
++
++#define RK_CRYPTO_TDES_STS		0x0104
++#define RK_CRYPTO_TDES_DONE		BIT(0)
++
++#define RK_CRYPTO_TDES_DIN_0		0x0108
++#define RK_CRYPTO_TDES_DIN_1		0x010c
++#define RK_CRYPTO_TDES_DOUT_0		0x0110
++#define RK_CRYPTO_TDES_DOUT_1		0x0114
++#define RK_CRYPTO_TDES_IV_0		0x0118
++#define RK_CRYPTO_TDES_IV_1		0x011c
++#define RK_CRYPTO_TDES_KEY1_0		0x0120
++#define RK_CRYPTO_TDES_KEY1_1		0x0124
++#define RK_CRYPTO_TDES_KEY2_0		0x0128
++#define RK_CRYPTO_TDES_KEY2_1		0x012c
++#define RK_CRYPTO_TDES_KEY3_0		0x0130
++#define RK_CRYPTO_TDES_KEY3_1		0x0134
++
++/* HASH */
++#define RK_CRYPTO_HASH_CTRL		0x0180
++#define RK_CRYPTO_HASH_SWAP_DO		BIT(3)
++#define RK_CRYPTO_HASH_SWAP_DI		BIT(2)
++#define RK_CRYPTO_HASH_SHA1		_SBF(0x00, 0)
++#define RK_CRYPTO_HASH_MD5		_SBF(0x01, 0)
++#define RK_CRYPTO_HASH_SHA256		_SBF(0x02, 0)
++#define RK_CRYPTO_HASH_PRNG		_SBF(0x03, 0)
++
++#define RK_CRYPTO_HASH_STS		0x0184
++#define RK_CRYPTO_HASH_DONE		BIT(0)
++
++#define RK_CRYPTO_HASH_MSG_LEN		0x0188
++#define RK_CRYPTO_HASH_DOUT_0		0x018c
++#define RK_CRYPTO_HASH_DOUT_1		0x0190
++#define RK_CRYPTO_HASH_DOUT_2		0x0194
++#define RK_CRYPTO_HASH_DOUT_3		0x0198
++#define RK_CRYPTO_HASH_DOUT_4		0x019c
++#define RK_CRYPTO_HASH_DOUT_5		0x01a0
++#define RK_CRYPTO_HASH_DOUT_6		0x01a4
++#define RK_CRYPTO_HASH_DOUT_7		0x01a8
++
++#endif
+diff --git a/Documentation/devicetree/bindings/crypto/rockchip,rk3128-crypto.yaml b/Documentation/devicetree/bindings/crypto/rockchip,rk3128-crypto.yaml
+--- /dev/null
++++ b/Documentation/devicetree/bindings/crypto/rockchip,rk3128-crypto.yaml
+@@ -0,0 +1,57 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/crypto/rockchip,rk3128-crypto.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: Rockchip RK3128 crypto v1
++
++maintainers:
++  - RK3128 reference <reference@example.invalid>
++
++description: |
++  RK3128 crypto v1 has AES, DES/3DES, MD5/SHA1/SHA256 and an
++  oscillator-backed TRNG. PKA is vendor-unsupported on RK3128. Its two-clock integration differs from RK3288.
++  The crypto and random interfaces share a single register window/reset.
++
++properties:
++  compatible:
++    const: rockchip,rk3128-crypto
++  reg:
++    maxItems: 1
++  interrupts:
++    maxItems: 1
++  clocks:
++    maxItems: 2
++  clock-names:
++    items:
++      - const: sclk
++      - const: hclk
++  resets:
++    maxItems: 1
++  memory-region:
++    description: Private low-DDR CMA pool for the one-shot DMA diagnostic only
++    maxItems: 1
++
++required:
++  - compatible
++  - reg
++  - interrupts
++  - clocks
++  - clock-names
++  - resets
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/rk3128-cru.h>
++    #include <dt-bindings/interrupt-controller/arm-gic.h>
++    crypto@100fc000 {
++        compatible = "rockchip,rk3128-crypto";
++        reg = <0x100fc000 0x4000>;
++        interrupts = <GIC_SPI 40 IRQ_TYPE_LEVEL_HIGH>;
++        clocks = <&cru SCLK_CRYPTO>, <&cru HCLK_CRYPTO>;
++        clock-names = "sclk", "hclk";
++        resets = <&cru SRST_CRYPTO>;
++    };
+diff --git a/crypto/testmgr.c b/crypto/testmgr.c
+--- a/crypto/testmgr.c
++++ b/crypto/testmgr.c
+@@ -68,6 +68,7 @@
+ #else
+ 
+ #include "testmgr.h"
++#include "rk3128-testvec.h"
+ 
+ /*
+  * Need slab memory for testing (size in number of pages).
+@@ -4380,6 +4381,12 @@
+ 			.cipher = __VECS(des3_ede_cbc_tv_template)
+ 		},
+ 	}, {
++		.alg = "cbc(des3_eee)",
++		.test = alg_test_skcipher,
++		.suite = {
++			.cipher = __VECS(des3_eee_cbc_tv_template)
++		},
++	}, {
+ 		/* Same as cbc(aes) except the key is stored in
+ 		 * hardware secure memory which we reference by index
+ 		 */
+@@ -4716,6 +4723,12 @@
+ 		.test = alg_test_skcipher,
+ 		.suite = {
+ 			.cipher = __VECS(des3_ede_tv_template)
++		}
++	}, {
++		.alg = "ecb(des3_eee)",
++		.test = alg_test_skcipher,
++		.suite = {
++			.cipher = __VECS(des3_eee_ecb_tv_template)
+ 		}
+ 	}, {
+ 		.alg = "ecb(khazad)",
+diff --git a/crypto/rk3128-testvec.h b/crypto/rk3128-testvec.h
+--- /dev/null
++++ b/crypto/rk3128-testvec.h
+@@ -0,0 +1,46 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Public EEE known answers: three independent software DES stages. */
++static const struct cipher_testvec des3_eee_ecb_tv_template[] = {
++	{
++		.key = "\x07\x1a\x2d\x40\x53\x66\x79\x8c\x9f\xb2\xc5\xd8\xeb\xfe\x11\x24"
++		       "\x37\x4a\x5d\x70\x83\x96\xa9\xbc",
++		.klen = 24,
++		.ptext = "\x13\x5c\xa5\xee\x37\x80\xc9\x12",
++		.ctext = "\x84\xfb\x93\x8d\xa8\x72\x9e\x9f",
++		.len = 8,
++	},
++	{
++		.key = "\x07\x1a\x2d\x40\x53\x66\x79\x8c\x9f\xb2\xc5\xd8\xeb\xfe\x11\x24"
++		       "\x37\x4a\x5d\x70\x83\x96\xa9\xbc",
++		.klen = 24,
++		.ptext = "\x13\x5c\xa5\xee\x37\x80\xc9\x12\x5b\xa4\xed\x36\x7f\xc8\x11\x5a"
++		       "\xa3\xec\x35\x7e\xc7\x10\x59\xa2\xeb\x34\x7d\xc6\x0f\x58\xa1\xea",
++		.ctext = "\x84\xfb\x93\x8d\xa8\x72\x9e\x9f\xd5\x34\xa4\x79\x4c\xca\x34\xb5"
++		       "\x84\xb0\x2c\x2e\x00\x81\x79\x38\x11\x71\xfc\xbd\xe2\xd8\x42\xd5",
++		.len = 32,
++	},
++};
++static const struct cipher_testvec des3_eee_cbc_tv_template[] = {
++	{
++		.key = "\x07\x1a\x2d\x40\x53\x66\x79\x8c\x9f\xb2\xc5\xd8\xeb\xfe\x11\x24"
++		       "\x37\x4a\x5d\x70\x83\x96\xa9\xbc",
++		.klen = 24,
++		.iv = "\x05\x12\x1f\x2c\x39\x46\x53\x60",
++		.iv_out = "\x21\x40\x44\x93\x8d\x0a\x7a\x5e",
++		.ptext = "\x13\x5c\xa5\xee\x37\x80\xc9\x12",
++		.ctext = "\x21\x40\x44\x93\x8d\x0a\x7a\x5e",
++		.len = 8,
++	},
++	{
++		.key = "\x07\x1a\x2d\x40\x53\x66\x79\x8c\x9f\xb2\xc5\xd8\xeb\xfe\x11\x24"
++		       "\x37\x4a\x5d\x70\x83\x96\xa9\xbc",
++		.klen = 24,
++		.iv = "\x05\x12\x1f\x2c\x39\x46\x53\x60",
++		.iv_out = "\x6c\x62\x72\x82\x09\x3a\xf3\xb9",
++		.ptext = "\x13\x5c\xa5\xee\x37\x80\xc9\x12\x5b\xa4\xed\x36\x7f\xc8\x11\x5a"
++		       "\xa3\xec\x35\x7e\xc7\x10\x59\xa2\xeb\x34\x7d\xc6\x0f\x58\xa1\xea",
++		.ctext = "\x21\x40\x44\x93\x8d\x0a\x7a\x5e\x0f\xdf\x67\xbe\xf5\x95\x45\x1c"
++		       "\x67\xac\x39\x4d\xac\xa5\xbf\x44\x6c\x62\x72\x82\x09\x3a\xf3\xb9",
++		.len = 32,
++	},
++};
+diff --git a/MAINTAINERS b/MAINTAINERS
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -23721,6 +23721,13 @@
+ F:	Documentation/devicetree/bindings/media/rockchip,rk3128-rga.yaml
+ F:	drivers/media/platform/rockchip/rga/rga1*
+ 
++ROCKCHIP RK3128 CRYPTO DRIVER
++M:	RK3128 reference <reference@example.invalid>
++S:	Maintained
++F:	Documentation/devicetree/bindings/crypto/rockchip,rk3128-crypto.yaml
++F:	crypto/rk3128-testvec.h
++F:	drivers/crypto/rockchip/rk3128-*
++
+ ROCKCHIP RK3568 RANDOM NUMBER GENERATOR SUPPORT
+ M:	Daniel Golle <daniel@makrotopia.org>
+ M:	Aurelien Jarno <aurelien@aurel32.net>

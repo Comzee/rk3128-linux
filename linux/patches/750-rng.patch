@@ -1,0 +1,333 @@
+From: RK3128 reference <reference@example.invalid>
+Subject: [PATCH] hwrng: add RK3128 raw oscillator with latched health tests
+
+Use the crypto-v1 oscillator without DMA, hash PRNG or PKA. Raw-source
+measurements determine a conservative fixed quality; RCT/APT plus repeated
+output detection stop feeding on failure. Exclusive device binding prevents
+concurrent access by the experimental cipher/hash driver.
+
+Signed-off-by: RK3128 reference <reference@example.invalid>
+
+diff --git a/drivers/char/hw_random/Kconfig b/drivers/char/hw_random/Kconfig
+--- a/drivers/char/hw_random/Kconfig
++++ b/drivers/char/hw_random/Kconfig
+@@ -610,6 +610,17 @@
+ 	  To compile this driver as a module, choose M here.
+ 	  The module will be called jh7110-trng.
+ 
++config HW_RANDOM_RK3128
++	tristate "Rockchip RK3128 crypto-v1 oscillator"
++	depends on OF && (ARCH_ROCKCHIP || COMPILE_TEST)
++	depends on HAS_IOMEM
++	help
++	  Raw oscillator output from RK3128 crypto v1, with continuous
++	  repetition-count and adaptive-proportion health tests. Entropy is
++	  conservatively credited at 128/1024 after board measurements.
++	  Claims the whole crypto block: cannot coexist with crypto diagnostics.
++	  No DMA, cipher/hash PRNG or PKA is used. Module: rk3128-rng.
++
+ config HW_RANDOM_ROCKCHIP
+ 	tristate "Rockchip True Random Number Generator"
+ 	depends on HW_RANDOM && (ARCH_ROCKCHIP || COMPILE_TEST)
+diff --git a/drivers/char/hw_random/Makefile b/drivers/char/hw_random/Makefile
+--- a/drivers/char/hw_random/Makefile
++++ b/drivers/char/hw_random/Makefile
+@@ -55,3 +55,4 @@
+ obj-$(CONFIG_HW_RANDOM_JH7110) += jh7110-trng.o
+ obj-$(CONFIG_HW_RANDOM_XILINX) += xilinx-trng.o
+ obj-$(CONFIG_HW_RANDOM_QCOM) += qcom-rng.o
++obj-$(CONFIG_HW_RANDOM_RK3128) += rk3128-rng.o
+diff --git a/drivers/char/hw_random/rk3128-rng.c b/drivers/char/hw_random/rk3128-rng.c
+--- /dev/null
++++ b/drivers/char/hw_random/rk3128-rng.c
+@@ -0,0 +1,208 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* RK3128 crypto-v1 oscillator only. No DMA, cipher, hash PRNG or PKA access. */
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/hw_random.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/platform_device.h>
++#include <linux/reset.h>
++#include <linux/unaligned.h>
++#include "rk3128-rng-health.h"
++
++#define RK_RNG_CTRL 0x008
++#define RK_RNG_START BIT(8)
++#define RK_RNG_OSC 0x200
++#define RK_RNG_ENABLE BIT(16)
++#define RK_RNG_PERIOD 1000
++#define RK_RNG_DATA 0x204
++#define RK_RNG_BYTES 32
++#define RK_RNG_QUALITY 128 /* per 1024 bits: 0.125, fourfold below H=0.5 */
++
++struct rk3128_rng {
++	void __iomem *base;
++	struct device *dev;
++	struct clk_bulk_data clocks[2];
++	struct reset_control *reset;
++	struct hwrng rng;
++	struct mutex lock;
++	struct rk_rng_health health;
++	bool failed;
++};
++
++static int rk_rng_sample(struct rk3128_rng *r, u8 data[RK_RNG_BYTES])
++{
++	u32 ctrl;
++	unsigned int i;
++	int err;
++
++	writel(RK_RNG_START << 16 | RK_RNG_START, r->base + RK_RNG_CTRL);
++	err = readl_poll_timeout(r->base + RK_RNG_CTRL, ctrl,
++				 !(ctrl & RK_RNG_START), 50, 20000);
++	if (err)
++		return err;
++	for (i = 0; i < RK_RNG_BYTES; i += 4)
++		put_unaligned_le32(readl(r->base + RK_RNG_DATA + i), data + i);
++	if (rk_rng_health_block(&r->health, data))
++		return -EIO;
++	return 0;
++}
++
++static void rk_rng_fail(struct rk3128_rng *r)
++{
++	r->failed = true;
++	writel(0, r->base + RK_RNG_OSC);
++	dev_err_ratelimited(r->dev, "TRNG timeout/health failure; output latched off until driver removal\n");
++}
++
++static int rk_rng_init(struct hwrng *rng)
++{
++	struct rk3128_rng *r = container_of(rng, struct rk3128_rng, rng);
++	u8 discard[RK_RNG_BYTES];
++	unsigned int i;
++	int err = 0;
++
++	mutex_lock(&r->lock);
++	if (r->failed) {
++		err = -EIO;
++		goto out;
++	}
++	/* The oscillator is independent of the crypto clocks and flush signals.
++	 * Keep it on while selected. Withhold/test 1024 startup bits (90B 4.3).
++	 * Preserve continuous-test history across source selection as well.
++	 */
++	writel(RK_RNG_ENABLE | RK_RNG_PERIOD, r->base + RK_RNG_OSC);
++	for (i = 0; i < 4; i++) {
++		err = rk_rng_sample(r, discard);
++		if (err) {
++			rk_rng_fail(r);
++			break;
++		}
++	}
++	memzero_explicit(discard, sizeof(discard));
++out:
++	mutex_unlock(&r->lock);
++	return err;
++}
++
++static void rk_rng_cleanup(struct hwrng *rng)
++{
++	struct rk3128_rng *r = container_of(rng, struct rk3128_rng, rng);
++
++	mutex_lock(&r->lock);
++	writel(0, r->base + RK_RNG_OSC);
++	mutex_unlock(&r->lock);
++}
++
++static int rk_rng_read(struct hwrng *rng, void *buf, size_t max, bool wait)
++{
++	struct rk3128_rng *r = container_of(rng, struct rk3128_rng, rng);
++	u8 data[RK_RNG_BYTES];
++	int err;
++	size_t n = min_t(size_t, max, sizeof(data));
++
++	if (!wait || !n)
++		return 0;
++	mutex_lock(&r->lock);
++	if (r->failed) {
++		err = -EIO;
++		goto out;
++	}
++	err = rk_rng_sample(r, data);
++	if (err) {
++		rk_rng_fail(r);
++		goto clear;
++	}
++	/* Never expose any part of a sample that failed either health test. */
++	memcpy(buf, data, n);
++	err = n;
++clear:
++	memzero_explicit(data, sizeof(data));
++out:
++	mutex_unlock(&r->lock);
++	return err;
++}
++
++static void rk_rng_power_off(void *arg)
++{
++	struct rk3128_rng *r = arg;
++
++	writel(0, r->base + RK_RNG_OSC);
++	if (reset_control_assert(r->reset))
++		dev_err(r->dev, "cannot assert TRNG reset during removal\n");
++	clk_bulk_disable_unprepare(ARRAY_SIZE(r->clocks), r->clocks);
++}
++
++static int rk_rng_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct rk3128_rng *r;
++	int err;
++
++	r = devm_kzalloc(dev, sizeof(*r), GFP_KERNEL);
++	if (!r)
++		return -ENOMEM;
++	r->dev = dev;
++	mutex_init(&r->lock);
++	r->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(r->base))
++		return PTR_ERR(r->base);
++	r->clocks[0].id = "sclk";
++	r->clocks[1].id = "hclk";
++	err = devm_clk_bulk_get(dev, ARRAY_SIZE(r->clocks), r->clocks);
++	if (err)
++		return dev_err_probe(dev, err, "clocks\n");
++	/* Estimates and timeouts are for these measured vendor clock points. */
++	if (clk_get_rate(r->clocks[0].clk) != 148500000 ||
++	    clk_get_rate(r->clocks[1].clk) != 74250000)
++		return dev_err_probe(dev, -EINVAL, "unmeasured TRNG clock rates\n");
++	r->reset = devm_reset_control_get_exclusive(dev, NULL);
++	if (IS_ERR(r->reset))
++		return dev_err_probe(dev, PTR_ERR(r->reset), "reset\n");
++	err = clk_bulk_prepare_enable(ARRAY_SIZE(r->clocks), r->clocks);
++	if (err)
++		return err;
++	err = devm_add_action_or_reset(dev, rk_rng_power_off, r);
++	if (err)
++		return err;
++	err = reset_control_assert(r->reset);
++	if (err)
++		return err;
++	udelay(10);
++	err = reset_control_deassert(r->reset);
++	if (err)
++		return err;
++	r->rng.name = "rk3128-trng";
++	r->rng.init = rk_rng_init;
++	r->rng.cleanup = rk_rng_cleanup;
++	r->rng.read = rk_rng_read;
++	r->rng.quality = RK_RNG_QUALITY;
++	err = devm_hwrng_register(dev, &r->rng);
++	if (err)
++		return dev_err_probe(dev, err, "hwrng registration\n");
++	dev_info(dev, "raw oscillator hwrng: period %u, quality %u/1024, RCT/APT enabled\n",
++		 RK_RNG_PERIOD, RK_RNG_QUALITY);
++	return 0;
++}
++
++static const struct of_device_id rk_rng_of_match[] = {
++	{ .compatible = "rockchip,rk3128-crypto" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, rk_rng_of_match);
++
++/* Claims the whole block exclusively, so crypto diagnostics cannot coexist. */
++static struct platform_driver rk_rng_driver = {
++	.probe = rk_rng_probe,
++	.driver = {
++		.name = "rk3128-rng",
++		.of_match_table = rk_rng_of_match,
++	},
++};
++module_platform_driver(rk_rng_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("RK3128 raw oscillator hwrng with continuous health tests");
+diff --git a/drivers/char/hw_random/rk3128-rng-health.h b/drivers/char/hw_random/rk3128-rng-health.h
+--- /dev/null
++++ b/drivers/char/hw_random/rk3128-rng-health.h
+@@ -0,0 +1,67 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef RK3128_RNG_HEALTH_H
++#define RK3128_RNG_HEALTH_H
++
++/* Raw bits, LSB first within each output byte. H=0.5, alpha=2^-30.
++ * SP800-90B 4.4: RCT C=1+ceil(30/H)=61; APT W=512, C=422.
++ * P(Binomial(511, 2^-H)>=421)=8.109e-10 < alpha.
++ * Counts persist across all reads. Failure is latched until driver removal.
++ */
++#define RK_RNG_RCT_C 61
++#define RK_RNG_APT_W 512
++#define RK_RNG_APT_C 422
++struct rk_rng_health {
++	unsigned int last, run, ref, count, samples;
++	unsigned int failed, have_previous;
++	unsigned char previous[32];
++};
++
++static inline int rk_rng_health_byte(struct rk_rng_health *h, unsigned char byte)
++{
++	unsigned int i, bit;
++
++	if (h->failed)
++		return -1;
++	for (i = 0; i < 8; i++) {
++		bit = (byte >> i) & 1;
++		h->run = h->run && bit == h->last ? h->run + 1 : 1;
++		h->last = bit;
++		if (!h->samples) {
++			h->ref = bit;
++			h->count = 0;
++		}
++		h->count += bit == h->ref;
++		h->samples++;
++		if (h->run >= RK_RNG_RCT_C || h->count >= RK_RNG_APT_C) {
++			h->failed = 1;
++			return -1;
++		}
++		if (h->samples == RK_RNG_APT_W)
++			h->samples = 0;
++	}
++	return 0;
++}
++/* Also reject a stuck 256-bit output register, including balanced patterns. */
++static inline int rk_rng_health_block(struct rk_rng_health *h,
++				      const unsigned char data[32])
++{
++	unsigned int i, equal = 1;
++
++	if (h->failed)
++		return -1;
++	for (i = 0; i < 32; i++) {
++		if (data[i] != h->previous[i])
++			equal = 0;
++		if (rk_rng_health_byte(h, data[i]))
++			return -1;
++	}
++	if (h->have_previous && equal) {
++		h->failed = 1;
++		return -1;
++	}
++	for (i = 0; i < 32; i++)
++		h->previous[i] = data[i];
++	h->have_previous = 1;
++	return 0;
++}
++#endif
+diff --git a/MAINTAINERS b/MAINTAINERS
+--- a/MAINTAINERS
++++ b/MAINTAINERS
+@@ -23726,6 +23726,7 @@
+ S:	Maintained
+ F:	Documentation/devicetree/bindings/crypto/rockchip,rk3128-crypto.yaml
+ F:	crypto/rk3128-testvec.h
++F:	drivers/char/hw_random/rk3128-rng*
+ F:	drivers/crypto/rockchip/rk3128-*
+ 
+ ROCKCHIP RK3568 RANDOM NUMBER GENERATOR SUPPORT

@@ -1,0 +1,398 @@
+Upstream kernel target attribution for patch context.
+Per-file license expressions below are retained; original additions follow the scope in LICENSE.
+
+Documentation/devicetree/bindings/display/rockchip/rockchip,lvds.yaml
+# SPDX-License-Identifier: GPL-2.0
+
+Documentation/devicetree/bindings/display/rockchip/rockchip-vop.yaml
+# SPDX-License-Identifier: GPL-2.0
+
+Documentation/devicetree/bindings/input/touchscreen/silead,gsl1680.yaml
+# SPDX-License-Identifier: GPL-2.0
+
+Documentation/devicetree/bindings/media/rc.yaml
+# SPDX-License-Identifier: GPL-2.0
+
+Documentation/devicetree/bindings/media/rockchip,vdec.yaml
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+
+Documentation/devicetree/bindings/mmc/mmc-controller-common.yaml
+# SPDX-License-Identifier: GPL-2.0
+
+Documentation/devicetree/bindings/vendor-prefixes.yaml
+# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
+
+arch/arm/Kconfig.debug
+# SPDX-License-Identifier: GPL-2.0
+
+arch/arm/boot/compressed/head.S
+/* SPDX-License-Identifier: GPL-2.0-only */
+ *  Copyright (C) 1996-2002 Russell King
+ *  Copyright (C) 2004 Hyok S. Choi (MPU support)
+
+arch/arm/boot/dts/rockchip/rk3128.dtsi
+// SPDX-License-Identifier: GPL-2.0+
+ * (C) Copyright 2017 Rockchip Electronics Co., Ltd
+
+arch/arm/kernel/head.S
+/* SPDX-License-Identifier: GPL-2.0-only */
+ *  Copyright (C) 1994-2002 Russell King
+ *  Copyright (c) 2003 ARM Limited
+
+arch/arm/kernel/setup.c
+// SPDX-License-Identifier: GPL-2.0-only
+ *  Copyright (C) 1995-2001 Russell King
+
+arch/arm/mach-rockchip/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+arch/arm/mm/mmu.c
+// SPDX-License-Identifier: GPL-2.0-only
+ *  Copyright (C) 1995-2005 Russell King
+
+crypto/testmgr.c
+// SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright (c) 2002 James Morris <jmorris@intercode.com.au>
+ * Copyright (c) 2002 Jean-Francois Dive <jef@linuxbe.org>
+ * Copyright (c) 2007 Nokia Siemens Networks
+ * Copyright (c) 2008 Herbert Xu <herbert@gondor.apana.org.au>
+ * Copyright (c) 2019 Google LLC
+ *    Copyright (c) 2010, Intel Corporation.
+
+drivers/char/hw_random/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/char/hw_random/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/char/hw_random/rk3128-rng.c
+// SPDX-License-Identifier: GPL-2.0-only
+
+drivers/clk/rockchip/clk-rk3128.c
+// SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright (c) 2017 Rockchip Electronics Co. Ltd.
+ * Author: Elaine <zhangqing@rock-chips.com>
+ */
+
+#include <linux/clk-provider.h>
+
+drivers/cpufreq/cpufreq-dt-platdev.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2016 Linaro.
+
+drivers/cpufreq/cpufreq-dt.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2012 Freescale Semiconductor, Inc.
+ * Copyright (C) 2014 Linaro.
+
+drivers/crypto/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/crypto/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/crypto/rockchip/Makefile
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/crypto/rockchip/rk3128-crypto.c
+// SPDX-License-Identifier: GPL-2.0-only
+
+drivers/gpu/drm/drm_drv.c
+ * Copyright 2001 VA Linux Systems, Inc., Sunnyvale, California.
+ * The above copyright notice and this permission notice (including the next
+
+drivers/gpu/drm/drm_file.c
+ * Copyright 1999 Precision Insight, Inc., Cedar Park, Texas.
+ * Copyright 2000 VA Linux Systems, Inc., Sunnyvale, California.
+ * The above copyright notice and this permission notice (including the next
+
+drivers/gpu/drm/lima/lima_device.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2018-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_drv.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_drv.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_gem.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_gem.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_gp.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_l2_cache.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_l2_cache.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_mmu.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_mmu.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_pp.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_sched.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_sched.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_trace.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2020 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_vm.c
+// SPDX-License-Identifier: GPL-2.0 OR MIT
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/lima/lima_vm.h
+/* SPDX-License-Identifier: GPL-2.0 OR MIT */
+/* Copyright 2017-2019 Qiang Yu <yuq825@gmail.com> */
+
+drivers/gpu/drm/panel/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/gpu/drm/panel/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/gpu/drm/panel/panel-rk3128-reference.c
+// SPDX-License-Identifier: GPL-2.0+
+ * Copyright (C) 2016 Laurent Pinchart
+ * Copyright (C) 2016 Renesas Electronics Corporation
+
+drivers/gpu/drm/rockchip/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/gpu/drm/rockchip/rockchip_drm_vop.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Author:Mark Yao <mark.yao@rock-chips.com>
+ */
+
+#include <linux/clk.h>
+
+drivers/gpu/drm/rockchip/rockchip_drm_vop.h
+/* SPDX-License-Identifier: GPL-2.0-only */
+ * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Author:Mark Yao <mark.yao@rock-chips.com>
+ */
+
+#ifndef _ROCKCHIP_DRM_VOP_H
+
+drivers/gpu/drm/rockchip/rockchip_lvds.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Author:
+ *      Mark Yao <mark.yao@rock-chips.com>
+ *      Sandy Huang <hjc@rock-chips.com>
+ */
+
+drivers/gpu/drm/rockchip/rockchip_lvds.h
+/* SPDX-License-Identifier: GPL-2.0-only */
+ * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Author:
+ *      Sandy Huang <hjc@rock-chips.com>
+ *      Mark Yao <mark.yao@rock-chips.com>
+ */
+
+drivers/gpu/drm/rockchip/rockchip_vop_reg.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) Rockchip Electronics Co., Ltd.
+ * Author:Mark Yao <mark.yao@rock-chips.com>
+ */
+
+#include <linux/component.h>
+
+drivers/input/touchscreen/silead.c
+// SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright (C) 2014-2015, Intel Corporation
+ *  Copyright (C) 2010-2015, Shanghai Sileadinc Co.Ltd
+
+drivers/iommu/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/iommu/rockchip-iommu.c
+// SPDX-License-Identifier: GPL-2.0-only
+
+drivers/media/platform/rockchip/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/media/platform/rockchip/Makefile
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/media/platform/rockchip/rga/Makefile
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/media/platform/rockchip/rkvdec/Kconfig
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/media/platform/rockchip/rkvdec/rkvdec-hevc.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2023 Collabora, Ltd.
+ * Copyright (C) 2019 Collabora, Ltd.
+ * Copyright (C) 2016 Rockchip Electronics Co., Ltd.
+
+drivers/media/platform/rockchip/rkvdec/rkvdec.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2019 Collabora, Ltd.
+ * Copyright (C) 2011 Samsung Electronics Co., Ltd.
+
+drivers/media/platform/rockchip/rkvdec/rkvdec.h
+/* SPDX-License-Identifier: GPL-2.0 */
+ * Copyright (C) 2019 Collabora, Ltd.
+ * Copyright (C) 2011 Samsung Electronics Co., Ltd.
+
+drivers/media/platform/verisilicon/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/media/platform/verisilicon/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/media/platform/verisilicon/hantro.h
+/* SPDX-License-Identifier: GPL-2.0 */
+ * Copyright 2018 Google LLC.
+ * Copyright (C) 2011 Samsung Electronics Co., Ltd.
+
+drivers/media/platform/verisilicon/hantro_drv.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2018 Collabora, Ltd.
+ * Copyright 2018 Google LLC.
+ * Copyright (C) 2011 Samsung Electronics Co., Ltd.
+
+drivers/media/platform/verisilicon/hantro_g1.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2018 Rockchip Electronics Co., Ltd.
+ * Copyright (C) 2019 Pengutronix, Philipp Zabel <kernel@pengutronix.de>
+ * Copyright (C) 2021 Collabora Ltd, Emil Velikov <emil.velikov@collabora.com>
+
+drivers/media/platform/verisilicon/hantro_g1_regs.h
+/* SPDX-License-Identifier: GPL-2.0 */
+ * Copyright 2018 Google LLC.
+
+drivers/media/platform/verisilicon/hantro_h1_h264_enc.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2018 Rockchip Electronics Co., Ltd.
+
+drivers/media/platform/verisilicon/hantro_h1_h264_stream.h
+/* SPDX-License-Identifier: GPL-2.0 */
+
+drivers/media/platform/verisilicon/hantro_h1_vp8_enc.c
+// SPDX-License-Identifier: GPL-2.0
+
+drivers/media/platform/verisilicon/hantro_h1_vp8_tables.h
+/* SPDX-License-Identifier: BSD-3-Clause */
+ * Copyright (c) 2010, The WebM Project authors. All rights reserved.
+ *   * Redistributions of source code must retain the above copyright
+ *   * Redistributions in binary form must reproduce the above copyright
+
+drivers/media/platform/verisilicon/hantro_hw.h
+/* SPDX-License-Identifier: GPL-2.0 */
+ * Copyright 2018 Google LLC.
+
+drivers/media/platform/verisilicon/hantro_postproc.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2019 Collabora, Ltd.
+
+drivers/media/platform/verisilicon/hantro_v4l2.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2018 Collabora, Ltd.
+ * Copyright (C) 2018 Rockchip Electronics Co., Ltd.
+ * Copyright 2018 Google LLC.
+ * Copyright (C) 2010-2011 Samsung Electronics Co., Ltd.
+
+drivers/media/platform/verisilicon/rockchip_vpu_hw.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2018 Rockchip Electronics Co., Ltd.
+
+drivers/media/rc/keymaps/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/media/rc/keymaps/rc-rk3128-reference.c
+// SPDX-License-Identifier: GPL-2.0+
+
+drivers/media/v4l2-core/v4l2-mem2mem.c
+// SPDX-License-Identifier: GPL-2.0-or-later
+ * Copyright (c) 2009-2010 Samsung Electronics Co., Ltd.
+
+drivers/mmc/core/mmc.c
+// SPDX-License-Identifier: GPL-2.0-only
+ *  Copyright (C) 2003-2004 Russell King, All Rights Reserved.
+ *  Copyright (C) 2005-2007 Pierre Ossman, All Rights Reserved.
+ *  MMCv4 support Copyright (C) 2006 Philip Langdale, All Rights Reserved.
+
+drivers/phy/rockchip/phy-rockchip-inno-dsidphy.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (c) 2018 Rockchip Electronics Co. Ltd.
+ * Author: Wyon Bi <bivvy.bi@rock-chips.com>
+ */
+
+#include <linux/bits.h>
+
+drivers/pmdomain/rockchip/pm-domains.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (c) 2015 Rockchip Electronics Co., Ltd.
+
+drivers/power/reset/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/power/reset/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/power/reset/halt-poweroff.c
+// SPDX-License-Identifier: GPL-2.0-only
+
+drivers/soc/rockchip/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/soc/rockchip/Makefile
+# SPDX-License-Identifier: GPL-2.0-only
+
+drivers/soc/rockchip/grf.c
+// SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (c) 2016 Heiko Stuebner <heiko@sntech.de>
+
+drivers/soc/rockchip/rk3128-dmc.c
+// SPDX-License-Identifier: GPL-2.0
+
+drivers/soc/rockchip/vcodec-combo.c
+// SPDX-License-Identifier: GPL-2.0
+
+drivers/tty/serial/Kconfig
+# SPDX-License-Identifier: GPL-2.0
+
+drivers/tty/serial/Makefile
+# SPDX-License-Identifier: GPL-2.0
+
+include/soc/rockchip/rockchip_vcodec_combo.h
+/* SPDX-License-Identifier: GPL-2.0 */
+
+kernel/dma/direct.c
+// SPDX-License-Identifier: GPL-2.0
+ * Copyright (C) 2018-2020 Christoph Hellwig.
+
+sound/soc/codecs/Kconfig
+# SPDX-License-Identifier: GPL-2.0-only
+
+sound/soc/codecs/Makefile
+# SPDX-License-Identifier: GPL-2.0

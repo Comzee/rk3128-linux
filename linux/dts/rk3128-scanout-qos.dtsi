@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0+
+/*
+ * The shipped Android DT gives the deadline-driven LCDC port priority 3/3.
+ * Keep GPU/decoder policy, clocks and rails unchanged (#623).
+ */
+&qos_lcdc {
+	rockchip,priority = <3 3>;
+};
